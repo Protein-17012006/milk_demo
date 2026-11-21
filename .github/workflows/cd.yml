@@ -50,6 +50,10 @@ jobs:
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
+          if ! aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::ECR repository $ECR_REPOSITORY does not exist: the platform is not deployed. Run Actions -> Infrastructure first, then re-run this workflow."
+            exit 1
+          fi
           if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids "imageTag=$TAG" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Image $ECR_REPOSITORY:$TAG is already in ECR; skipping the build." | tee -a "$GITHUB_STEP_SUMMARY"

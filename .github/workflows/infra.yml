@@ -67,6 +67,25 @@ jobs:
         run: |
           source scripts/ci/lib.sh
           [ -n "$ALERT_EMAIL" ] || warn "repo variable ALERT_EMAIL is empty: alarms go to SNS without an email subscription"
+          # An account that has never used ECS has no ECS service-linked role, and CreateCluster
+          # fails without it ("Unable to assume the service linked role"). Create it once.
+          if out=$(aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com 2>&1); then
+            log "created the ECS service-linked role"
+            sleep 15 # IAM is eventually consistent
+          elif [[ "$out" == *"has been taken"* ]]; then
+            log "ECS service-linked role exists"
+          else
+            fail "could not create the ECS service-linked role: $out"
+          fi
+          # A failed first create leaves the stack in ROLLBACK_COMPLETE, which cannot be updated.
+          status=$(stack_status "$STACK")
+          if [ "$status" = ROLLBACK_COMPLETE ]; then
+            log "$STACK is left over from a failed first deployment; deleting it"
+            aws cloudformation delete-stack --stack-name "$STACK"
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK"
+          elif [[ "$status" == *_IN_PROGRESS ]]; then
+            fail "$STACK is busy ($status); run the workflow again when it has finished"
+          fi
           if ! aws cloudformation deploy --stack-name "$STACK" --template-file infra/platform.yml \
             --no-fail-on-empty-changeset --tags project=milk \
             --parameter-overrides "AlertEmail=$ALERT_EMAIL"; then
