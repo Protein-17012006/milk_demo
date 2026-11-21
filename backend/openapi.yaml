@@ -1,0 +1,218 @@
+openapi: 3.1.0
+info:
+  title: Project A — Shelf Analytics Backend API (NHAT-P01)
+  version: 1.0.0
+  description: >-
+    Serverless REST API (Platform B: AWS WAF + API Gateway REST API + Lambda Python 3.12 +
+    Cognito with MFA + DynamoDB + S3/Glue/Athena) in ap-southeast-1 (Singapore).
+servers:
+  - url: https://{apiId}.execute-api.ap-southeast-1.amazonaws.com/v1
+    variables:
+      apiId:
+        default: example
+components:
+  securitySchemes:
+    CognitoBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Cognito ID Token issued after login + MFA. RBAC checked via cognito:groups.
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error: { type: string }
+        message: { type: string }
+    ProductSummary:
+      type: object
+      properties:
+        sku_id: { type: string, description: "Official product name on packaging (hoang 21/11)" }
+        sku_name: { type: string }
+        model_alias: { type: string }
+        brand: { type: ["string", "null"] }
+        category: { type: ["string", "null"] }
+        pack_type: { type: ["string", "null"] }
+        pack_size: { type: ["string", "null"] }
+        barcode: { type: ["string", "null"] }
+        in_sku_master: { type: boolean }
+        unit_count: { type: integer }
+        confidence_score: { type: number }
+        is_flagged: { type: boolean }
+        flag_reason: { type: string }
+        stores_available: { type: integer }
+        stores_total: { type: integer }
+        capture_id: { type: ["string", "null"] }
+        capture_timestamp: { type: ["string", "null"] }
+security:
+  - CognitoBearer: []
+paths:
+  /health:
+    get:
+      summary: Public service health check
+      security: []
+      responses:
+        "200":
+          description: Service healthy
+  /me:
+    get:
+      summary: Return authenticated Cognito profile and assigned groups
+      responses:
+        "200":
+          description: Current user identity & approval status
+  /products:
+    get:
+      summary: List monitored SKUs with smoothed latest stock and SKU Master metadata
+      description: Groups allowed — datagent, field_team, team_admin
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: category
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string, enum: [all, validated, flagged] }
+        - name: sort
+          in: query
+          schema: { type: string, enum: [stock_desc, stock_asc, confidence_desc, name_asc] }
+      responses:
+        "200":
+          description: Product catalog with unrecognized_units banner count
+  /products/{sku_id}:
+    get:
+      summary: Detailed product view + Validation Card (URL-encoded Vietnamese sku_id)
+      description: Groups allowed — datagent, field_team, team_admin
+      parameters:
+        - name: sku_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Product details, latest CV output, bounding boxes, presigned frame URL, audit state
+        "404":
+          description: SKU not found
+  /stores:
+    get:
+      summary: List stores from store_list with recent capture status
+      responses:
+        "200":
+          description: Store list and active_monitored count
+  /search:
+    get:
+      summary: Search products for Home Ctrl+K palette
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Top matching products
+  /review-queue:
+    get:
+      summary: List deduplicated flagged rows (is_flagged=TRUE) for Datagent review
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Flagged detections with bounding boxes and presigned blurred frame URLs
+  /corrections:
+    post:
+      summary: Submit reviewer correction or confirm AI prediction
+      description: Groups allowed — field_team, team_admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                store_id: { type: string }
+                queue_key: { type: string }
+                reading_id: { type: string }
+                capture_id: { type: string }
+                sku_id: { type: string }
+                action: { type: string, enum: [correct, confirm] }
+                corrected_sku_id: { type: string }
+                corrected_unit_count: { type: integer }
+                discrepancy_category: { type: string }
+                sku_match_correct: { type: boolean }
+                notes: { type: string }
+      responses:
+        "201":
+          description: Correction written to corrections table and review_queue updated
+        "403":
+          description: Forbidden for datagent or unassigned user
+  /uploads:
+    post:
+      summary: Generate short-lived S3 presigned PUT URL for SD card / phone / Human Audit files
+      description: Groups allowed — field_team, team_admin
+      responses:
+        "200":
+          description: Presigned upload URL and S3 key
+  /imports/sku-master:
+    post:
+      summary: Bulk import SKU Master records
+      description: Groups allowed — team_admin
+      responses:
+        "200":
+          description: Imported count
+  /imports/store-list:
+    post:
+      summary: Bulk import Store List records
+      description: Groups allowed — team_admin
+      responses:
+        "200":
+          description: Imported count
+  /exports/cv-output.csv:
+    get:
+      summary: Export 16-column Datagent CV Output CSV (UTF-8 BOM)
+      parameters:
+        - name: camera
+          in: query
+          schema: { type: string }
+        - name: date
+          in: query
+          schema: { type: string, description: "YYYY-MM-DD" }
+      responses:
+        "200":
+          description: text/csv with UTF-8 BOM
+  /exports/capture-log.csv:
+    get:
+      summary: Export 10-column Capture Log CSV (UTF-8 BOM)
+      parameters:
+        - name: camera
+          in: query
+          schema: { type: string }
+        - name: date
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: text/csv with UTF-8 BOM
+  /kpi:
+    get:
+      summary: Return Reports KPI summary (active stores, total smoothed units, avg processing_time_ms)
+      responses:
+        "200":
+          description: KPI metrics object
+  /reports/series:
+    get:
+      summary: Daily stock time series aggregated from persisted captures
+      responses:
+        "200":
+          description: Time series list
+  /settings:
+    get:
+      summary: Return Phase-1 approved settings (Cognito account, preferences, UTC+7, 0.70 threshold, stores)
+      responses:
+        "200":
+          description: Settings object
+    put:
+      summary: Update per-user date format and default landing page
+      responses:
+        "200":
+          description: Updated preferences

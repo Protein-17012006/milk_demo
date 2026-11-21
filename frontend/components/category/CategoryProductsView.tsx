@@ -16,6 +16,14 @@ import {
   X,
 } from "lucide-react";
 import { useSidebarSearch } from "@/components/layout/SidebarContext";
+import { useAuth } from "@/lib/auth";
+import {
+  createApiClient,
+  resolveProductThumbnail,
+  type ApiProduct,
+  type ApiReviewQueueItem,
+  type ApiStore,
+} from "@/lib/api";
 import {
   CATEGORY_FILTER_OPTIONS,
   CATEGORY_STORE_OPTIONS,
@@ -27,7 +35,6 @@ import {
   type SkuProduct,
   type SortOption,
   type StatusFilterOption,
-  type StoreFilterOption,
 } from "@/data/category-mock";
 import { ProductDetailsModal } from "./ProductDetailsModal";
 
@@ -114,17 +121,97 @@ function ToolbarDropdown<T extends string>({
 }
 
 function getConfidenceColor(confidence: number): string {
-  if (confidence >= 0.8) return "#1A932E";
-  if (confidence >= 0.6) return "#FFCC00";
+  if (confidence >= 0.7) return "#1A932E";
+  if (confidence >= 0.5) return "#FFCC00";
   return "#FF8D28";
+}
+
+function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
+  const catLower = (p.category || "Milk").toLowerCase();
+  const primaryCategory: SkuProduct["primaryCategory"] = catLower.includes(
+    "noodle"
+  )
+    ? "Noodles"
+    : catLower.includes("snack")
+      ? "Snack"
+      : "Milk";
+
+  const status: SkuProduct["status"] = p.is_flagged
+    ? p.confidence_score < 0.7
+      ? "Low Confidence"
+      : "Needs Review"
+    : "Validated";
+
+  return {
+    id: p.sku_id,
+    name: p.sku_name,
+    modelAlias: p.model_alias || p.sku_id,
+    thumbnail: resolveProductThumbnail(p.sku_name, p.brand),
+    categories: [p.category || "Milk", p.subcategory || p.brand || "SKU"].filter(
+      Boolean
+    ),
+    primaryCategory,
+    packType: p.pack_type || "Carton",
+    packSize: p.pack_size || "—",
+    skuCode: p.model_alias || p.sku_id,
+    barcode: p.barcode || "Pending SKU Master",
+    brandManufacturer: p.manufacturer || p.brand || "Unassigned",
+    categoryPath: [p.category || "Milk", p.subcategory]
+      .filter(Boolean)
+      .join(" / "),
+    onShelfStock: p.unit_count,
+    confidence: p.confidence_score,
+    storesAvailable: p.stores_available,
+    storesTotal: p.stores_total,
+    storeRegion: "DEMO-S01",
+    status,
+    cvOutput: {
+      reading_id: p.capture_id ? `RD-${p.capture_id}` : "—",
+      capture_id: p.capture_id || "—",
+      store_id: "DEMO-S01",
+      camera_id: "CAM-S01-A",
+      capture_timestamp: p.capture_timestamp || "—",
+      capture_source: "CCTV",
+      image_filename: p.capture_id ? `${p.capture_id}.jpg` : "—",
+      sku_id: p.sku_id,
+      sku_name: p.sku_name,
+      unit_count: p.unit_count,
+      confidence_score: p.confidence_score,
+      detection_method: "Visual",
+      bounding_box: [],
+      is_flagged: p.is_flagged,
+      flag_reason: p.is_flagged
+        ? p.flag_reason === "Unrecognized"
+          ? "Unrecognized"
+          : "Low Confidence"
+        : "",
+      processing_time_ms: p.processing_time_ms || 0,
+      image_key: "",
+      frame_w: 2560,
+      frame_h: 1440,
+      faces_blurred: 0,
+      pipeline: "long",
+    },
+    audit: {
+      accuracy: null,
+      expectedLabel: p.sku_id,
+      mismatchType: "None",
+      reviewedAt: null,
+    },
+  };
 }
 
 export function CategoryProductsView() {
   const { searchQuery: sidebarSearch } = useSidebarSearch();
+  const { isApproved, hasGroup, getIdToken } = useAuth();
 
+  const [products, setProducts] = useState<SkuProduct[]>(SKU_PRODUCTS);
+  const [liveMode, setLiveMode] = useState(false);
+  const [unrecognizedCount, setUnrecognizedCount] = useState<number>(12);
+  const [liveStores, setLiveStores] = useState<ApiStore[] | null>(null);
+  const [liveQueue, setLiveQueue] = useState<ApiReviewQueueItem[] | null>(null);
   const [localSearch, setLocalSearch] = useState("");
-  const [storeFilter, setStoreFilter] =
-    useState<StoreFilterOption>("All stores (30)");
+  const [storeFilter, setStoreFilter] = useState<string>("All stores (30)");
   const [categoryFilter, setCategoryFilter] =
     useState<CategoryFilterOption>("All");
   const [statusFilter, setStatusFilter] = useState<StatusFilterOption>("All");
@@ -144,6 +231,54 @@ export function CategoryProductsView() {
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   const rowMenuRef = useRef<HTMLDivElement>(null);
+
+  const loadLiveData = React.useCallback(async () => {
+    if (!isApproved) {
+      setLiveMode(false);
+      setLiveStores(null);
+      setLiveQueue(null);
+      setProducts(SKU_PRODUCTS);
+      setUnrecognizedCount(12);
+      setStoreFilter("All stores (30)");
+      return;
+    }
+    try {
+      const api = createApiClient(getIdToken);
+      const [prodRes, storeRes, queueRes] = await Promise.all([
+        api.getProducts(),
+        api.getStores(),
+        api.getReviewQueue(),
+      ]);
+      const mapped = prodRes.items.map(mapApiProductToSkuProduct);
+      setProducts(mapped);
+      setLiveStores(storeRes.items);
+      setLiveQueue(queueRes.items);
+      setUnrecognizedCount(prodRes.unrecognized_units);
+      setStoreFilter(`All stores (${storeRes.total})`);
+      setSelectedIds(new Set());
+      setLiveMode(true);
+    } catch {
+      // keep preview state on error
+    }
+  }, [isApproved, getIdToken]);
+
+  useEffect(() => {
+    void loadLiveData();
+  }, [loadLiveData]);
+
+  const storeDropdownOptions = useMemo(() => {
+    if (!liveStores) return CATEGORY_STORE_OPTIONS;
+    return [
+      `All stores (${liveStores.length})`,
+      ...liveStores.map((s) => `${s.store_id} — ${s.store_name}`),
+    ];
+  }, [liveStores]);
+
+  const categoryDropdownOptions = useMemo<CategoryFilterOption[]>(() => {
+    return liveMode
+      ? ["All", "Milk", "Snack", "Noodles"]
+      : CATEGORY_FILTER_OPTIONS;
+  }, [liveMode]);
 
   useEffect(() => {
     function handleOutside(e: MouseEvent) {
@@ -166,9 +301,10 @@ export function CategoryProductsView() {
   const filteredProducts = useMemo(() => {
     const q = (localSearch || sidebarSearch).trim().toLowerCase();
 
-    const list = SKU_PRODUCTS.filter((item) => {
+    const list = products.filter((item) => {
       if (
-        storeFilter !== "All stores (30)" &&
+        !storeFilter.startsWith("All stores") &&
+        !storeFilter.startsWith(item.storeRegion) &&
         item.storeRegion !== storeFilter
       ) {
         return false;
@@ -186,6 +322,7 @@ export function CategoryProductsView() {
         q &&
         !item.name.toLowerCase().includes(q) &&
         !item.skuCode.toLowerCase().includes(q) &&
+        !item.modelAlias.toLowerCase().includes(q) &&
         !item.barcode.toLowerCase().includes(q) &&
         !item.categories.some((c) => c.toLowerCase().includes(q))
       ) {
@@ -207,6 +344,7 @@ export function CategoryProductsView() {
       }
     });
   }, [
+    products,
     localSearch,
     sidebarSearch,
     storeFilter,
@@ -240,40 +378,178 @@ export function CategoryProductsView() {
     });
   };
 
-  const handleExportCsv = (rows: SkuProduct[] = filteredProducts) => {
+  const handleExportCsv = async (rows?: SkuProduct[]) => {
+    // When authenticated in live mode and exporting full table, download directly from AWS API
+    if (liveMode && !rows) {
+      try {
+        const api = createApiClient(getIdToken);
+        const csvText = await api.exportCvOutputCsv();
+        const blob = new Blob([csvText], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "cv-output.csv";
+        link.click();
+        URL.revokeObjectURL(url);
+        showToast("Downloaded live CV Output CSV (16 cols, UTF-8 BOM) from AWS");
+        return;
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : "Failed to export CSV from AWS"
+        );
+        return;
+      }
+    }
+    const targetRows = rows ?? filteredProducts;
+    // Exact 16-column Datagent CV Output format with UTF-8 BOM for Vietnamese Excel support
     const header = [
-      "Product",
-      "Categories",
-      "Pack",
-      "SKU Code",
-      "Barcode",
-      "On-Shelf Stock",
-      "Confidence",
-      "Avail In Stores",
-      "Status",
+      "reading_id",
+      "capture_id",
+      "store_id",
+      "camera_id",
+      "capture_timestamp",
+      "capture_source",
+      "image_filename",
+      "sku_id",
+      "sku_name",
+      "unit_count",
+      "confidence_score",
+      "detection_method",
+      "bounding_box",
+      "is_flagged",
+      "flag_reason",
+      "processing_time_ms",
     ];
-    const body = rows.map((p) => [
-      p.name,
-      p.categories.join(" / "),
-      `${p.packType} ${p.packSize}`,
-      p.skuCode,
-      p.barcode,
-      `${p.onShelfStock} units`,
-      `${p.confidence.toFixed(2)}%`,
-      `${p.storesAvailable}/${p.storesTotal}`,
-      p.status,
-    ]);
-    const csv = [header, ...body]
-      .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))
-      .join("\n");
+    const body = targetRows.map((p) => {
+      const cv = p.cvOutput;
+      return [
+        cv.reading_id,
+        cv.capture_id,
+        cv.store_id,
+        cv.camera_id,
+        cv.capture_timestamp,
+        cv.capture_source,
+        cv.image_filename,
+        cv.sku_id ?? "",
+        cv.sku_name ?? "",
+        cv.unit_count,
+        cv.confidence_score.toFixed(2),
+        cv.detection_method,
+        JSON.stringify(cv.bounding_box),
+        cv.is_flagged ? "TRUE" : "FALSE",
+        cv.flag_reason,
+        cv.processing_time_ms,
+      ];
+    });
+    const csv =
+      "\uFEFF" +
+      [header, ...body]
+        .map((r) =>
+          r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")
+        )
+        .join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "products-cv-output.csv";
+    link.download = "cv-output.csv";
     link.click();
     URL.revokeObjectURL(url);
-    showToast(`Exported ${rows.length} SKU rows to CSV`);
+    showToast(
+      `Exported ${targetRows.length} CV Output rows (16 cols, UTF-8 BOM)`
+    );
+  };
+
+  const handleOpenProductDetails = async (item: SkuProduct) => {
+    setViewingProduct(item);
+    if (!liveMode) return;
+    try {
+      const api = createApiClient(getIdToken);
+      const detail = await api.getProductDetail(item.id);
+      setViewingProduct((curr) => {
+        if (!curr || curr.id !== item.id) return curr;
+        return {
+          ...curr,
+          cvOutput: {
+            ...curr.cvOutput,
+            reading_id: detail.cv_output.reading_id || curr.cvOutput.reading_id,
+            capture_id: detail.cv_output.capture_id || curr.cvOutput.capture_id,
+            store_id: detail.cv_output.store_id || curr.cvOutput.store_id,
+            camera_id: detail.cv_output.camera_id || curr.cvOutput.camera_id,
+            capture_timestamp:
+              detail.cv_output.capture_timestamp ||
+              curr.cvOutput.capture_timestamp,
+            image_filename:
+              detail.cv_output.image_filename || curr.cvOutput.image_filename,
+            image_key: detail.cv_output.image_key || curr.cvOutput.image_key,
+            bounding_box: detail.cv_output.bounding_box || [],
+            faces_blurred: detail.cv_output.faces_blurred || 0,
+          },
+          audit: {
+            accuracy:
+              detail.validation.accuracy !== null
+                ? `${detail.validation.accuracy}%`
+                : null,
+            expectedLabel: detail.validation.expected_label || curr.id,
+            mismatchType: detail.validation.mismatch_type || "None",
+            reviewedAt: detail.validation.reviewed_at,
+          },
+        };
+      });
+    } catch {
+      // keep summary modal open
+    }
+  };
+
+  const handleSaveAudit = async (
+    productId: string,
+    payload: { expectedLabel: string; mismatchType: string }
+  ) => {
+    if (liveMode) {
+      if (!hasGroup("field_team", "team_admin")) {
+        showToast("Only field_team or team_admin can submit corrections.");
+        return;
+      }
+      try {
+        const api = createApiClient(getIdToken);
+        const prod = products.find((p) => p.id === productId);
+        await api.submitCorrection({
+          store_id: prod?.cvOutput.store_id || "DEMO-S01",
+          reading_id: prod?.cvOutput.reading_id,
+          capture_id: prod?.cvOutput.capture_id,
+          sku_id: productId,
+          corrected_sku_id: payload.expectedLabel,
+          correction_type: payload.mismatchType,
+          action: "correct",
+        });
+        showToast("Saved correction to AWS DynamoDB (corrections)");
+        void loadLiveData();
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : "Failed to save correction"
+        );
+        return;
+      }
+    }
+    setProducts((prev) =>
+      prev.map((item) =>
+        item.id === productId
+          ? {
+              ...item,
+              status: "Validated",
+              audit: {
+                ...item.audit,
+                expectedLabel: payload.expectedLabel,
+                mismatchType: payload.mismatchType,
+                reviewedAt: new Date().toISOString(),
+              },
+            }
+          : item
+      )
+    );
+    if (!liveMode) {
+      showToast("Saved correction to audit state");
+    }
   };
 
   const toggleStockSort = () => {
@@ -294,8 +570,9 @@ export function CategoryProductsView() {
               Products
             </h1>
             <p className="mt-[4px] text-[12px] font-normal text-[#6B7280]">
-              View recent products in stores &middot; last edited 08 Oct 2026,
-              02:14 (UTC+7)
+              {liveMode
+                ? `Live AWS Singapore backend · ${products.length} SKUs synced (UTC+7)`
+                : "View recent products in stores · sample preview mode (UTC+7)"}
             </p>
           </div>
 
@@ -352,13 +629,13 @@ export function CategoryProductsView() {
             <ToolbarDropdown
               label="Store:"
               value={storeFilter}
-              options={CATEGORY_STORE_OPTIONS}
+              options={storeDropdownOptions}
               onChange={setStoreFilter}
             />
             <ToolbarDropdown
               label="Category:"
               value={categoryFilter}
-              options={CATEGORY_FILTER_OPTIONS}
+              options={categoryDropdownOptions}
               onChange={setCategoryFilter}
             />
             <ToolbarDropdown
@@ -384,8 +661,12 @@ export function CategoryProductsView() {
               strokeWidth={1.9}
             />
             <p className="text-[13px] font-normal text-[#7C2D12]">
-              12 products were seen on shelves last night but matched no SKU
-              (sku_id = NULL), so they are not in this list.
+              {unrecognizedCount}{" "}
+              {unrecognizedCount === 1
+                ? "unrecognized unit was"
+                : "unrecognized units were"}{" "}
+              seen on shelves in recent captures but matched no SKU (sku_id =
+              NULL), so they are excluded from this list.
             </p>
           </div>
           <button
@@ -514,7 +795,7 @@ export function CategoryProductsView() {
                         </div>
                         <button
                           type="button"
-                          onClick={() => setViewingProduct(item)}
+                          onClick={() => void handleOpenProductDetails(item)}
                           className="line-clamp-2 text-left text-[13px] font-semibold leading-[18px] text-[#111827] hover:text-[#EE730A] transition-colors cursor-pointer"
                         >
                           {item.name}
@@ -568,15 +849,20 @@ export function CategoryProductsView() {
                         </span>
                       </div>
 
-                      {/* Confidence + Progress Bar */}
-                      <div className="flex w-[140px] shrink-0 flex-col gap-[6px] pr-[12px]">
-                        <div className="flex items-baseline gap-[2px]">
+                      {/* Confidence + Progress Bar (fixed format: 93% instead of 0.93 %) */}
+                      <div
+                        className="flex w-[140px] shrink-0 flex-col gap-[6px] pr-[12px]"
+                        title={`confidence_score: ${item.confidence.toFixed(2)} · is_flagged: ${item.cvOutput.is_flagged ? "TRUE" : "FALSE"}`}
+                      >
+                        <div className="flex items-center gap-[6px]">
                           <span className="text-[13px] font-semibold leading-none text-[#111827]">
-                            {item.confidence.toFixed(2)}
+                            {Math.round(item.confidence * 100)}%
                           </span>
-                          <span className="text-[12px] font-normal leading-none text-[#6B7280]">
-                            %
-                          </span>
+                          {item.cvOutput.is_flagged && (
+                            <span className="rounded bg-[#FFF7ED] px-1.5 py-[1px] text-[10px] font-semibold text-[#C2560A]">
+                              Flagged
+                            </span>
+                          )}
                         </div>
                         <div className="h-[4px] w-[72px] overflow-hidden rounded-[2px] bg-[#EEF0F3]">
                           <div
@@ -603,7 +889,7 @@ export function CategoryProductsView() {
                       <div className="relative flex w-[90px] shrink-0 items-center justify-end gap-[6px]">
                         <button
                           type="button"
-                          onClick={() => setViewingProduct(item)}
+                          onClick={() => void handleOpenProductDetails(item)}
                           className="flex h-[28px] items-center rounded-[6px] border border-[#E5E7EB] bg-white px-[12px] text-[12px] font-medium text-[#111827] hover:bg-[#F9FAFB] hover:border-[#D1D5DB] transition-colors cursor-pointer"
                         >
                           View
@@ -669,30 +955,32 @@ export function CategoryProductsView() {
         </section>
       </div>
 
-      {/* Product Details / Validation Card Modal (Figma #162:1088) */}
+      {/* Product Details / Validation Card Modal (aligned with CV Output 16-col spec) */}
       <ProductDetailsModal
+        key={viewingProduct?.id ?? "closed"}
         product={viewingProduct}
         onClose={() => setViewingProduct(null)}
+        onSaveAudit={handleSaveAudit}
       />
 
-      {/* Unmatched Review Queue Modal */}
+      {/* Unmatched / Flagged Review Queue Modal */}
       {reviewQueueOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4 backdrop-blur-[1px]"
           onClick={() => setReviewQueueOpen(false)}
         >
           <div
-            className="w-full max-w-[620px] overflow-hidden rounded-[14px] border border-[#E5E7EB] bg-white shadow-[0_10px_28px_rgba(0,0,0,0.14)]"
+            className="w-full max-w-[660px] overflow-hidden rounded-[14px] border border-[#E5E7EB] bg-white shadow-[0_10px_28px_rgba(0,0,0,0.14)]"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-[#EFF0F6] px-5 py-4">
               <div>
                 <h3 className="text-[16px] font-semibold text-[#111827]">
-                  Unmatched Products Review Queue
+                  Flagged &amp; Unmatched Review Queue
                 </h3>
                 <p className="text-[12px] text-[#6B7280]">
-                  12 detections with sku_id = NULL from last night&rsquo;s shelf
-                  inference
+                  Rows with is_flagged = TRUE (confidence &lt; 0.70 or sku_id =
+                  NULL) ready for Datagent review
                 </p>
               </div>
               <button
@@ -704,36 +992,130 @@ export function CategoryProductsView() {
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="divide-y divide-[#EFF0F6] px-5 py-2">
-              {UNMATCHED_REVIEW_QUEUE.map((det) => (
-                <div
-                  key={det.id}
-                  className="flex items-center justify-between gap-4 py-3"
-                >
-                  <div className="min-w-0">
-                    <p className="truncate text-[13px] font-semibold text-[#111827]">
-                      {det.detectedText}
-                    </p>
-                    <p className="mt-0.5 text-[12px] text-[#6B7280]">
-                      {det.storeName} &middot; {det.detectedAt}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2.5">
-                    <span className="rounded-full bg-[#FFF7ED] px-2.5 py-0.5 text-[11px] font-medium text-[#C2560A]">
-                      {Math.round(det.confidence * 100)}% match
-                    </span>
+            <div className="max-h-[60vh] overflow-y-auto divide-y divide-[#EFF0F6] px-5 py-2">
+              {liveMode && liveQueue ? (
+                liveQueue.length === 0 ? (
+                  <p className="py-6 text-center text-[13px] text-[#6B7280]">
+                    No flagged rows waiting in the AWS review queue.
+                  </p>
+                ) : (
+                  liveQueue.map((det) => (
+                    <div
+                      key={det.queue_key}
+                      className="flex flex-wrap items-center justify-between gap-4 py-3"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="rounded-full bg-[#FFF7ED] px-2 py-0.5 text-[10.5px] font-semibold text-[#C2560A]">
+                            {det.flag_reason}
+                          </span>
+                          <span className="rounded-full bg-[#F3F4F6] px-2 py-0.5 text-[10.5px] font-medium text-[#374151]">
+                            {det.status}
+                          </span>
+                          <span className="font-mono text-[11.5px] text-[#374151]">
+                            {det.reading_id}
+                          </span>
+                        </div>
+                        <p className="mt-1 truncate text-[12.5px] font-medium text-[#111827]">
+                          {det.sku_name || det.sku_id} ({det.unit_count}{" "}
+                          {det.unit_count === 1 ? "unit" : "units"})
+                        </p>
+                        <p className="mt-0.5 text-[11.5px] text-[#6B7280]">
+                          {det.store_id} &middot; {det.camera_id} &middot; conf{" "}
+                          {Number(det.confidence_score).toFixed(2)}
+                          {det.frame_presigned_url && (
+                            <>
+                              {" "}
+                              &middot;{" "}
+                              <a
+                                href={det.frame_presigned_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="font-medium text-[#0051C3] hover:underline"
+                              >
+                                View blurred frame (15m URL)
+                              </a>
+                            </>
+                          )}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!hasGroup("field_team", "team_admin")) {
+                            showToast(
+                              "Only field_team or team_admin can confirm review items."
+                            );
+                            return;
+                          }
+                          try {
+                            const api = createApiClient(getIdToken);
+                            await api.submitCorrection({
+                              store_id: det.store_id,
+                              queue_key: det.queue_key,
+                              reading_id: det.reading_id,
+                              capture_id: det.capture_id,
+                              sku_id: det.sku_id,
+                              action: "confirm",
+                            });
+                            showToast(`Confirmed ${det.reading_id} (Đã xác nhận)`);
+                            void loadLiveData();
+                          } catch (err) {
+                            showToast(
+                              err instanceof Error
+                                ? err.message
+                                : "Action failed"
+                            );
+                          }
+                        }}
+                        className="shrink-0 rounded-[6px] border border-[#E5E7EB] px-2.5 py-1 text-[12px] font-medium text-[#111827] hover:bg-[#F9FAFB] cursor-pointer"
+                      >
+                        Confirm AI
+                      </button>
+                    </div>
+                  ))
+                )
+              ) : (
+                UNMATCHED_REVIEW_QUEUE.map((det) => (
+                  <div
+                    key={det.id}
+                    className="flex flex-wrap items-center justify-between gap-4 py-3"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-[#FFF7ED] px-2 py-0.5 text-[10.5px] font-semibold text-[#C2560A]">
+                          {det.flag_reason}
+                        </span>
+                        <span className="font-mono text-[11.5px] text-[#374151]">
+                          {det.reading_id}
+                        </span>
+                      </div>
+                      <p className="mt-1 truncate text-[12.5px] font-medium text-[#111827]">
+                        Suggested: {det.suggestedSku} ({det.unit_count}{" "}
+                        {det.unit_count === 1 ? "unit" : "units"})
+                      </p>
+                      <p className="mt-0.5 text-[11.5px] text-[#6B7280]">
+                        {det.storeName} &middot; {det.camera_id} &middot; conf{" "}
+                        {det.confidence_score.toFixed(2)} &middot; box{" "}
+                        <span className="font-mono">
+                          {JSON.stringify(det.bounding_box[0])}
+                        </span>
+                      </p>
+                    </div>
                     <button
                       type="button"
                       onClick={() => {
-                        showToast(`Mapped to ${det.suggestedSku}`);
+                        showToast(
+                          `Mapped ${det.reading_id} → ${det.suggestedSku}`
+                        );
                       }}
-                      className="rounded-[6px] border border-[#E5E7EB] px-2.5 py-1 text-[12px] font-medium text-[#111827] hover:bg-[#F9FAFB] cursor-pointer"
+                      className="shrink-0 rounded-[6px] border border-[#E5E7EB] px-2.5 py-1 text-[12px] font-medium text-[#111827] hover:bg-[#F9FAFB] cursor-pointer"
                     >
                       Map SKU
                     </button>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
             <div className="flex justify-end border-t border-[#EFF0F6] px-5 py-3">
               <button
@@ -785,13 +1167,56 @@ export function CategoryProductsView() {
               </span>
               <input
                 type="file"
-                accept=".csv,.xlsx"
+                accept=".json,.csv"
                 className="hidden"
-                onChange={(e) => {
+                onChange={async (e) => {
                   const file = e.target.files?.[0];
-                  if (file) {
+                  if (!file) return;
+                  if (!liveMode) {
                     setImportModalOpen(false);
                     showToast(`Imported "${file.name}" (preview mode)`);
+                    return;
+                  }
+                  if (!hasGroup("team_admin")) {
+                    setImportModalOpen(false);
+                    showToast("Only team_admin can import SKU Master.");
+                    return;
+                  }
+                  try {
+                    const text = await file.text();
+                    let items: Record<string, unknown>[] = [];
+                    if (file.name.toLowerCase().endsWith(".json")) {
+                      const parsed = JSON.parse(text);
+                      items = Array.isArray(parsed)
+                        ? parsed
+                        : parsed.items || [];
+                    } else {
+                      const lines = text.trim().split(/\r?\n/);
+                      const headers = lines[0]
+                        .replace(/^\uFEFF/, "")
+                        .split(",")
+                        .map((h) => h.trim().replace(/^"|"$/g, ""));
+                      items = lines.slice(1).map((line) => {
+                        const vals = line
+                          .split(",")
+                          .map((v) => v.trim().replace(/^"|"$/g, ""));
+                        const obj: Record<string, unknown> = {};
+                        headers.forEach((h, idx) => {
+                          if (vals[idx] !== "") obj[h] = vals[idx];
+                        });
+                        return obj;
+                      });
+                    }
+                    const api = createApiClient(getIdToken);
+                    await api.importSkuMaster(items);
+                    setImportModalOpen(false);
+                    showToast(`Imported ${items.length} SKUs into AWS sku_master`);
+                    void loadLiveData();
+                  } catch (err) {
+                    setImportModalOpen(false);
+                    showToast(
+                      err instanceof Error ? err.message : "SKU import failed"
+                    );
                   }
                 }}
               />
