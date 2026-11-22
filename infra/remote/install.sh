@@ -101,6 +101,8 @@ if url:
         f"    source: {quoted}\n"
         "    sourceOnDemand: yes\n"
         "    rtspTransport: tcp\n"
+        # pathDefaults sets an SRT publish passphrase; MediaMTX refuses it on a pulled path
+        "    srtPublishPassphrase: ''\n"
     )
 open(sys.argv[2], "w", encoding="utf-8").write(text)
 PY
