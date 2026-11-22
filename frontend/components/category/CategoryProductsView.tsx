@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import Image from "next/image";
 import {
   AlertTriangle,
   ArrowDown,
@@ -10,7 +9,6 @@ import {
   Check,
   ChevronDown,
   Download,
-  MoreHorizontal,
   Search,
   Upload,
   X,
@@ -37,6 +35,9 @@ import {
   type StatusFilterOption,
 } from "@/lib/products-ui";
 import { ProductDetailsModal } from "./ProductDetailsModal";
+import { ProductRow } from "./ProductRow";
+import { ProductGroupRow } from "./ProductGroupRow";
+import { groupProducts, groupSelection, type ProductGroup } from "@/lib/product-groups";
 
 interface ToolbarDropdownProps<T extends string> {
   label: string;
@@ -118,12 +119,6 @@ function ToolbarDropdown<T extends string>({
       )}
     </div>
   );
-}
-
-function getConfidenceColor(confidence: number): string {
-  if (confidence >= 0.7) return "#1A932E";
-  if (confidence >= 0.5) return "#FFCC00";
-  return "#FF8D28";
 }
 
 function statusOf(isFlagged: boolean, confidence: number): SkuProduct["status"] {
@@ -225,6 +220,8 @@ export function CategoryProductsView() {
   );
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  // Product-line groups start collapsed; keys are stable, so the 15 s refresh keeps them as they are.
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(() => new Set());
 
   const [viewingProduct, setViewingProduct] = useState<SkuProduct | null>(null);
   const [reviewQueueOpen, setReviewQueueOpen] = useState(false);
@@ -369,6 +366,40 @@ export function CategoryProductsView() {
     statusFilter,
     sortBy,
   ]);
+
+  const searchText = (localSearch || sidebarSearch).trim();
+  const groups = useMemo(
+    () => groupProducts(filteredProducts, sortBy),
+    [filteredProducts, sortBy]
+  );
+  const isExpanded = (key: string) => searchText !== "" || expandedKeys.has(key);
+  const allGroupsExpanded = groups.length > 0 && groups.every((g) => expandedKeys.has(g.key));
+
+  const toggleAllGroups = () => {
+    setExpandedKeys(allGroupsExpanded ? new Set() : new Set(groups.map((g) => g.key)));
+  };
+
+  const toggleGroup = (key: string) => {
+    setExpandedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  // Selects or clears the group's visible variants (a search narrows what the group holds).
+  const toggleGroupSelection = (group: ProductGroup) => {
+    const clear = groupSelection(group, selectedIds) === "all";
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const v of group.variants) {
+        if (clear) next.delete(v.id);
+        else next.add(v.id);
+      }
+      return next;
+    });
+  };
 
   const allVisibleSelected =
     filteredProducts.length > 0 &&
@@ -731,7 +762,18 @@ export function CategoryProductsView() {
                   )}
                 </button>
               </div>
-              <div className="flex-[2.4] min-w-[240px] pr-[12px]">PRODUCT</div>
+              <div className="flex flex-[2.4] min-w-[240px] items-center gap-[10px] pr-[12px]">
+                <span>PRODUCT</span>
+                {groups.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={toggleAllGroups}
+                    className="rounded-[5px] px-[6px] py-[2px] text-[11px] font-medium normal-case tracking-normal text-[#0051C3] hover:bg-[#EEF4FF] cursor-pointer"
+                  >
+                    {allGroupsExpanded ? "Collapse all" : "Expand all"}
+                  </button>
+                )}
+              </div>
               <div className="w-[126px] shrink-0 pr-[12px]">CATEGORY</div>
               <div className="w-[82px] shrink-0 pr-[12px]">PACK</div>
               <div className="w-[152px] shrink-0 pr-[12px]">SKU CODE</div>
@@ -773,213 +815,38 @@ export function CategoryProductsView() {
                     : "Sign in with an approved account to load live products."}
                 </div>
               ) : (
-                filteredProducts.map((item) => {
-                  const isSelected = selectedIds.has(item.id);
-                  const barWidthPct = Math.min(
-                    100,
-                    Math.max(12, Math.round(item.confidence * 100))
-                  );
-                  const barColor = getConfidenceColor(item.confidence);
-
-                  return (
-                    <div
-                      key={item.id}
-                      className={`flex min-h-[72px] items-center rounded-[10px] bg-white px-[16px] py-[12px] transition-colors ${
-                        isSelected
-                          ? "border border-[#969696]"
-                          : "border border-[#EFF0F6] hover:border-[#D1D5DB]"
-                      }`}
-                    >
-                      {/* Checkbox */}
-                      <div className="w-[32px] shrink-0 flex items-center">
-                        <button
-                          type="button"
-                          role="checkbox"
-                          aria-checked={isSelected}
-                          aria-label={`Select ${item.name}`}
-                          onClick={() => toggleSelectRow(item.id)}
-                          className={`flex h-[16px] w-[16px] items-center justify-center rounded-[4px] transition-colors cursor-pointer ${
-                            isSelected
-                              ? "bg-[#515151] text-white"
-                              : "border-[1.5px] border-[#D1D5DB] bg-white hover:border-[#9CA3AF]"
-                          }`}
-                        >
-                          {isSelected && (
-                            <Check
-                              className="h-[11px] w-[11px]"
-                              strokeWidth={3}
-                            />
-                          )}
-                        </button>
-                      </div>
-
-                      {/* Product Thumbnail + Name */}
-                      <div className="flex flex-[2.4] min-w-[240px] items-center gap-[12px] pr-[12px]">
-                        <div className="relative h-[44px] w-[44px] shrink-0 overflow-hidden rounded-[10px] border border-black/15 bg-white shadow-[-2px_3px_4px_rgba(0,0,0,0.16)]">
-                          <Image
-                            src={item.thumbnail}
-                            alt={item.name}
-                            width={44}
-                            height={44}
-                            className="h-full w-full object-cover"
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => void handleOpenProductDetails(item)}
-                          className="line-clamp-2 text-left text-[13px] font-semibold leading-[18px] text-[#111827] hover:text-[#EE730A] transition-colors cursor-pointer"
-                        >
-                          {item.name}
-                        </button>
-                      </div>
-
-                      {/* Category Pills */}
-                      <div className="flex w-[126px] shrink-0 flex-wrap items-center gap-[4px] pr-[12px]">
-                        {item.categories.map((tag) => (
-                          <span
-                            key={tag}
-                            className="rounded-[6px] bg-[#F3F4F6] px-[8px] py-[3px] text-[11px] font-medium leading-tight text-[#374151]"
-                          >
-                            {tag}
-                          </span>
-                        ))}
-                        {item.hasMoreCategories && (
-                          <span className="rounded-[6px] bg-[#F3F4F6] px-[6px] py-[3px] text-[11px] font-medium leading-tight text-[#374151]">
-                            ...
-                          </span>
-                        )}
-                      </div>
-
-                      {/* Pack */}
-                      <div className="flex w-[82px] shrink-0 flex-col gap-[2px] pr-[12px]">
-                        <span className="text-[13px] font-medium leading-tight text-[#111827]">
-                          {item.packType}
-                        </span>
-                        <span className="text-[12px] font-normal leading-tight text-[#6B7280]">
-                          {item.packSize}
-                        </span>
-                      </div>
-
-                      {/* SKU Code + Barcode */}
-                      <div className="flex w-[152px] shrink-0 flex-col gap-[2px] pr-[12px]">
-                        <span className="text-[12px] font-medium leading-tight text-[#111827]">
-                          {item.skuCode}
-                        </span>
-                        <span className="text-[11px] font-normal leading-tight text-[#9CA3AF]">
-                          {item.barcode}
-                        </span>
-                      </div>
-
-                      {/* On-Shelf Stock */}
-                      <div className="flex w-[140px] shrink-0 items-baseline gap-[4px] pr-[12px]">
-                        <span className="text-[15px] font-semibold text-[#111827]">
-                          {item.onShelfStock}
-                        </span>
-                        <span className="text-[12px] font-normal text-[#6B7280]">
-                          units
-                        </span>
-                      </div>
-
-                      {/* Confidence + Progress Bar (fixed format: 93% instead of 0.93 %) */}
-                      <div
-                        className="flex w-[140px] shrink-0 flex-col gap-[6px] pr-[12px]"
-                        title={`confidence_score: ${item.confidence.toFixed(2)} · is_flagged: ${item.cvOutput.is_flagged ? "TRUE" : "FALSE"}`}
-                      >
-                        <div className="flex items-center gap-[6px]">
-                          <span className="text-[13px] font-semibold leading-none text-[#111827]">
-                            {Math.round(item.confidence * 100)}%
-                          </span>
-                          {item.cvOutput.is_flagged && (
-                            <span className="rounded bg-[#FFF7ED] px-1.5 py-[1px] text-[10px] font-semibold text-[#C2560A]">
-                              Flagged
-                            </span>
-                          )}
-                        </div>
-                        <div className="h-[4px] w-[72px] overflow-hidden rounded-[2px] bg-[#EEF0F3]">
-                          <div
-                            className="h-full rounded-[2px]"
-                            style={{
-                              width: `${barWidthPct}%`,
-                              backgroundColor: barColor,
-                            }}
-                          />
-                        </div>
-                      </div>
-
-                      {/* Avail In Stores */}
-                      <div className="flex w-[128px] shrink-0 items-baseline gap-[1px] pr-[12px]">
-                        <span className="text-[18px] font-semibold leading-none text-[#111827]">
-                          {item.storesAvailable}
-                        </span>
-                        <span className="text-[12px] font-normal leading-none text-[#6B7280]">
-                          /{item.storesTotal} stores
-                        </span>
-                      </div>
-
-                      {/* Actions */}
-                      <div className="relative flex w-[90px] shrink-0 items-center justify-end gap-[6px]">
-                        <button
-                          type="button"
-                          onClick={() => void handleOpenProductDetails(item)}
-                          className="flex h-[28px] items-center rounded-[6px] border border-[#E5E7EB] bg-white px-[12px] text-[12px] font-medium text-[#111827] hover:bg-[#F9FAFB] hover:border-[#D1D5DB] transition-colors cursor-pointer"
-                        >
-                          View
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setOpenRowMenuId((prev) =>
-                              prev === item.id ? null : item.id
-                            )
+                groups.map((group) => (
+                  <React.Fragment key={group.key}>
+                    <ProductGroupRow
+                      group={group}
+                      expanded={isExpanded(group.key)}
+                      selection={groupSelection(group, selectedIds)}
+                      onToggleExpand={() => toggleGroup(group.key)}
+                      onToggleSelect={() => toggleGroupSelection(group)}
+                    />
+                    {isExpanded(group.key) &&
+                      group.variants.map((item) => (
+                        <ProductRow
+                          key={item.id}
+                          item={item}
+                          nested
+                          selected={selectedIds.has(item.id)}
+                          menuOpen={openRowMenuId === item.id}
+                          menuRef={rowMenuRef}
+                          onToggleSelect={() => toggleSelectRow(item.id)}
+                          onOpenDetails={() => void handleOpenProductDetails(item)}
+                          onToggleMenu={() =>
+                            setOpenRowMenuId((prev) => (prev === item.id ? null : item.id))
                           }
-                          aria-label={`More actions for ${item.name}`}
-                          className="flex h-[28px] w-[28px] items-center justify-center rounded-[6px] border border-[#E5E7EB] bg-white text-[#111827] hover:bg-[#F9FAFB] hover:border-[#D1D5DB] transition-colors cursor-pointer"
-                        >
-                          <MoreHorizontal className="h-[15px] w-[15px]" />
-                        </button>
-
-                        {openRowMenuId === item.id && (
-                          <div
-                            ref={rowMenuRef}
-                            className="absolute right-0 top-[34px] z-20 w-[160px] rounded-[10px] border border-[#E5E7EB] bg-white p-1 shadow-[0_8px_22px_rgba(0,0,0,0.08)]"
-                          >
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setOpenRowMenuId(null);
-                                setViewingProduct(item);
-                              }}
-                              className="flex w-full rounded-[7px] px-2.5 py-1.5 text-left text-[12px] text-[#111827] hover:bg-[#F7F8FA] cursor-pointer"
-                            >
-                              View Validation Details
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setOpenRowMenuId(null);
-                                navigator.clipboard?.writeText(item.skuCode);
-                                showToast(`Copied ${item.skuCode}`);
-                              }}
-                              className="flex w-full rounded-[7px] px-2.5 py-1.5 text-left text-[12px] text-[#111827] hover:bg-[#F7F8FA] cursor-pointer"
-                            >
-                              Copy SKU Code
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setOpenRowMenuId(null);
-                                handleExportCsv([item]);
-                              }}
-                              className="flex w-full rounded-[7px] px-2.5 py-1.5 text-left text-[12px] text-[#111827] hover:bg-[#F7F8FA] cursor-pointer"
-                            >
-                              Export Row CSV
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })
+                          onCopyCode={() => {
+                            navigator.clipboard?.writeText(item.skuCode);
+                            showToast(`Copied ${item.skuCode}`);
+                          }}
+                          onExportRow={() => handleExportCsv([item])}
+                        />
+                      ))}
+                  </React.Fragment>
+                ))
               )}
             </div>
           </div>
