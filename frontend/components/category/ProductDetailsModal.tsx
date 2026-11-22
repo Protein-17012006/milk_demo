@@ -71,12 +71,15 @@ export function ProductDetailsModal({
     const before = cvOutput.reading_id;
     setViewer({ notice: null, retried: true });
     const now = await onRefreshDetail();
+    // A failed reload keeps the dead link: say so plainly instead of claiming a reload.
     setViewer((v) =>
       v && {
         ...v,
         notice:
-          "The signed link expired, so the card reloaded the latest reading." +
-          (now && now !== before ? ` It is now ${now}.` : ""),
+          now === null
+            ? "Frame could not be loaded."
+            : "The signed link expired, so the card reloaded the latest reading." +
+              (now !== before ? ` It is now ${now}.` : ""),
       }
     );
   };
