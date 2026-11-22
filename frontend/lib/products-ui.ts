@@ -63,6 +63,8 @@ export interface CvOutputRow {
   frame_h: number;
   faces_blurred: number;
   pipeline: string;
+  /** Signed S3 link (15 min) to the face-blurred frame of this reading; never logged or stored. */
+  frame_url: string | null;
 }
 
 export interface SkuAudit {
@@ -95,6 +97,8 @@ export interface SkuProduct {
   storesTotal: number;
   storeRegion: string;
   status: ProductStatus;
+  /** When GET /products/{sku} last filled the card (ms since epoch); null until then. */
+  detailFetchedAt: number | null;
   cvOutput: CvOutputRow;
   audit: SkuAudit;
 }

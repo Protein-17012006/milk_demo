@@ -27,6 +27,7 @@ function sku(over: Over): SkuProduct {
     storesTotal: 1,
     storeRegion: "DEMO-S01",
     status: "Validated",
+    detailFetchedAt: null,
     brand: null,
     subcategory: null,
     cvOutput: {
@@ -34,7 +35,7 @@ function sku(over: Over): SkuProduct {
       capture_timestamp: "—", capture_source: "CCTV", image_filename: "—", sku_id: over.id,
       sku_name: over.id, unit_count: 0, confidence_score: 0, detection_method: "Visual",
       bounding_box: [], is_flagged: false, flag_reason: "", processing_time_ms: 0, image_key: "",
-      frame_w: 2560, frame_h: 1440, faces_blurred: 0, pipeline: "long",
+      frame_w: 2560, frame_h: 1440, faces_blurred: 0, pipeline: "long", frame_url: null,
     },
     audit: { accuracy: null, expectedLabel: over.id, mismatchType: "None", reviewedAt: null },
   };

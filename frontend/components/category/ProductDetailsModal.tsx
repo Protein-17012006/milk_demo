@@ -1,12 +1,13 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { AlertTriangle, Check, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, Check, Image as ImageIcon, ShieldCheck, X } from "lucide-react";
 import {
   MILK_FLAG_THRESHOLD,
   MISMATCH_TYPE_OPTIONS,
   type SkuProduct,
 } from "@/lib/products-ui";
+import { FrameViewer } from "./FrameViewer";
 
 interface ProductDetailsModalProps {
   product: SkuProduct | null;
@@ -15,12 +16,15 @@ interface ProductDetailsModalProps {
     productId: string,
     payload: { expectedLabel: string; mismatchType: string }
   ) => void;
+  /** Reloads GET /products/{sku} into the card; resolves to the reading id it now shows. */
+  onRefreshDetail?: () => Promise<string | null>;
 }
 
 export function ProductDetailsModal({
   product,
   onClose,
   onSaveAudit,
+  onRefreshDetail,
 }: ProductDetailsModalProps) {
   const [expectedLabel, setExpectedLabel] = useState(
     () => product?.audit.expectedLabel ?? ""
@@ -29,6 +33,8 @@ export function ProductDetailsModal({
     () => product?.audit.mismatchType ?? "None"
   );
   const [savedNotice, setSavedNotice] = useState(false);
+  // Frame viewer: null = closed. One link refresh per opening, then a plain error.
+  const [viewer, setViewer] = useState<{ notice: string | null; retried: boolean } | null>(null);
 
   useEffect(() => {
     function handleEsc(e: KeyboardEvent) {
@@ -43,6 +49,37 @@ export function ProductDetailsModal({
   if (!product) return null;
 
   const { cvOutput, audit } = product;
+  const frameAvailable = Boolean(cvOutput.frame_url) && cvOutput.bounding_box.length > 0;
+  const frameReason =
+    product.detailFetchedAt === null ? "Loading the frame link…" : "No frame stored for this reading";
+
+  const openViewer = async () => {
+    if (!frameAvailable) return;
+    // Signed links live 15 minutes: reload the reading first when the card is older than 10.
+    if (onRefreshDetail && Date.now() - (product.detailFetchedAt ?? 0) > 600_000) {
+      await onRefreshDetail();
+    }
+    setViewer({ notice: null, retried: false });
+  };
+
+  const handleFrameError = async () => {
+    if (!viewer) return;
+    if (viewer.retried || !onRefreshDetail) {
+      setViewer({ ...viewer, notice: "Frame could not be loaded." });
+      return;
+    }
+    const before = cvOutput.reading_id;
+    setViewer({ notice: null, retried: true });
+    const now = await onRefreshDetail();
+    setViewer((v) =>
+      v && {
+        ...v,
+        notice:
+          "The signed link expired, so the card reloaded the latest reading." +
+          (now && now !== before ? ` It is now ${now}.` : ""),
+      }
+    );
+  };
   const confidencePct = Math.round(cvOutput.confidence_score * 100);
 
   const handleSave = () => {
@@ -315,9 +352,30 @@ export function ProductDetailsModal({
 
           {/* Section 4: Capture & S3 Traceability */}
           <div className="rounded-[12px] border border-[#E5E7EB] bg-[#F9FAFB]/70 p-4">
-            <h3 className="text-[13px] font-semibold text-[#111827]">
-              Capture &amp; S3 Traceability
-            </h3>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-[13px] font-semibold text-[#111827]">
+                Capture &amp; S3 Traceability
+              </h3>
+              <div className="flex items-center gap-2">
+                {!frameAvailable && (
+                  <span className="text-[11.5px] text-[#6B7280]">{frameReason}</span>
+                )}
+                <button
+                  type="button"
+                  disabled={!frameAvailable}
+                  title={
+                    frameAvailable
+                      ? "Open the face-blurred frame with this reading's boxes"
+                      : frameReason
+                  }
+                  onClick={() => void openViewer()}
+                  className="inline-flex items-center gap-1.5 rounded-[7px] border border-[#E5E7EB] bg-white px-2.5 py-1 text-[12px] font-medium text-[#111827] hover:bg-[#F3F4F6] disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+                >
+                  <ImageIcon className="h-3.5 w-3.5" />
+                  View frame
+                </button>
+              </div>
+            </div>
             <dl className="mt-3 space-y-2.5 text-[13px]">
               <div className="grid grid-cols-1 gap-1 sm:grid-cols-[200px_1fr]">
                 <dt className="text-[#6B7280]">Capture ID</dt>
@@ -379,6 +437,20 @@ export function ProductDetailsModal({
           </div>
         </div>
       </div>
+      {viewer && cvOutput.frame_url && (
+        <FrameViewer
+          url={cvOutput.frame_url}
+          boxes={cvOutput.bounding_box}
+          readingId={cvOutput.reading_id}
+          captureTimestamp={cvOutput.capture_timestamp}
+          unitCount={cvOutput.unit_count}
+          confidence={cvOutput.confidence_score}
+          facesBlurred={cvOutput.faces_blurred}
+          notice={viewer.notice}
+          onImageError={() => void handleFrameError()}
+          onClose={() => setViewer(null)}
+        />
+      )}
     </div>
   );
 }

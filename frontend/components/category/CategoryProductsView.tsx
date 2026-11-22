@@ -168,6 +168,7 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
     storesTotal: p.stores_total,
     storeRegion: "DEMO-S01",
     status,
+    detailFetchedAt: null,
     cvOutput: {
       reading_id: p.capture_id ? `RD-${p.capture_id}` : "—",
       capture_id: p.capture_id || "—",
@@ -190,6 +191,7 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
       frame_h: 1440,
       faces_blurred: 0,
       pipeline: "long",
+      frame_url: null,
     },
     audit: {
       accuracy: null,
@@ -508,9 +510,9 @@ export function CategoryProductsView() {
     );
   };
 
-  const handleOpenProductDetails = async (item: SkuProduct) => {
-    setViewingProduct(item);
-    if (!liveMode) return;
+  // Fetches GET /products/{sku} into the open card; returns the reading id it now shows (null on failure).
+  const loadProductDetail = async (item: SkuProduct): Promise<string | null> => {
+    if (!liveMode) return null;
     try {
       const api = createApiClient(getIdToken);
       const detail = await api.getProductDetail(item.id);
@@ -523,6 +525,7 @@ export function CategoryProductsView() {
         return {
           ...curr,
           status: statusOf(cv.is_flagged, cv.confidence_score),
+          detailFetchedAt: Date.now(),
           cvOutput: {
             ...curr.cvOutput,
             unit_count: cv.unit_count,
@@ -542,6 +545,7 @@ export function CategoryProductsView() {
             image_key: detail.cv_output.image_key || curr.cvOutput.image_key,
             bounding_box: detail.cv_output.bounding_box || [],
             faces_blurred: detail.cv_output.faces_blurred || 0,
+            frame_url: cv.frame_presigned_url,
           },
           audit: {
             accuracy:
@@ -554,9 +558,16 @@ export function CategoryProductsView() {
           },
         };
       });
+      return detail.cv_output.reading_id;
     } catch {
       // keep summary modal open
+      return null;
     }
+  };
+
+  const handleOpenProductDetails = async (item: SkuProduct) => {
+    setViewingProduct(item);
+    await loadProductDetail(item);
   };
 
   const handleSaveAudit = async (
@@ -859,6 +870,9 @@ export function CategoryProductsView() {
         product={viewingProduct}
         onClose={() => setViewingProduct(null)}
         onSaveAudit={handleSaveAudit}
+        onRefreshDetail={() =>
+          viewingProduct ? loadProductDetail(viewingProduct) : Promise.resolve(null)
+        }
       />
 
       {/* Unmatched / Flagged Review Queue Modal */}
