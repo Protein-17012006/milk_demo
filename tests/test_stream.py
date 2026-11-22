@@ -1,6 +1,15 @@
 import io
 
-from milk.stream import _input_options, _read_exact
+from milk.stream import _input_options, _read_exact, redact
+
+
+def test_error_messages_hide_the_login_in_stream_urls():
+    # ffmpeg puts the whole input URL in its errors; the reader logs them and sends them to the hub
+    msg = "RuntimeError: rtsps://wrk123:s3cret@203.0.113.7:8322/cam-replay: Connection timed out"
+    assert redact(msg) == "RuntimeError: rtsps://***@203.0.113.7:8322/cam-replay: Connection timed out"
+    srt = "srt://203.0.113.7:8890?streamid=read:cam-s01-a:USER:PASS&passphrase=abc: I/O error"
+    assert "PASS" not in redact(srt) and "abc" not in redact(srt)
+    assert redact("stream ended") == "stream ended"
 
 
 def test_rtsp_and_rtsps_use_tcp_with_a_socket_timeout():

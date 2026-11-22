@@ -11,5 +11,9 @@
   {"id": "TMP-MLK-VNM-08", "short": "VNM Hạnh nhân", "name": "Vinamilk Sữa Hạt Đậu Nành Hạnh Nhân Ít Đường 180ml", "color": "#e377c2"},
   {"id": "TMP-MLK-VNM-09", "short": "VNM Mè đen", "name": "Vinamilk Sữa Hạt Đậu Nành Mè Đen Ít Đường 180ml", "color": "#393b79"},
   {"id": "TMP-MLK-VNM-10", "short": "VNM 9 loại hạt", "name": "Vinamilk Sữa Hạt 9 Loại Hạt Ít Đường 180ml", "color": "#637939"},
+  {"id": "original145", "short": "Slide Nguyên bản", "name": "Slide Nguyên bản 145g", "note": "tên tạm 2026-11-22, chờ kiểm với chữ in trên bao bì", "color": "#fd8d3c"},
+  {"id": "sourcream150", "short": "Slide Kem chua hành", "name": "Slide Kem chua hành 150g", "note": "tên tạm 2026-11-22, chờ kiểm với chữ in trên bao bì", "color": "#31a354"},
+  {"id": "cheese145", "short": "Slide Phô mai", "name": "Slide Phô mai 145g", "note": "tên tạm 2026-11-22, chờ kiểm với chữ in trên bao bì", "color": "#e7ba52"},
+  {"id": "hot160", "short": "Slide Hot & Spicy", "name": "Slide Hot & Spicy 160g", "note": "tên tạm 2026-11-22, chờ kiểm với chữ in trên bao bì", "color": "#d62728"},
   {"id": "UNRECOGNIZED", "short": "Không nhận ra", "name": "Thấy hộp nhưng không khớp SKU nào", "color": "#8a8f98"}
 ]
