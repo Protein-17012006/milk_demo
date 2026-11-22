@@ -2,54 +2,58 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { Download, X } from "lucide-react";
-import { useSidebarSearch } from "@/components/layout/SidebarContext";
 import { useAuth } from "@/lib/auth";
-import { createApiClient, type ApiKpiResponse, type ApiStore } from "@/lib/api";
+import {
+  createApiClient,
+  type ApiKpiResponse,
+  type ApiReportsSeriesPoint,
+  type ApiStore,
+} from "@/lib/api";
 import { FilterBar } from "./FilterBar";
 import { KpiGrid } from "./KpiGrid";
 import { MonthlyStockChart } from "./MonthlyStockChart";
 import { TrendsInsightsChart } from "./TrendsInsightsChart";
 import { RecentActivitiesCard } from "./RecentActivitiesCard";
 import {
-  RECENT_SHELF_ACTIVITIES,
-  getFilteredKpis,
+  ALL_STORES_LABEL,
+  kpisFromApi,
   type CategoryOption,
-  type StoreOption,
+  type ShelfActivity,
   type TimeframeOption,
-} from "@/data/reports-mock";
+} from "@/lib/reports-ui";
 
-interface ReportsDashboardProps {
-  searchQuery?: string;
-}
+// The backend keeps no shelf-event history yet (OOS / restock / depletion), so this feed stays empty.
+const NO_SHELF_ACTIVITIES: ShelfActivity[] = [];
 
-export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
-  const { searchQuery: sidebarSearchQuery } = useSidebarSearch();
+export function ReportsDashboard() {
   const { isApproved, getIdToken } = useAuth();
-  const effectiveSearchQuery = searchQuery ?? sidebarSearchQuery;
   const [timeframe, setTimeframe] = useState<TimeframeOption>("All-time");
-  const [store, setStore] = useState<string>("All Stores (30)");
+  const [store, setStore] = useState<string>(ALL_STORES_LABEL);
   const [category, setCategory] = useState<CategoryOption>("All Categories");
   const [auditModalOpen, setAuditModalOpen] = useState(false);
   const [liveKpi, setLiveKpi] = useState<ApiKpiResponse | null>(null);
   const [liveStores, setLiveStores] = useState<ApiStore[] | null>(null);
+  const [liveSeries, setLiveSeries] = useState<ApiReportsSeriesPoint[] | null>(null);
 
   useEffect(() => {
     if (!isApproved) {
       setLiveKpi(null);
       setLiveStores(null);
+      setLiveSeries(null);
       return;
     }
     let cancelled = false;
     const api = createApiClient(getIdToken);
-    Promise.all([api.getKpi(), api.getStores()])
-      .then(([kpiRes, storesRes]) => {
+    Promise.all([api.getKpi(), api.getStores(), api.getReportsSeries()])
+      .then(([kpiRes, storesRes, seriesRes]) => {
         if (cancelled) return;
         setLiveKpi(kpiRes);
         setLiveStores(storesRes.items);
-        setStore(`All Stores (${storesRes.total})`);
+        setLiveSeries(seriesRes.series);
+        setStore(`${ALL_STORES_LABEL} (${storesRes.total})`);
       })
       .catch(() => {
-        // fallback cleanly to sample metrics
+        // leave the cards at "—": never show numbers the API did not return
       });
     return () => {
       cancelled = true;
@@ -59,62 +63,13 @@ export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
   const dynamicStoreOptions = useMemo(() => {
     if (!liveStores) return undefined;
     return [
-      `All Stores (${liveStores.length})`,
+      `${ALL_STORES_LABEL} (${liveStores.length})`,
       ...liveStores.map((s) => `${s.store_id} — ${s.store_name}`),
     ];
   }, [liveStores]);
 
-  const kpis = useMemo(() => {
-    const base = getFilteredKpis(
-      timeframe,
-      (store.startsWith("All Stores") ? "All Stores (30)" : store) as StoreOption,
-      category
-    );
-    if (!liveKpi) return base;
-    return {
-      ...base,
-      activeStores: liveKpi.active_stores_monitored,
-      totalStores: liveKpi.total_stores,
-      totalOnShelfUnits: liveKpi.total_on_shelf_units,
-      avgInferenceTime: `${liveKpi.avg_processing_time_ms} ms`,
-      top50SkuAccuracy:
-        liveKpi.top_50_sku_accuracy !== null
-          ? liveKpi.top_50_sku_accuracy
-          : base.top50SkuAccuracy,
-    };
-  }, [timeframe, store, category, liveKpi]);
-
-  // Deterministic scale factor for hardcoded charts when filters change
-  const chartScaleFactor = useMemo(() => {
-    let factor = 1;
-    if (timeframe === "This Quarter") factor *= 0.92;
-    if (timeframe === "Last 30 Days") factor *= 0.84;
-    if (timeframe === "Last 7 Days") factor *= 0.72;
-    if (!store.startsWith("All Stores")) factor *= 0.82;
-    if (category !== "All Categories") factor *= 0.85;
-    return factor;
-  }, [timeframe, store, category]);
-
-  const filteredActivities = useMemo(() => {
-    const q = effectiveSearchQuery.trim().toLowerCase();
-    return RECENT_SHELF_ACTIVITIES.filter((item) => {
-      if (!store.startsWith("All Stores") && item.storeDistrict !== store) {
-        return false;
-      }
-      if (category !== "All Categories" && item.category !== category) {
-        return false;
-      }
-      if (
-        q &&
-        !item.productName.toLowerCase().includes(q) &&
-        !item.storeName.toLowerCase().includes(q) &&
-        !item.status.toLowerCase().includes(q)
-      ) {
-        return false;
-      }
-      return true;
-    });
-  }, [store, category, effectiveSearchQuery]);
+  const kpis = useMemo(() => kpisFromApi(liveKpi), [liveKpi]);
+  const filteredActivities = NO_SHELF_ACTIVITIES;
 
   const handleDownloadCsv = async () => {
     if (isApproved) {
@@ -133,17 +88,22 @@ export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
         // fall through to summary export
       }
     }
+    const show = (v: number | string | null, suffix = "") =>
+      v === null ? "—" : `${v}${suffix}`;
     const rows = [
       ["Metric", "Value"],
       ["Timeframe", timeframe],
       ["Store", store],
       ["Category", category],
-      ["Active Stores Monitored", `${kpis.activeStores}/${kpis.totalStores}`],
-      ["Total On-Shelf Units", String(kpis.totalOnShelfUnits)],
-      ["Avg. Inference Time", kpis.avgInferenceTime],
-      ["On-Shelf Availability (OSA)", `${kpis.osaPercent}%`],
-      ["Top 50 SKU Accuracy", `${kpis.top50SkuAccuracy}%`],
-      ["Restock Rate (vs Last Cycle)", kpis.restockRateDelta],
+      [
+        "Active Stores Monitored",
+        kpis.activeStores === null ? "—" : `${kpis.activeStores}/${kpis.totalStores ?? "—"}`,
+      ],
+      ["Total On-Shelf Units", show(kpis.totalOnShelfUnits)],
+      ["Avg. Inference Time", show(kpis.avgInferenceTime)],
+      ["On-Shelf Availability (OSA)", show(kpis.osaPercent, "%")],
+      ["Top 50 SKU Accuracy", show(kpis.top50SkuAccuracy, "%")],
+      ["Restock Rate (vs Last Cycle)", show(kpis.restockRateDelta)],
     ];
     const csv = rows.map((r) => r.map((v) => `"${v}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -203,7 +163,7 @@ export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
           <KpiGrid metrics={kpis} />
         </div>
         <div className="xl:col-span-6">
-          <MonthlyStockChart scaleFactor={chartScaleFactor} />
+          <MonthlyStockChart series={liveSeries} />
         </div>
       </section>
 
@@ -213,7 +173,7 @@ export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
         className="mt-[22px] grid grid-cols-1 gap-[22px] xl:grid-cols-12"
       >
         <div className="xl:col-span-8">
-          <TrendsInsightsChart scaleFactor={chartScaleFactor} />
+          <TrendsInsightsChart />
         </div>
         <div className="xl:col-span-4">
           <RecentActivitiesCard

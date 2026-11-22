@@ -13,12 +13,12 @@ import {
 import {
   DEFAULT_RECENT_PAGES,
   HOME_SEARCH_PAGES,
-  HOME_SEARCH_PRODUCTS,
   type HomeSearchPageItem,
   type HomeSearchProduct,
-} from "@/data/home-mock";
+} from "@/lib/home-ui";
 import { useAuth } from "@/lib/auth";
 import { createApiClient } from "@/lib/api";
+import { LIVE_REFRESH_MS } from "@/lib/config";
 
 function PackBoxIcon() {
   return (
@@ -90,7 +90,8 @@ export function HomePageView() {
   const searchContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Load real SKU catalog from AWS when authenticated & approved
+  // Load real SKU catalog from AWS when authenticated & approved, and refresh its live unit counts
+  // every LIVE_REFRESH_MS while the tab is visible (HOANG-P10 Nextstep 9).
   useEffect(() => {
     if (!isApproved) {
       setLiveProducts(null);
@@ -98,7 +99,7 @@ export function HomePageView() {
     }
     let cancelled = false;
     const api = createApiClient(getIdToken);
-    api
+    const load = () => api
       .getProducts()
       .then((res) => {
         if (cancelled) return;
@@ -119,14 +120,19 @@ export function HomePageView() {
         );
       })
       .catch(() => {
-        // fallback silently to sample catalog
+        // keep the last live list (or none): never fill in sample products
       });
+    void load();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void load();
+    }, LIVE_REFRESH_MS);
     return () => {
       cancelled = true;
+      window.clearInterval(timer);
     };
   }, [isApproved, getIdToken]);
 
-  const catalogProducts = liveProducts ?? HOME_SEARCH_PRODUCTS;
+  const catalogProducts = useMemo(() => liveProducts ?? [], [liveProducts]);
 
   // Filter products & pages based on query; default matches exact Figma suggestions
   const { visibleProducts, visiblePages, totalResultCount } = useMemo(() => {

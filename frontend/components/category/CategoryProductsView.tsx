@@ -24,18 +24,17 @@ import {
   type ApiReviewQueueItem,
   type ApiStore,
 } from "@/lib/api";
+import { LIVE_REFRESH_MS } from "@/lib/config";
 import {
-  CATEGORY_FILTER_OPTIONS,
-  CATEGORY_STORE_OPTIONS,
-  SKU_PRODUCTS,
+  ALL_STORES_LABEL,
   SORT_OPTIONS,
   STATUS_FILTER_OPTIONS,
-  UNMATCHED_REVIEW_QUEUE,
   type CategoryFilterOption,
+  type PrimaryCategory,
   type SkuProduct,
   type SortOption,
   type StatusFilterOption,
-} from "@/data/category-mock";
+} from "@/lib/products-ui";
 import { ProductDetailsModal } from "./ProductDetailsModal";
 
 interface ToolbarDropdownProps<T extends string> {
@@ -205,13 +204,14 @@ export function CategoryProductsView() {
   const { searchQuery: sidebarSearch } = useSidebarSearch();
   const { isApproved, hasGroup, getIdToken } = useAuth();
 
-  const [products, setProducts] = useState<SkuProduct[]>(SKU_PRODUCTS);
+  // Rows exist only once the live API answers; signed out, the table stays empty (no sample rows).
+  const [products, setProducts] = useState<SkuProduct[]>([]);
   const [liveMode, setLiveMode] = useState(false);
-  const [unrecognizedCount, setUnrecognizedCount] = useState<number>(12);
+  const [unrecognizedCount, setUnrecognizedCount] = useState<number | null>(null);
   const [liveStores, setLiveStores] = useState<ApiStore[] | null>(null);
   const [liveQueue, setLiveQueue] = useState<ApiReviewQueueItem[] | null>(null);
   const [localSearch, setLocalSearch] = useState("");
-  const [storeFilter, setStoreFilter] = useState<string>("All stores (30)");
+  const [storeFilter, setStoreFilter] = useState<string>(ALL_STORES_LABEL);
   const [categoryFilter, setCategoryFilter] =
     useState<CategoryFilterOption>("All");
   const [statusFilter, setStatusFilter] = useState<StatusFilterOption>("All");
@@ -219,10 +219,7 @@ export function CategoryProductsView() {
     "On-shelf stock (high → low)"
   );
 
-  // Match Figma: first 2 rows pre-selected
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(
-    () => new Set(SKU_PRODUCTS.filter((p) => p.defaultSelected).map((p) => p.id))
-  );
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
 
   const [viewingProduct, setViewingProduct] = useState<SkuProduct | null>(null);
   const [reviewQueueOpen, setReviewQueueOpen] = useState(false);
@@ -232,14 +229,17 @@ export function CategoryProductsView() {
 
   const rowMenuRef = useRef<HTMLDivElement>(null);
 
-  const loadLiveData = React.useCallback(async () => {
+  // background = the periodic refresh: update the numbers but keep the user's filter and selection.
+  const loadLiveData = React.useCallback(async (opts?: { background?: boolean }) => {
+    const background = opts?.background === true;
     if (!isApproved) {
+      if (background) return;
       setLiveMode(false);
       setLiveStores(null);
       setLiveQueue(null);
-      setProducts(SKU_PRODUCTS);
-      setUnrecognizedCount(12);
-      setStoreFilter("All stores (30)");
+      setProducts([]);
+      setUnrecognizedCount(null);
+      setStoreFilter(ALL_STORES_LABEL);
       return;
     }
     try {
@@ -254,8 +254,10 @@ export function CategoryProductsView() {
       setLiveStores(storeRes.items);
       setLiveQueue(queueRes.items);
       setUnrecognizedCount(prodRes.unrecognized_units);
-      setStoreFilter(`All stores (${storeRes.total})`);
-      setSelectedIds(new Set());
+      if (!background) {
+        setStoreFilter(`${ALL_STORES_LABEL} (${storeRes.total})`);
+        setSelectedIds(new Set());
+      }
       setLiveMode(true);
     } catch {
       // keep preview state on error
@@ -266,19 +268,29 @@ export function CategoryProductsView() {
     void loadLiveData();
   }, [loadLiveData]);
 
+  // Live stock: re-read the API every LIVE_REFRESH_MS while this tab is visible (HOANG-P10 Nextstep 9).
+  useEffect(() => {
+    if (!isApproved) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void loadLiveData({ background: true });
+    }, LIVE_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [isApproved, loadLiveData]);
+
   const storeDropdownOptions = useMemo(() => {
-    if (!liveStores) return CATEGORY_STORE_OPTIONS;
+    if (!liveStores) return [ALL_STORES_LABEL];
     return [
-      `All stores (${liveStores.length})`,
+      `${ALL_STORES_LABEL} (${liveStores.length})`,
       ...liveStores.map((s) => `${s.store_id} — ${s.store_name}`),
     ];
   }, [liveStores]);
 
+  // Only categories that the live rows actually contain.
   const categoryDropdownOptions = useMemo<CategoryFilterOption[]>(() => {
-    return liveMode
-      ? ["All", "Milk", "Snack", "Noodles"]
-      : CATEGORY_FILTER_OPTIONS;
-  }, [liveMode]);
+    const order: PrimaryCategory[] = ["Milk", "Snack", "Noodles"];
+    const present = new Set(products.map((p) => p.primaryCategory));
+    return ["All", ...order.filter((c) => present.has(c))];
+  }, [products]);
 
   useEffect(() => {
     function handleOutside(e: MouseEvent) {
@@ -303,7 +315,7 @@ export function CategoryProductsView() {
 
     const list = products.filter((item) => {
       if (
-        !storeFilter.startsWith("All stores") &&
+        !storeFilter.startsWith(ALL_STORES_LABEL) &&
         !storeFilter.startsWith(item.storeRegion) &&
         item.storeRegion !== storeFilter
       ) {
@@ -572,7 +584,7 @@ export function CategoryProductsView() {
             <p className="mt-[4px] text-[12px] font-normal text-[#6B7280]">
               {liveMode
                 ? `Live AWS Singapore backend · ${products.length} SKUs synced (UTC+7)`
-                : "View recent products in stores · sample preview mode (UTC+7)"}
+                : "Sign in with an approved account to load live products (UTC+7)"}
             </p>
           </div>
 
@@ -653,7 +665,8 @@ export function CategoryProductsView() {
           </div>
         </section>
 
-        {/* Unmatched Products Warning Banner */}
+        {/* Unmatched Products Warning Banner (live count only) */}
+        {unrecognizedCount !== null && (
         <div className="mt-[16px] flex flex-wrap items-center justify-between gap-2 rounded-[10px] border border-[#FED7AA] bg-[#FFF7ED] py-[10px] pl-[14px] pr-[16px]">
           <div className="flex items-center gap-[10px]">
             <AlertTriangle
@@ -678,6 +691,7 @@ export function CategoryProductsView() {
             <ArrowRight className="h-[14px] w-[14px]" strokeWidth={2.2} />
           </button>
         </div>
+        )}
 
         {/* SKU Table (Horizontal scroll wrapper for narrow viewports) */}
         <section aria-label="SKU product list" className="mt-[16px] overflow-x-auto pb-2">
@@ -739,7 +753,9 @@ export function CategoryProductsView() {
             <div className="mt-[8px] flex flex-col gap-[8px]">
               {filteredProducts.length === 0 ? (
                 <div className="flex h-[140px] items-center justify-center rounded-[10px] border border-[#EFF0F6] bg-white text-[13px] text-[#6B7280]">
-                  No products match the current search and filter criteria.
+                  {liveMode
+                    ? "No products match the current search and filter criteria."
+                    : "Sign in with an approved account to load live products."}
                 </div>
               ) : (
                 filteredProducts.map((item) => {
@@ -1076,45 +1092,9 @@ export function CategoryProductsView() {
                   ))
                 )
               ) : (
-                UNMATCHED_REVIEW_QUEUE.map((det) => (
-                  <div
-                    key={det.id}
-                    className="flex flex-wrap items-center justify-between gap-4 py-3"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="rounded-full bg-[#FFF7ED] px-2 py-0.5 text-[10.5px] font-semibold text-[#C2560A]">
-                          {det.flag_reason}
-                        </span>
-                        <span className="font-mono text-[11.5px] text-[#374151]">
-                          {det.reading_id}
-                        </span>
-                      </div>
-                      <p className="mt-1 truncate text-[12.5px] font-medium text-[#111827]">
-                        Suggested: {det.suggestedSku} ({det.unit_count}{" "}
-                        {det.unit_count === 1 ? "unit" : "units"})
-                      </p>
-                      <p className="mt-0.5 text-[11.5px] text-[#6B7280]">
-                        {det.storeName} &middot; {det.camera_id} &middot; conf{" "}
-                        {det.confidence_score.toFixed(2)} &middot; box{" "}
-                        <span className="font-mono">
-                          {JSON.stringify(det.bounding_box[0])}
-                        </span>
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        showToast(
-                          `Mapped ${det.reading_id} → ${det.suggestedSku}`
-                        );
-                      }}
-                      className="shrink-0 rounded-[6px] border border-[#E5E7EB] px-2.5 py-1 text-[12px] font-medium text-[#111827] hover:bg-[#F9FAFB] cursor-pointer"
-                    >
-                      Map SKU
-                    </button>
-                  </div>
-                ))
+                <p className="py-6 text-center text-[13px] text-[#6B7280]">
+                  Sign in with an approved account to see the review queue.
+                </p>
               )}
             </div>
             <div className="flex justify-end border-t border-[#EFF0F6] px-5 py-3">
@@ -1174,7 +1154,7 @@ export function CategoryProductsView() {
                   if (!file) return;
                   if (!liveMode) {
                     setImportModalOpen(false);
-                    showToast(`Imported "${file.name}" (preview mode)`);
+                    showToast("Sign in with a team_admin account to import the SKU Master.");
                     return;
                   }
                   if (!hasGroup("team_admin")) {

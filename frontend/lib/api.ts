@@ -144,6 +144,18 @@ export interface ApiKpiResponse {
   flag_threshold: number;
 }
 
+/** One day of GET /reports/series: units found per capture, from the backend captures table. */
+export interface ApiReportsSeriesPoint {
+  date: string; // YYYY-MM-DD (UTC+7)
+  avg_units: number;
+  max_units: number;
+  captures: number;
+}
+
+export interface ApiReportsSeriesResponse {
+  series: ApiReportsSeriesPoint[];
+}
+
 export interface ApiSettingsResponse {
   account: {
     email: string;
@@ -295,6 +307,9 @@ export function createApiClient(getIdToken: TokenGetter) {
     getKpi: () =>
       requestWithAuth("/kpi", getIdToken) as Promise<ApiKpiResponse>,
 
+    getReportsSeries: () =>
+      requestWithAuth("/reports/series", getIdToken) as Promise<ApiReportsSeriesResponse>,
+
     getSettings: () =>
       requestWithAuth("/settings", getIdToken) as Promise<ApiSettingsResponse>,
 
@@ -337,5 +352,6 @@ export function resolveProductThumbnail(
     return "/images/products/3mien.png";
   if (text.includes("cung đình") || text.includes("cung dinh"))
     return "/images/products/cungdinh.png";
-  return "/images/products/thtruemilk.png";
+  // No photo for this SKU yet (e.g. the Slide snacks): a neutral box, never another product's photo.
+  return "/images/products/placeholder.svg";
 }

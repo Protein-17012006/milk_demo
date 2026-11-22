@@ -40,8 +40,8 @@ export function DashboardShell({ children }: DashboardShellProps) {
                 <span className="inline-flex items-center gap-2">
                   <Cloud className="h-3.5 w-3.5 text-[#EE730A]" />
                   <span>
-                    Preview mode (sample data) — Sign in with AWS Cognito to
-                    load live shelf data from{" "}
+                    Not signed in — sign in with AWS Cognito to load live
+                    shelf data from{" "}
                     <strong>ap-southeast-1</strong>.
                   </span>
                 </span>

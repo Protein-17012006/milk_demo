@@ -33,18 +33,8 @@ const DEFAULT_PREFS: UserPreferences = {
   default_landing: "Home",
 };
 
-const FALLBACK_STORES: ApiStore[] = [
-  {
-    store_id: "DEMO-S01",
-    store_name: "Demo Store S01",
-    district: "Ho Chi Minh City",
-    camera_id: "CAM-S01-A",
-    status: "Active",
-    categories_in_view: ["Milk"],
-    last_capture_timestamp: null,
-    has_recent_capture: false,
-  },
-];
+// Stores come only from the live API; signed out, the list stays empty rather than claiming a status.
+const FALLBACK_STORES: ApiStore[] = [];
 
 export function SettingsView() {
   const { user, isApproved, hasGroup, getIdToken } = useAuth();
@@ -226,7 +216,7 @@ export function SettingsView() {
                   Cognito Email
                 </p>
                 <p className="mt-1 rounded-[8px] border border-[#EFF0F6] bg-[#F9FAFB] px-3 py-2 text-[13.5px] font-medium text-[#111827]">
-                  {user?.email || "Not signed in (preview mode)"}
+                  {user?.email || "Not signed in"}
                 </p>
               </div>
               <div>
@@ -398,6 +388,11 @@ export function SettingsView() {
             </div>
 
             <div className="mt-4 divide-y divide-[#EFF0F6]">
+              {stores.length === 0 && (
+                <p className="py-3 text-[12.5px] text-[#6B7280]">
+                  Sign in with an approved account to load the store list.
+                </p>
+              )}
               {stores.map((st) => (
                 <div
                   key={st.store_id}

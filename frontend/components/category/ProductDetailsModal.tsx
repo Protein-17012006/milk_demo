@@ -6,7 +6,7 @@ import {
   MILK_FLAG_THRESHOLD,
   MISMATCH_TYPE_OPTIONS,
   type SkuProduct,
-} from "@/data/category-mock";
+} from "@/lib/products-ui";
 
 interface ProductDetailsModalProps {
   product: SkuProduct | null;

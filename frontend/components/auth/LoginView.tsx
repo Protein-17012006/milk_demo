@@ -1,10 +1,11 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import QRCode from "qrcode";
 import { Eye, EyeOff, KeyRound, Loader2, ShieldCheck } from "lucide-react";
-import { useAuth } from "@/lib/auth";
+import { useAuth, type SignInResult } from "@/lib/auth";
 
 function GoogleIcon() {
   return (
@@ -33,8 +34,16 @@ type LoginStep =
   | "CREDENTIALS"
   | "NEW_PASSWORD_REQUIRED"
   | "TOTP_REQUIRED"
+  | "MFA_SETUP"
   | "FORGOT_REQUEST"
   | "FORGOT_CONFIRM";
+
+type MfaSetupInfo = { secretCode: string; otpauthUri: string };
+
+/** Secret shown in groups of four so it can be typed into an authenticator by hand. */
+function groupSecret(secret: string): string {
+  return secret.replace(/(.{4})/g, "$1 ").trim();
+}
 
 export function LoginView() {
   const router = useRouter();
@@ -42,6 +51,7 @@ export function LoginView() {
     signIn,
     completeNewPassword,
     submitTotpCode,
+    verifyTotpSetup,
     forgotPassword,
     confirmForgotPassword,
   } = useAuth();
@@ -57,6 +67,37 @@ export function LoginView() {
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
+  const [mfaSetup, setMfaSetup] = useState<MfaSetupInfo | null>(null);
+  const [mfaQr, setMfaQr] = useState<string | null>(null);
+  const [setupCode, setSetupCode] = useState("");
+
+  // Draw the authenticator QR code in the browser; the secret never leaves this page.
+  // enterMfaSetup clears the previous image, so the effect only sets state once the image is ready.
+  useEffect(() => {
+    if (!mfaSetup) return;
+    let cancelled = false;
+    QRCode.toDataURL(mfaSetup.otpauthUri, { margin: 1, width: 192 })
+      .then((url) => {
+        if (!cancelled) setMfaQr(url);
+      })
+      .catch(() => {
+        if (!cancelled) setMfaQr(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mfaSetup]);
+
+  /** Moves to the authenticator setup screen when Cognito asks for MFA_SETUP. */
+  const enterMfaSetup = (result: Extract<SignInResult, { status: "MFA_SETUP_REQUIRED" }>) => {
+    setMfaQr(null);
+    setMfaSetup({ secretCode: result.secretCode, otpauthUri: result.otpauthUri });
+    setSetupCode("");
+    setStep("MFA_SETUP");
+    setInfoMsg(
+      "Two-factor authentication is required. Add this account to an authenticator app, then enter the code it shows."
+    );
+  };
 
   const handleLoginSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -81,6 +122,8 @@ export function LoginView() {
       } else if (result.status === "TOTP_REQUIRED") {
         setStep("TOTP_REQUIRED");
         setInfoMsg("Enter the 6-digit code from your Authenticator app.");
+      } else if (result.status === "MFA_SETUP_REQUIRED") {
+        enterMfaSetup(result);
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Sign-in failed.");
@@ -106,11 +149,34 @@ export function LoginView() {
       } else if (result.status === "TOTP_REQUIRED") {
         setStep("TOTP_REQUIRED");
         setInfoMsg("Enter the 6-digit code from your Authenticator app.");
+      } else if (result.status === "MFA_SETUP_REQUIRED") {
+        enterMfaSetup(result);
       }
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : "Could not update password."
       );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleMfaSetupSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setErrorMsg(null);
+    if (!/^\d{6}$/.test(setupCode.trim())) {
+      setErrorMsg("Enter the 6-digit code shown in your authenticator app.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const result = await verifyTotpSetup(setupCode);
+      if (result.status === "SIGNED_IN") {
+        setMfaSetup(null);
+        router.push("/category");
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Could not verify the code.");
     } finally {
       setSubmitting(false);
     }
@@ -186,6 +252,8 @@ export function LoginView() {
       <h1 className="text-[26px] font-semibold leading-tight tracking-[-0.02em] text-[#1D1F20]">
         {step === "TOTP_REQUIRED"
           ? "Two-factor verification"
+          : step === "MFA_SETUP"
+            ? "Set up two-factor authentication"
           : step === "NEW_PASSWORD_REQUIRED"
             ? "Set permanent password"
             : step === "FORGOT_REQUEST" || step === "FORGOT_CONFIRM"
@@ -378,6 +446,64 @@ export function LoginView() {
           >
             {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
             <span>Verify &amp; Log in</span>
+          </button>
+        </form>
+      )}
+
+      {step === "MFA_SETUP" && mfaSetup && (
+        <form onSubmit={handleMfaSetupSubmit} className="mt-5 space-y-4">
+          <ol className="list-decimal space-y-1 pl-5 text-[13px] text-[#374151]">
+            <li>
+              Open an authenticator app (Google Authenticator, Microsoft
+              Authenticator or similar) and add an account.
+            </li>
+            <li>Scan this code, or type the key below by hand.</li>
+            <li>Enter the 6-digit code the app shows.</li>
+          </ol>
+          <div className="flex justify-center">
+            {mfaQr ? (
+              // eslint-disable-next-line @next/next/no-img-element -- data URL drawn in the browser
+              <img
+                src={mfaQr}
+                alt="QR code for adding Project A to an authenticator app"
+                width={192}
+                height={192}
+                className="rounded-[6px] border border-[#E5E7EB]"
+              />
+            ) : (
+              <div className="flex h-[192px] w-[192px] items-center justify-center rounded-[6px] border border-[#E5E7EB] text-[12px] text-[#6B7280]">
+                Preparing QR code…
+              </div>
+            )}
+          </div>
+          <div>
+            <p className="text-[12px] font-medium text-[#374151]">Key</p>
+            <p className="mt-1 select-all break-all rounded-[6px] bg-[#F3F4F6] px-3 py-2 font-mono text-[13px] tracking-[0.08em] text-[#1D1F20]">
+              {groupSecret(mfaSetup.secretCode)}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 text-[13px] text-[#374151]">
+            <ShieldCheck className="h-4 w-4 text-[#EE730A]" />
+            <label htmlFor="mfa-setup-code">Code from the app</label>
+          </div>
+          <input
+            id="mfa-setup-code"
+            type="text"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={6}
+            value={setupCode}
+            onChange={(e) => setSetupCode(e.target.value)}
+            placeholder="000000"
+            className="h-[44px] w-full rounded-[6px] border border-[#B6B6B6] bg-white px-3 text-center font-mono text-[18px] tracking-[0.3em] text-[#1D1F20] outline-none focus:border-[#0051C3]"
+          />
+          <button
+            type="submit"
+            disabled={submitting}
+            className="flex h-[42px] w-full items-center justify-center gap-2 rounded-[6px] bg-[#EE730A] text-[14px] font-semibold text-white hover:bg-[#D96504] disabled:opacity-60 cursor-pointer"
+          >
+            {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
+            <span>Verify &amp; finish</span>
           </button>
         </form>
       )}

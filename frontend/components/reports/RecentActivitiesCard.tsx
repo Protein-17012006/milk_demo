@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
-import type { ActivityStatus, ShelfActivity } from "@/data/reports-mock";
+import type { ActivityStatus, ShelfActivity } from "@/lib/reports-ui";
 
 type ActivityFilter = "all" | "alerts" | "restocked";
 
@@ -71,7 +71,9 @@ export function RecentActivitiesCard({
       <div className="flex-1 overflow-y-auto px-[20px] py-[6px]">
         {filteredActivities.length === 0 ? (
           <div className="flex h-full items-center justify-center text-[13px] text-[#9CA3AF]">
-            No matching shelf activities found.
+            {activities.length === 0
+              ? "No shelf activity history yet: the API does not serve shelf events."
+              : "No matching shelf activities found."}
           </div>
         ) : (
           <div className="divide-y divide-[#EFF0F6]">

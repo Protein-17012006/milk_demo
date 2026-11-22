@@ -30,7 +30,17 @@ export interface AuthUser {
 export type SignInResult =
   | { status: "SIGNED_IN"; user: AuthUser }
   | { status: "NEW_PASSWORD_REQUIRED"; email: string }
-  | { status: "TOTP_REQUIRED"; email: string };
+  | { status: "TOTP_REQUIRED"; email: string }
+  // MFA is required by the user pool but this user has no authenticator yet (Cognito MFA_SETUP).
+  | { status: "MFA_SETUP_REQUIRED"; email: string; secretCode: string; otpauthUri: string };
+
+const TOTP_ISSUER = "Project A";
+
+/** otpauth:// URI that authenticator apps read from a QR code (Key URI Format). */
+export function buildOtpauthUri(email: string, secretCode: string): string {
+  const label = `${encodeURIComponent(TOTP_ISSUER)}:${encodeURIComponent(email)}`;
+  return `otpauth://totp/${label}?secret=${secretCode}&issuer=${encodeURIComponent(TOTP_ISSUER)}`;
+}
 
 interface AuthContextValue {
   user: AuthUser | null;
@@ -42,6 +52,7 @@ interface AuthContextValue {
   signIn: (email: string, password: string) => Promise<SignInResult>;
   completeNewPassword: (newPassword: string) => Promise<SignInResult>;
   submitTotpCode: (code: string) => Promise<SignInResult>;
+  verifyTotpSetup: (code: string) => Promise<SignInResult>;
   signUp: (email: string, password: string) => Promise<{ userConfirmed: boolean }>;
   confirmSignUp: (email: string, code: string) => Promise<void>;
   resendConfirmationCode: (email: string) => Promise<void>;
@@ -86,6 +97,26 @@ function extractUserFromSession(session: CognitoUserSession): AuthUser {
     groups,
     approved: groups.length > 0,
   };
+}
+
+/** Asks Cognito for a new TOTP secret for a user in the MFA_SETUP challenge. */
+function startTotpSetup(
+  cognitoUser: CognitoUser,
+  email: string,
+  resolve: (result: SignInResult) => void,
+  reject: (err: Error) => void
+): void {
+  cognitoUser.associateSoftwareToken({
+    associateSecretCode: (secretCode) =>
+      resolve({
+        status: "MFA_SETUP_REQUIRED",
+        email,
+        secretCode,
+        otpauthUri: buildOtpauthUri(email, secretCode),
+      }),
+    onFailure: (err) =>
+      reject(new Error(err?.message || "Could not start authenticator setup.")),
+  });
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -199,6 +230,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             pendingChallengeUserRef.current = cognitoUser;
             resolve({ status: "TOTP_REQUIRED", email: normalized });
           },
+          mfaSetup: () => {
+            pendingChallengeUserRef.current = cognitoUser;
+            startTotpSetup(cognitoUser, normalized, resolve, reject);
+          },
         });
       });
     },
@@ -233,12 +268,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 email: cognitoUser.getUsername(),
               });
             },
+            mfaSetup: () => {
+              startTotpSetup(cognitoUser, cognitoUser.getUsername(), resolve, reject);
+            },
           }
         );
       });
     },
     []
   );
+
+  /** Confirms the first code from a newly added authenticator; signs the user in. */
+  const verifyTotpSetup = useCallback(async (code: string): Promise<SignInResult> => {
+    const cognitoUser = pendingChallengeUserRef.current;
+    if (!cognitoUser) {
+      throw new Error("No pending authenticator setup. Please log in again.");
+    }
+    return new Promise<SignInResult>((resolve, reject) => {
+      cognitoUser.verifySoftwareToken(code.trim(), "Authenticator app", {
+        onSuccess: (session) => {
+          pendingChallengeUserRef.current = null;
+          const authUser = extractUserFromSession(session);
+          setUser(authUser);
+          // Make TOTP the user's preferred MFA; the pool already requires MFA, so a failure here is harmless.
+          cognitoUser.setUserMfaPreference(
+            null,
+            { PreferredMfa: true, Enabled: true },
+            () => resolve({ status: "SIGNED_IN", user: authUser })
+          );
+        },
+        onFailure: (err) =>
+          reject(new Error(err?.message || "That code did not match. Try the next one.")),
+      });
+    });
+  }, []);
 
   const submitTotpCode = useCallback(async (code: string): Promise<SignInResult> => {
     const cognitoUser = pendingChallengeUserRef.current;
@@ -388,6 +451,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       signIn,
       completeNewPassword,
       submitTotpCode,
+      verifyTotpSetup,
       signUp,
       confirmSignUp,
       resendConfirmationCode,
@@ -403,6 +467,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       signIn,
       completeNewPassword,
       submitTotpCode,
+      verifyTotpSetup,
       signUp,
       confirmSignUp,
       resendConfirmationCode,

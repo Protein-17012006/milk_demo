@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -10,21 +10,22 @@ import {
   YAxis,
 } from "recharts";
 import { ChevronDown, ArrowUp, ArrowDown } from "lucide-react";
+import type { ApiReportsSeriesPoint } from "@/lib/api";
 import {
-  MONTHLY_STOCK_BY_GRANULARITY,
+  GRANULARITY_OPTIONS,
+  bucketStockSeries,
   type ChartGranularity,
-  type MonthlyStockPoint,
-} from "@/data/reports-mock";
+  type StockPoint,
+} from "@/lib/reports-ui";
 
 interface MonthlyStockChartProps {
-  scaleFactor?: number;
+  /** Days from GET /reports/series; null while signed out or not loaded. */
+  series: ApiReportsSeriesPoint[] | null;
 }
-
-const GRANULARITY_OPTIONS: ChartGranularity[] = ["Month", "Quarter", "Week"];
 
 interface CustomTooltipProps {
   active?: boolean;
-  payload?: Array<{ payload: MonthlyStockPoint }>;
+  payload?: Array<{ payload: StockPoint }>;
 }
 
 function StockBarTooltip({ active, payload }: CustomTooltipProps) {
@@ -37,36 +38,43 @@ function StockBarTooltip({ active, payload }: CustomTooltipProps) {
 
       <div className="mt-2 space-y-1.5">
         <div className="flex items-center justify-between gap-4">
-          <span className="text-[9.5px] text-[#979797]">Avg. Stock / Store</span>
+          <span className="text-[9.5px] text-[#979797]">Avg. units / capture</span>
           <span className="text-[10.5px] font-semibold text-[#4A4A4A]">
-            {item.avgStockPerStore}
+            {item.value}
           </span>
         </div>
 
         <div className="flex items-center justify-between gap-4">
-          <span className="text-[9.5px] text-[#979797]">vs last period</span>
-          <span
-            className={`inline-flex items-center gap-0.5 text-[10.5px] font-semibold ${
-              item.isPositive ? "text-[#1A932E]" : "text-[#DC2626]"
-            }`}
-          >
-            {item.isPositive ? (
-              <ArrowUp className="h-2.5 w-2.5" strokeWidth={2.5} />
-            ) : (
-              <ArrowDown className="h-2.5 w-2.5" strokeWidth={2.5} />
-            )}
-            {item.vsLastPeriod}
+          <span className="text-[9.5px] text-[#979797]">Peak units</span>
+          <span className="text-[10.5px] font-semibold text-[#4A4A4A]">
+            {item.maxUnits}
           </span>
         </div>
+
+        {item.vsLastPeriod !== null && (
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-[9.5px] text-[#979797]">vs last period</span>
+            <span
+              className={`inline-flex items-center gap-0.5 text-[10.5px] font-semibold ${
+                item.isPositive ? "text-[#1A932E]" : "text-[#DC2626]"
+              }`}
+            >
+              {item.isPositive ? (
+                <ArrowUp className="h-2.5 w-2.5" strokeWidth={2.5} />
+              ) : (
+                <ArrowDown className="h-2.5 w-2.5" strokeWidth={2.5} />
+              )}
+              {item.vsLastPeriod}
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="my-2 h-px bg-[#8F8F8F]/20" />
 
-      <div className="rounded-full bg-[#F0FFF0] px-2.5 py-1 text-center">
-        <span className="text-[9.5px] font-medium text-[#00B103]">
-          On-Shelf Availability: {item.osaRate}
-        </span>
-      </div>
+      <p className="text-center text-[9.5px] font-medium text-[#6B7280]">
+        {item.captures.toLocaleString("en-US")} captures
+      </p>
     </div>
   );
 }
@@ -123,8 +131,8 @@ function PillTrackBarShape({
   );
 }
 
-export function MonthlyStockChart({ scaleFactor = 1 }: MonthlyStockChartProps) {
-  const [granularity, setGranularity] = useState<ChartGranularity>("Month");
+export function MonthlyStockChart({ series }: MonthlyStockChartProps) {
+  const [granularity, setGranularity] = useState<ChartGranularity>("Day");
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -140,22 +148,17 @@ export function MonthlyStockChart({ scaleFactor = 1 }: MonthlyStockChartProps) {
     return () => document.removeEventListener("mousedown", handleOutside);
   }, [menuOpen]);
 
-  const rawData = MONTHLY_STOCK_BY_GRANULARITY[granularity];
-  const chartData: MonthlyStockPoint[] = rawData.map((d) => ({
-    ...d,
-    value: Math.min(400, Math.max(40, Math.round(d.value * scaleFactor))),
-    avgStockPerStore: Math.max(
-      35,
-      Math.round(d.avgStockPerStore * scaleFactor)
-    ),
-  }));
+  const chartData = useMemo(
+    () => bucketStockSeries(series ?? [], granularity),
+    [series, granularity]
+  );
 
   return (
     <div className="flex h-[352px] flex-col rounded-[18px] border border-[#EFF0F6] bg-white px-[22px] pt-[16px] pb-[14px] shadow-[0_4px_18px_rgba(0,0,0,0.05)]">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-[#E4E5E7] pb-[12px]">
         <h2 className="text-[13px] font-medium tracking-[-0.011em] text-[#4D4D4D]">
-          Monthly Shelf Stock Count
+          Shelf Stock Count
         </h2>
 
         <div ref={menuRef} className="relative">
@@ -197,13 +200,20 @@ export function MonthlyStockChart({ scaleFactor = 1 }: MonthlyStockChartProps) {
         </div>
       </div>
 
-      {/* Bar Chart */}
+      {/* Bar Chart: one bar per day / ISO week / month of real captures */}
+      {chartData.length === 0 ? (
+        <div className="mt-4 flex flex-1 items-center justify-center px-6 text-center text-[12.5px] text-[#9CA3AF]">
+          {series === null
+            ? "Sign in with an approved account to load the stock history."
+            : "No captures stored yet."}
+        </div>
+      ) : (
       <div className="mt-4 flex-1 min-h-0 w-full overflow-hidden">
         <ResponsiveContainer width="100%" height="100%" debounce={180}>
           <BarChart
             data={chartData}
             margin={{ top: 8, right: 6, left: -24, bottom: 2 }}
-            barCategoryGap={granularity === "Month" ? "30%" : "42%"}
+            barCategoryGap={chartData.length > 6 ? "30%" : "42%"}
           >
             <defs>
               <linearGradient id="monthlyBarOrange" x1="0" y1="0" x2="0" y2="1">
@@ -221,8 +231,8 @@ export function MonthlyStockChart({ scaleFactor = 1 }: MonthlyStockChartProps) {
               dy={8}
             />
             <YAxis
-              domain={[0, 400]}
-              ticks={[0, 100, 200, 300, 400]}
+              domain={[0, "auto"]}
+              allowDecimals={false}
               axisLine={false}
               tickLine={false}
               tick={{ fill: "rgba(0,0,0,0.5)", fontSize: 9.5, fontWeight: 600 }}
@@ -234,7 +244,7 @@ export function MonthlyStockChart({ scaleFactor = 1 }: MonthlyStockChartProps) {
             />
             <Bar
               dataKey="value"
-              barSize={granularity === "Month" ? 11 : 18}
+              barSize={chartData.length > 6 ? 11 : 18}
               fill="url(#monthlyBarOrange)"
               background={{ fill: "transparent" }}
               shape={<PillTrackBarShape />}
@@ -243,6 +253,7 @@ export function MonthlyStockChart({ scaleFactor = 1 }: MonthlyStockChartProps) {
           </BarChart>
         </ResponsiveContainer>
       </div>
+      )}
     </div>
   );
 }

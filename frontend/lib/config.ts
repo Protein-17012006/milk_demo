@@ -14,3 +14,6 @@ export const AWS_CONFIG = {
   cognitoClientId:
     process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID || "60l85r4c624741f2mr9hecr81d",
 } as const;
+
+/** How often pages showing live stock re-read the API while the tab is visible (HOANG-P10 Nextstep 9). */
+export const LIVE_REFRESH_MS = 15_000;
