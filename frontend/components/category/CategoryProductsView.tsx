@@ -27,6 +27,7 @@ import {
 import { LIVE_REFRESH_MS } from "@/lib/config";
 import {
   ALL_STORES_LABEL,
+  MILK_FLAG_THRESHOLD,
   SORT_OPTIONS,
   STATUS_FILTER_OPTIONS,
   type CategoryFilterOption,
@@ -125,6 +126,16 @@ function getConfidenceColor(confidence: number): string {
   return "#FF8D28";
 }
 
+function statusOf(isFlagged: boolean, confidence: number): SkuProduct["status"] {
+  if (!isFlagged) return "Validated";
+  return confidence < MILK_FLAG_THRESHOLD ? "Low Confidence" : "Needs Review";
+}
+
+function flagReasonOf(isFlagged: boolean, reason: string): string {
+  if (!isFlagged) return "";
+  return reason === "Unrecognized" ? "Unrecognized" : "Low Confidence";
+}
+
 function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
   const catLower = (p.category || "Milk").toLowerCase();
   const primaryCategory: SkuProduct["primaryCategory"] = catLower.includes(
@@ -135,11 +146,7 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
       ? "Snack"
       : "Milk";
 
-  const status: SkuProduct["status"] = p.is_flagged
-    ? p.confidence_score < 0.7
-      ? "Low Confidence"
-      : "Needs Review"
-    : "Validated";
+  const status = statusOf(p.is_flagged, p.confidence_score);
 
   return {
     id: p.sku_id,
@@ -179,11 +186,7 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
       detection_method: "Visual",
       bounding_box: [],
       is_flagged: p.is_flagged,
-      flag_reason: p.is_flagged
-        ? p.flag_reason === "Unrecognized"
-          ? "Unrecognized"
-          : "Low Confidence"
-        : "",
+      flag_reason: flagReasonOf(p.is_flagged, p.flag_reason),
       processing_time_ms: p.processing_time_ms || 0,
       image_key: "",
       frame_w: 2560,
@@ -480,10 +483,20 @@ export function CategoryProductsView() {
       const detail = await api.getProductDetail(item.id);
       setViewingProduct((curr) => {
         if (!curr || curr.id !== item.id) return curr;
+        // Every number on the card comes from the reading the detail call returned: captures arrive
+        // every few seconds, so mixing it with the list row would show one reading's count next to
+        // another reading's boxes.
+        const cv = detail.cv_output;
         return {
           ...curr,
+          status: statusOf(cv.is_flagged, cv.confidence_score),
           cvOutput: {
             ...curr.cvOutput,
+            unit_count: cv.unit_count,
+            confidence_score: cv.confidence_score,
+            is_flagged: cv.is_flagged,
+            flag_reason: flagReasonOf(cv.is_flagged, cv.flag_reason),
+            processing_time_ms: cv.processing_time_ms || curr.cvOutput.processing_time_ms,
             reading_id: detail.cv_output.reading_id || curr.cvOutput.reading_id,
             capture_id: detail.cv_output.capture_id || curr.cvOutput.capture_id,
             store_id: detail.cv_output.store_id || curr.cvOutput.store_id,
