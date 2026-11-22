@@ -10,8 +10,19 @@ Parameters:
     Default: milk-demo
   RetentionDays:
     Type: Number
-    Default: 30
-    Description: Days to keep stored frames and results.
+    Default: 7
+    Description: >-
+      Days to keep stored frames and results. 7 since 2026-11-22: continuous captures are kept 7 days;
+      the official hourly captures live 90 days in the website backend (decision of 2026-11-21).
+  IngestQueueArn:
+    Type: String
+    Default: ""
+    Description: >-
+      SQS queue of the website backend (milk-backend-<env> output IngestQueueArn). When set, every new
+      results/*.json is announced to it (HOANG-P10 decision 3). Its queue policy must allow this bucket first.
+
+Conditions:
+  SendResultsToBackend: !Not [!Equals [!Ref IngestQueueArn, ""]]
 
 Resources:
   DataBucket:
@@ -32,6 +43,19 @@ Resources:
       OwnershipControls:
         Rules:
           - ObjectOwnership: BucketOwnerEnforced
+      NotificationConfiguration: !If
+        - SendResultsToBackend
+        - QueueConfigurations:
+            - Event: "s3:ObjectCreated:*"
+              Queue: !Ref IngestQueueArn
+              Filter:
+                S3Key:
+                  Rules:
+                    - Name: prefix
+                      Value: results/
+                    - Name: suffix
+                      Value: .json
+        - !Ref AWS::NoValue
       LifecycleConfiguration:
         Rules:
           - Id: expire-frames

@@ -48,9 +48,14 @@ Parameters:
     AllowedValues:
       - "true"
       - "false"
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Address that receives backend alarms (ingest DLQ). Empty = alarm topic without a subscriber.
 
 Conditions:
   UseWaf: !Equals [!Ref EnableWaf, "true"]
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
 
 Resources:
   # =========================================================================
@@ -410,6 +415,65 @@ Resources:
         deadLetterTargetArn: !GetAtt IngestDLQ.Arn
         maxReceiveCount: 3
 
+  # The hub bucket's results/ notifications land here (HOANG-P10 decision 3, NHAT-T001).
+  # Only that bucket, in this account, may send. The notification itself is declared in infra/base.yaml.
+  IngestQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref IngestQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: HubBucketResults
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt IngestQueue.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:s3:::${HubDataBucket}"
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  # Results that failed three times sit in the DLQ: tell someone (HOANG-P10 Nextstep 10).
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "milk-backend-${Env}-alerts"
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  IngestDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "milk-backend-${Env}-ingest-dlq-not-empty"
+      AlarmDescription: >-
+        Hub results failed ingestion three times and wait in the DLQ. Read the ingest Lambda log,
+        fix the cause, then move the messages back to the ingest queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt IngestDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
   # =========================================================================
   # 5. LAMBDA IAM ROLE + API & INGEST FUNCTIONS (PYTHON 3.12)
   # =========================================================================
@@ -731,6 +795,11 @@ Outputs:
     Value: !Ref AnalyticsBucket
   IngestQueueUrl:
     Value: !Ref IngestQueue
+  IngestQueueArn:
+    Description: Pass to the hub stack (infra/base.yaml, parameter IngestQueueArn) to send results/ here.
+    Value: !GetAtt IngestQueue.Arn
+  AlertTopicArn:
+    Value: !Ref AlertTopic
   IngestLambdaName:
     Value: !Ref IngestLambda
   ApiLambdaName:
