@@ -61,5 +61,6 @@ srtAddress: :8890
 pathDefaults:
   srtPublishPassphrase: {{SRT_PASSPHRASE}}
 
+# install.sh appends the store camera path (pulled on demand) when camera/url is set in SSM.
 paths:
   all_others:
