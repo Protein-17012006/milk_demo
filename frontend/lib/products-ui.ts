@@ -80,6 +80,9 @@ export interface SkuProduct {
   categories: string[];
   hasMoreCategories?: boolean;
   primaryCategory: PrimaryCategory;
+  /** SKU Master brand and subcategory; together they are the product line the page groups by. */
+  brand: string | null;
+  subcategory: string | null;
   packType: string;
   packSize: string;
   skuCode: string;

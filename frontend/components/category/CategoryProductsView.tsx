@@ -157,6 +157,8 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
       Boolean
     ),
     primaryCategory,
+    brand: p.brand,
+    subcategory: p.subcategory,
     packType: p.pack_type || "Carton",
     packSize: p.pack_size || "—",
     skuCode: p.model_alias || p.sku_id,
