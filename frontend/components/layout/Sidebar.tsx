@@ -13,8 +13,10 @@ import {
   ArrowUpDown,
   ArrowLeftToLine,
   LogIn,
+  LogOut,
   UserPlus,
 } from "lucide-react";
+import { useAuth } from "@/lib/auth";
 import { useSidebarSearch } from "./SidebarContext";
 
 export type NavItemId = "home" | "dashboard" | "category" | "settings";
@@ -34,6 +36,7 @@ export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const { searchQuery, setSearchQuery } = useSidebarSearch();
+  const { user, isAuthenticated, signOut } = useAuth();
   const pathname = usePathname();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const accountMenuRef = useRef<HTMLDivElement>(null);
@@ -110,7 +113,7 @@ export function Sidebar() {
           title="Account options"
         >
           <span className="truncate text-[12px] font-normal text-black">
-            example1234@...
+            {isAuthenticated && user?.email ? user.email : "Guest preview"}
           </span>
           <ArrowUpDown
             className="h-[13px] w-[13px] shrink-0 text-black/55"
@@ -120,22 +123,50 @@ export function Sidebar() {
 
         {accountMenuOpen && !collapsed && (
           <div className="absolute left-2.5 right-2.5 top-[55px] z-40 rounded-[8px] border border-[#E5E7EB] bg-white p-1 shadow-[0_8px_22px_rgba(0,0,0,0.08)]">
-            <Link
-              href="/login"
-              onClick={() => setAccountMenuOpen(false)}
-              className="flex items-center gap-2 rounded-[6px] px-2.5 py-1.5 text-[12.5px] font-medium text-[#111827] hover:bg-[#F7F8FA]"
-            >
-              <LogIn className="h-3.5 w-3.5 text-[#6B7280]" />
-              <span>Log in page</span>
-            </Link>
-            <Link
-              href="/register"
-              onClick={() => setAccountMenuOpen(false)}
-              className="flex items-center gap-2 rounded-[6px] px-2.5 py-1.5 text-[12.5px] font-medium text-[#111827] hover:bg-[#F7F8FA]"
-            >
-              <UserPlus className="h-3.5 w-3.5 text-[#6B7280]" />
-              <span>Register page</span>
-            </Link>
+            {isAuthenticated && user ? (
+              <>
+                <div className="border-b border-[#F3F4F6] px-2.5 py-1.5">
+                  <p className="truncate text-[11.5px] font-medium text-[#111827]">
+                    {user.email}
+                  </p>
+                  <p className="mt-0.5 text-[10.5px] font-medium text-[#EE730A]">
+                    {user.groups.length > 0
+                      ? user.groups.join(", ")
+                      : "Pending role"}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    signOut();
+                  }}
+                  className="mt-0.5 flex w-full items-center gap-2 rounded-[6px] px-2.5 py-1.5 text-left text-[12.5px] font-medium text-[#B91C1C] hover:bg-[#FEF2F2] cursor-pointer"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  <span>Sign out</span>
+                </button>
+              </>
+            ) : (
+              <>
+                <Link
+                  href="/login"
+                  onClick={() => setAccountMenuOpen(false)}
+                  className="flex items-center gap-2 rounded-[6px] px-2.5 py-1.5 text-[12.5px] font-medium text-[#111827] hover:bg-[#F7F8FA]"
+                >
+                  <LogIn className="h-3.5 w-3.5 text-[#6B7280]" />
+                  <span>Log in</span>
+                </Link>
+                <Link
+                  href="/register"
+                  onClick={() => setAccountMenuOpen(false)}
+                  className="flex items-center gap-2 rounded-[6px] px-2.5 py-1.5 text-[12.5px] font-medium text-[#111827] hover:bg-[#F7F8FA]"
+                >
+                  <UserPlus className="h-3.5 w-3.5 text-[#6B7280]" />
+                  <span>Sign up</span>
+                </Link>
+              </>
+            )}
           </div>
         )}
       </div>

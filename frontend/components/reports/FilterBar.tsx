@@ -7,16 +7,16 @@ import {
   STORE_OPTIONS,
   CATEGORY_OPTIONS,
   type TimeframeOption,
-  type StoreOption,
   type CategoryOption,
 } from "@/data/reports-mock";
 
 interface FilterBarProps {
   timeframe: TimeframeOption;
-  store: StoreOption;
+  store: string;
   category: CategoryOption;
+  storeOptions?: string[];
   onTimeframeChange: (value: TimeframeOption) => void;
-  onStoreChange: (value: StoreOption) => void;
+  onStoreChange: (value: string) => void;
   onCategoryChange: (value: CategoryOption) => void;
 }
 
@@ -118,6 +118,7 @@ export function FilterBar({
   timeframe,
   store,
   category,
+  storeOptions,
   onTimeframeChange,
   onStoreChange,
   onCategoryChange,
@@ -133,7 +134,7 @@ export function FilterBar({
       <FilterDropdown
         label="Store"
         value={store}
-        options={STORE_OPTIONS}
+        options={storeOptions && storeOptions.length > 0 ? storeOptions : STORE_OPTIONS}
         onChange={onStoreChange}
       />
       <FilterDropdown

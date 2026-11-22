@@ -1,8 +1,10 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Download, X } from "lucide-react";
 import { useSidebarSearch } from "@/components/layout/SidebarContext";
+import { useAuth } from "@/lib/auth";
+import { createApiClient, type ApiKpiResponse, type ApiStore } from "@/lib/api";
 import { FilterBar } from "./FilterBar";
 import { KpiGrid } from "./KpiGrid";
 import { MonthlyStockChart } from "./MonthlyStockChart";
@@ -22,16 +24,65 @@ interface ReportsDashboardProps {
 
 export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
   const { searchQuery: sidebarSearchQuery } = useSidebarSearch();
+  const { isApproved, getIdToken } = useAuth();
   const effectiveSearchQuery = searchQuery ?? sidebarSearchQuery;
   const [timeframe, setTimeframe] = useState<TimeframeOption>("All-time");
-  const [store, setStore] = useState<StoreOption>("All Stores (30)");
+  const [store, setStore] = useState<string>("All Stores (30)");
   const [category, setCategory] = useState<CategoryOption>("All Categories");
   const [auditModalOpen, setAuditModalOpen] = useState(false);
+  const [liveKpi, setLiveKpi] = useState<ApiKpiResponse | null>(null);
+  const [liveStores, setLiveStores] = useState<ApiStore[] | null>(null);
 
-  const kpis = useMemo(
-    () => getFilteredKpis(timeframe, store, category),
-    [timeframe, store, category]
-  );
+  useEffect(() => {
+    if (!isApproved) {
+      setLiveKpi(null);
+      setLiveStores(null);
+      return;
+    }
+    let cancelled = false;
+    const api = createApiClient(getIdToken);
+    Promise.all([api.getKpi(), api.getStores()])
+      .then(([kpiRes, storesRes]) => {
+        if (cancelled) return;
+        setLiveKpi(kpiRes);
+        setLiveStores(storesRes.items);
+        setStore(`All Stores (${storesRes.total})`);
+      })
+      .catch(() => {
+        // fallback cleanly to sample metrics
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isApproved, getIdToken]);
+
+  const dynamicStoreOptions = useMemo(() => {
+    if (!liveStores) return undefined;
+    return [
+      `All Stores (${liveStores.length})`,
+      ...liveStores.map((s) => `${s.store_id} — ${s.store_name}`),
+    ];
+  }, [liveStores]);
+
+  const kpis = useMemo(() => {
+    const base = getFilteredKpis(
+      timeframe,
+      (store.startsWith("All Stores") ? "All Stores (30)" : store) as StoreOption,
+      category
+    );
+    if (!liveKpi) return base;
+    return {
+      ...base,
+      activeStores: liveKpi.active_stores_monitored,
+      totalStores: liveKpi.total_stores,
+      totalOnShelfUnits: liveKpi.total_on_shelf_units,
+      avgInferenceTime: `${liveKpi.avg_processing_time_ms} ms`,
+      top50SkuAccuracy:
+        liveKpi.top_50_sku_accuracy !== null
+          ? liveKpi.top_50_sku_accuracy
+          : base.top50SkuAccuracy,
+    };
+  }, [timeframe, store, category, liveKpi]);
 
   // Deterministic scale factor for hardcoded charts when filters change
   const chartScaleFactor = useMemo(() => {
@@ -39,7 +90,7 @@ export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
     if (timeframe === "This Quarter") factor *= 0.92;
     if (timeframe === "Last 30 Days") factor *= 0.84;
     if (timeframe === "Last 7 Days") factor *= 0.72;
-    if (store !== "All Stores (30)") factor *= 0.82;
+    if (!store.startsWith("All Stores")) factor *= 0.82;
     if (category !== "All Categories") factor *= 0.85;
     return factor;
   }, [timeframe, store, category]);
@@ -47,7 +98,7 @@ export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
   const filteredActivities = useMemo(() => {
     const q = effectiveSearchQuery.trim().toLowerCase();
     return RECENT_SHELF_ACTIVITIES.filter((item) => {
-      if (store !== "All Stores (30)" && item.storeDistrict !== store) {
+      if (!store.startsWith("All Stores") && item.storeDistrict !== store) {
         return false;
       }
       if (category !== "All Categories" && item.category !== category) {
@@ -65,7 +116,23 @@ export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
     });
   }, [store, category, effectiveSearchQuery]);
 
-  const handleDownloadCsv = () => {
+  const handleDownloadCsv = async () => {
+    if (isApproved) {
+      try {
+        const api = createApiClient(getIdToken);
+        const csvText = await api.exportCaptureLogCsv();
+        const blob = new Blob([csvText], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "capture-log.csv";
+        link.click();
+        URL.revokeObjectURL(url);
+        return;
+      } catch {
+        // fall through to summary export
+      }
+    }
     const rows = [
       ["Metric", "Value"],
       ["Timeframe", timeframe],
@@ -92,9 +159,17 @@ export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
     <div className="mx-auto w-full px-4 pt-6 pb-8 sm:px-6 lg:px-7">
       {/* Page Header */}
       <header className="flex items-center justify-between border-b border-black/10 pb-[18px]">
-        <h1 className="text-[22px] font-normal leading-tight text-black">
-          Reports
-        </h1>
+        <div>
+          <h1 className="text-[22px] font-normal leading-tight text-black">
+            Reports
+          </h1>
+          {liveKpi && (
+            <p className="mt-1 text-[12px] text-[#6B7280]">
+              Live AWS data &middot; {liveKpi.captures_count} captures synced
+              &middot; {liveKpi.top_50_scope_note}
+            </p>
+          )}
+        </div>
 
         <button
           type="button"
@@ -112,6 +187,7 @@ export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
           timeframe={timeframe}
           store={store}
           category={category}
+          storeOptions={dynamicStoreOptions}
           onTimeframeChange={setTimeframe}
           onStoreChange={setStore}
           onCategoryChange={setCategory}
