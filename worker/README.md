@@ -48,6 +48,25 @@ MILK_MODEL_VERSION=long-2026-10-13+slide-v3
 Không đặt thì worker tự ghép `MILK_PIPELINE` với tên thư mục chứa `MILK_SLIDE_WEIGHTS`, ví dụ
 `long+slide:runs_v3`. Kết quả còn có `detections`: từng hộp với độ tin cậy riêng của nó.
 
+## Chạy trên Windows (máy HUYHOANG, từ 23/11)
+
+- **Thư mục gốc** `C:\Users\huyho\Datagent`, đặt tên giống `~/Desktop/Datagent` của máy long. Bên trong có:
+  - `carton_recognition\`, `yolo\`, `slide_pilot\runs_v3\`, `ingest_bench\data\models\`.
+  - `milk_demo\` (repo này), `worker.env`.
+  - `.venv\`: Python 3.12, torch 2.11.0+cu128, ultralytics 8.4.47, lancedb 0.40.0, opencv-contrib-python 4.10.0.84.
+- **`worker.env`**: đường dẫn viết bằng `/`, ví dụ `C:/Users/huyho/Datagent/...`. Chỉ `SYSTEM` và người dùng máy
+  được đọc file (đặt bằng `icacls`).
+- **ffmpeg**: cài bằng `winget install --id Gyan.FFmpeg -e`. Script chạy nền tự tìm ffmpeg, vì PATH của
+  `SYSTEM` không có thư mục của winget.
+- **Đăng ký chạy nền** (một lần, PowerShell quyền admin):
+  `powershell -ExecutionPolicy Bypass -File worker\windows\register-task.ps1 -Root C:\Users\huyho\Datagent`.
+  Lệnh này tạo task `milk-worker`:
+  - Chạy `worker\windows\run-worker.ps1` khi máy khởi động, dưới tài khoản `SYSTEM`.
+  - Worker chạy ở mức ưu tiên thấp. Worker thoát thì 5 giây sau chạy lại.
+  - Log ở `logs\worker-YYYY-MM-DD.log`, giữ 14 ngày.
+- **Bật và tắt**: `Start-ScheduledTask milk-worker` và `Stop-ScheduledTask milk-worker`. Trước khi bật, phải tắt
+  worker ở máy khác đang đếm cùng camera.
+
 ## Chạy nền
 
 Theo quy tắc dùng máy chung (job dài hơn 30 phút thì ghi vào `RESOURCES.md`), chạy bằng
