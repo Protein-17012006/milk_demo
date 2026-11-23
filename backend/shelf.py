@@ -92,3 +92,64 @@ def build_check(bucket: str, captures: list[dict]) -> dict[str, Any]:
         "cameras": sorted(per_camera),
         "confident_skus": sorted(confident),
     }
+
+
+def status_of(level: int) -> str:
+    """OOS at 0, LOW at 1..LOW_MAX, IN_STOCK above."""
+    if level <= 0:
+        return "OOS"
+    return "LOW" if level <= LOW_MAX else "IN_STOCK"
+
+
+def _event(kind: str, at: str, before: int, after: int, duration_min: int | None = None) -> dict[str, Any]:
+    return {
+        "type": kind,
+        "at": at,
+        "delta": after - before,
+        "level_before": before,
+        "level_after": after,
+        "duration_min": duration_min,
+    }
+
+
+def step_state(state: dict | None, units: int, bucket: str) -> tuple[dict, dict | None]:
+    """Apply one counted check of one SKU to its shelf state.
+
+    A change needs two checks in a row: x1 is the previous check, x2 this one. A check makes at most one event,
+    tried in the order OOS, LOW_STOCK, DEPLETED, RESTOCKED, and the event is timed at x1. With no event and
+    x1 == x2, the level follows x2 (shoppers taking single units). oos_checks counts checks spent out of stock,
+    so a RESTOCKED that ends one carries its minutes."""
+    s = (
+        dict(state)
+        if state
+        else {"L": None, "status": None, "since": None, "prev": None, "prev_bucket": None, "oos_checks": 0}
+    )
+    x1, x2, at, level = s["prev"], int(units), s["prev_bucket"], s["L"]
+    event = None
+    new_level = level
+    if x1 is not None and level is None:
+        if x1 == x2:
+            new_level = x2  # first two equal checks set the level, without an event
+    elif x1 is not None:
+        if x1 == 0 and x2 == 0 and level > 0:
+            event = _event("OOS", at, level, 0)
+        elif 1 <= x1 <= LOW_MAX and 1 <= x2 <= LOW_MAX and level > LOW_MAX:
+            event = _event("LOW_STOCK", at, level, max(x1, x2))
+        elif x1 <= level - DEPLETED_DROP and x2 <= level - DEPLETED_DROP and min(x1, x2) > LOW_MAX:
+            event = _event("DEPLETED", at, level, max(x1, x2))
+        elif x1 >= level + RESTOCK_RISE and x2 >= level + RESTOCK_RISE:
+            ended_oos = s["status"] == "OOS"
+            event = _event(
+                "RESTOCKED", at, level, min(x1, x2), BUCKET_MINUTES * (s["oos_checks"] - 1) if ended_oos else None
+            )
+        elif x1 == x2:
+            new_level = x2
+        if event is not None:
+            new_level = event["level_after"]
+    if new_level is not None and status_of(new_level) != s["status"]:
+        s["status"], s["since"] = status_of(new_level), at
+        s["oos_checks"] = 2 if s["status"] == "OOS" else 0
+    elif event is None and s["status"] == "OOS":
+        s["oos_checks"] += 1
+    s["L"], s["prev"], s["prev_bucket"] = new_level, x2, bucket
+    return s, event

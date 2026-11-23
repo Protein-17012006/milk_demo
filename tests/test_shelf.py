@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from shelf import add_buckets, bucket_of, build_check, is_open, valid_hours  # noqa: E402
+from shelf import add_buckets, bucket_of, build_check, is_open, step_state, valid_hours  # noqa: E402
 
 
 def cap(camera: str, ts: str, counts: dict[str, int], boxes: list[dict] | None = None) -> dict:
@@ -93,3 +93,60 @@ def test_confident_skus_need_one_box_at_070():
     ]
     caps = [cap("CAM-A", "2026-11-23T14:05:10+07:00", {"Slide Hot & Spicy 160g": 1, "Slide Cheese 145g": 1}, boxes)]
     assert build_check("20261123-1405", caps)["confident_skus"] == ["Slide Cheese 145g"]
+
+
+# --- Task 2: shelf state ---
+
+
+def walk(levels: list[int], state: dict | None = None) -> tuple[list[dict], dict]:
+    """Step the shelf state through checks in a row from 20261123-1400; returns the events and the last state."""
+    events = []
+    bucket = "20261123-1400"
+    for units in levels:
+        state, event = step_state(state, units, bucket)
+        if event is not None:
+            events.append(event)
+        bucket = add_buckets(bucket, 1)
+    return events, state
+
+
+def test_first_two_equal_checks_set_the_level_without_an_event():
+    events, st = walk([3, 3])
+    assert events == [] and (st["L"], st["status"]) == (3, "IN_STOCK")
+    events, st = walk([0, 0])
+    assert events == [] and (st["L"], st["status"]) == (0, "OOS")
+
+
+def test_two_zero_checks_make_an_out_of_stock():
+    events, _ = walk([5, 5, 0, 0])
+    assert events == [
+        {"type": "OOS", "at": "20261123-1410", "delta": -5, "level_before": 5, "level_after": 0, "duration_min": None}
+    ]
+
+
+def test_one_hidden_check_is_not_an_event():
+    assert walk([5, 5, 0, 5, 5])[0] == []
+
+
+def test_low_stock_wins_over_depleted():
+    assert [(e["type"], e["delta"], e["level_after"]) for e in walk([8, 8, 2, 2])[0]] == [("LOW_STOCK", -6, 2)]
+
+
+def test_depleted_needs_a_drop_of_three():
+    events, st = walk([8, 8, 6, 6])
+    assert events == [] and st["L"] == 6
+    assert [(e["type"], e["delta"], e["level_after"]) for e in walk([12, 12, 8, 8])[0]] == [("DEPLETED", -4, 8)]
+
+
+def test_restocked_needs_a_rise_of_two():
+    events, st = walk([8, 8, 9, 9])
+    assert events == [] and st["L"] == 9
+    assert [(e["type"], e["delta"], e["level_after"]) for e in walk([8, 8, 24, 24])[0]] == [("RESTOCKED", 16, 24)]
+
+
+def test_restock_after_out_of_stock_carries_its_open_minutes():
+    events, _ = walk([5, 5, 0, 0, 0, 0, 6, 6])
+    assert [(e["type"], e["at"], e["duration_min"]) for e in events] == [
+        ("OOS", "20261123-1410", None),
+        ("RESTOCKED", "20261123-1430", 20),
+    ]
