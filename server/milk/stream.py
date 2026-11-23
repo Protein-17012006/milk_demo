@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -27,6 +28,19 @@ class Frame:
     image: np.ndarray  # BGR, full camera resolution
     received_at: float  # time.time() when the frame finished decoding
     seq: int
+
+
+_USERINFO = re.compile(r"(\b[a-z][a-z0-9+.-]*://)[^/@\s]+@", re.IGNORECASE)
+_SRT_LOGIN = re.compile(r"(streamid=[^:&\s]+:[^:&\s]+):[^&\s]*")
+_PASSPHRASE = re.compile(r"(passphrase=)[^&\s:]*")
+
+
+def redact(text: str) -> str:
+    """Text with the logins and passphrases of stream URLs hidden. ffmpeg repeats the whole input URL in its
+    errors, and those go to the journal and to the hub (found in the worker journal on 2026-11-22)."""
+    text = _USERINFO.sub(r"\1***@", text)
+    text = _SRT_LOGIN.sub(r"\1:***", text)
+    return _PASSPHRASE.sub(r"\1***", text)
 
 
 def _input_options(url: str) -> list[str]:
@@ -145,7 +159,7 @@ class LatestFrameReader(threading.Thread):
                         self._latest = Frame(image, time.time(), self._seq)
                         self._cond.notify_all()
             except Exception as exc:  # noqa: BLE001 - any failure means reconnect
-                message = f"{type(exc).__name__}: {exc}"
+                message = redact(f"{type(exc).__name__}: {exc}")
                 if message != self.last_error:
                     log.warning("stream unavailable: %s", message)
                 self.last_error = message

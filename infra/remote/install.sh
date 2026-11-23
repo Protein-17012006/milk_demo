@@ -49,6 +49,10 @@ ROI=$(param counter/roi "")
 REPLAY=$(param counter/replay off)
 LOCAL_COUNTER=$(param counter/local off) # on = count on this server's CPU (fallback when no GPU worker)
 MAX_FPS=$(param counter/max_fps 2) # frames counted per second by the local counter; keeps t3 CPU credits
+# Store camera reachable from the internet (HOANG-P10 decision 1): MediaMTX pulls it on demand instead
+# of a relay pushing it. Unset camera/url = no pulled path; a relay can still publish to cam-* paths.
+CAMERA_URL=$(param camera/url "")   # SecureString, rtsp://user:pass@host:port/...; never logged
+CAMERA_PATH=$(param camera/path cam-s01-a)
 
 log "MediaMTX $MTX_VERSION"
 if [ "$(cat /usr/local/lib/mediamtx.version 2>/dev/null || true)" != "$MTX_VERSION" ]; then
@@ -75,6 +79,7 @@ chmod 0640 /etc/mediamtx/server.key
 
 PUBLISH_USER="$PUBLISH_USER" PUBLISH_PASS="$PUBLISH_PASS" WORKER_USER="$WORKER_USER" \
 WORKER_PASS="$WORKER_PASS" SRT_PASSPHRASE="$SRT_PASSPHRASE" \
+CAMERA_URL="$CAMERA_URL" CAMERA_PATH="$CAMERA_PATH" \
 python3 - "$APP/server/mediamtx.yml.tpl" /etc/mediamtx/mediamtx.yml.new <<'PY'
 import os, re, sys
 text = open(sys.argv[1], encoding="utf-8").read()
@@ -83,7 +88,23 @@ def fill(match):
     if not value:
         raise SystemExit(f"missing value for {match.group(1)}")
     return value
-open(sys.argv[2], "w", encoding="utf-8").write(re.sub(r"\{\{([A-Z_]+)\}\}", fill, text))
+text = re.sub(r"\{\{([A-Z_]+)\}\}", fill, text)
+url, path = os.environ.get("CAMERA_URL", ""), os.environ.get("CAMERA_PATH", "")
+if url:
+    if not re.fullmatch(r"cam-[a-z0-9-]+", path):
+        raise SystemExit("camera/path must look like cam-<name> so the worker account may read it")
+    if not url.startswith(("rtsp://", "rtsps://")):
+        raise SystemExit("camera/url must be an rtsp:// or rtsps:// URL")
+    quoted = "'" + url.replace("'", "''") + "'"  # YAML single-quoted scalar
+    text = text.rstrip("\n") + (
+        f"\n  {path}:\n"
+        f"    source: {quoted}\n"
+        "    sourceOnDemand: yes\n"
+        "    rtspTransport: tcp\n"
+        # pathDefaults sets an SRT publish passphrase; MediaMTX refuses it on a pulled path
+        "    srtPublishPassphrase: ''\n"
+    )
+open(sys.argv[2], "w", encoding="utf-8").write(text)
 PY
 MTX_CHANGED=0
 if ! cmp -s /etc/mediamtx/mediamtx.yml.new /etc/mediamtx/mediamtx.yml; then

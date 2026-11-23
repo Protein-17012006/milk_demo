@@ -2,7 +2,11 @@
 
 import React from "react";
 import { Area, AreaChart, ResponsiveContainer } from "recharts";
-import type { KpiMetrics } from "@/data/reports-mock";
+import type { KpiMetrics } from "@/lib/reports-ui";
+
+// Shown wherever the API has no value yet; the cards never show a number the backend did not return.
+const NO_VALUE = "—";
+const percent = (v: number | null) => (v === null ? NO_VALUE : `${v}%`);
 
 interface KpiGridProps {
   metrics: KpiMetrics;
@@ -14,6 +18,7 @@ interface SparklineProps {
 }
 
 function OrangeSparkline({ data, gradientId }: SparklineProps) {
+  if (data.length === 0) return <div className="h-[42px] w-full" aria-hidden="true" />;
   return (
     <div className="h-[42px] w-full overflow-hidden">
       <ResponsiveContainer width="100%" height="100%" debounce={180}>
@@ -50,11 +55,13 @@ export function KpiGrid({ metrics }: KpiGridProps) {
         </p>
         <div className="mt-[28px] flex items-baseline">
           <span className="text-[22px] font-bold leading-none text-black">
-            {metrics.activeStores}
+            {metrics.activeStores ?? NO_VALUE}
           </span>
-          <span className="text-[15.5px] font-semibold leading-none text-black/50">
-            /{metrics.totalStores}
-          </span>
+          {metrics.activeStores !== null && metrics.totalStores !== null && (
+            <span className="text-[15.5px] font-semibold leading-none text-black/50">
+              /{metrics.totalStores}
+            </span>
+          )}
         </div>
       </div>
 
@@ -65,7 +72,9 @@ export function KpiGrid({ metrics }: KpiGridProps) {
         </p>
         <div className="mt-[28px]">
           <span className="text-[22px] font-bold leading-none text-black">
-            {metrics.totalOnShelfUnits.toLocaleString("en-US")}
+            {metrics.totalOnShelfUnits === null
+              ? NO_VALUE
+              : metrics.totalOnShelfUnits.toLocaleString("en-US")}
           </span>
         </div>
       </div>
@@ -77,7 +86,7 @@ export function KpiGrid({ metrics }: KpiGridProps) {
         </p>
         <div className="mt-[28px]">
           <span className="text-[22px] font-bold leading-none text-black">
-            {metrics.avgInferenceTime}
+            {metrics.avgInferenceTime ?? NO_VALUE}
           </span>
         </div>
       </div>
@@ -89,7 +98,7 @@ export function KpiGrid({ metrics }: KpiGridProps) {
         </p>
         <div className="mt-[10px]">
           <span className="text-[22px] font-bold leading-none text-black">
-            {metrics.osaPercent}%
+            {percent(metrics.osaPercent)}
           </span>
         </div>
       </div>
@@ -102,7 +111,7 @@ export function KpiGrid({ metrics }: KpiGridProps) {
           </p>
           <div className="mt-[10px]">
             <span className="text-[22px] font-bold leading-none text-black">
-              {metrics.top50SkuAccuracy}%
+              {percent(metrics.top50SkuAccuracy)}
             </span>
           </div>
         </div>
@@ -120,7 +129,7 @@ export function KpiGrid({ metrics }: KpiGridProps) {
           </p>
           <div className="mt-[10px]">
             <span className="text-[22px] font-bold leading-none text-black">
-              {metrics.restockRateDelta}
+              {metrics.restockRateDelta ?? NO_VALUE}
             </span>
           </div>
         </div>

@@ -1,82 +1,109 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Download, X } from "lucide-react";
-import { useSidebarSearch } from "@/components/layout/SidebarContext";
+import { useAuth } from "@/lib/auth";
+import {
+  createApiClient,
+  type ApiKpiResponse,
+  type ApiReportsSeriesPoint,
+  type ApiStore,
+} from "@/lib/api";
 import { FilterBar } from "./FilterBar";
 import { KpiGrid } from "./KpiGrid";
 import { MonthlyStockChart } from "./MonthlyStockChart";
 import { TrendsInsightsChart } from "./TrendsInsightsChart";
 import { RecentActivitiesCard } from "./RecentActivitiesCard";
 import {
-  RECENT_SHELF_ACTIVITIES,
-  getFilteredKpis,
+  ALL_STORES_LABEL,
+  kpisFromApi,
   type CategoryOption,
-  type StoreOption,
+  type ShelfActivity,
   type TimeframeOption,
-} from "@/data/reports-mock";
+} from "@/lib/reports-ui";
 
-interface ReportsDashboardProps {
-  searchQuery?: string;
-}
+// The backend keeps no shelf-event history yet (OOS / restock / depletion), so this feed stays empty.
+const NO_SHELF_ACTIVITIES: ShelfActivity[] = [];
 
-export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
-  const { searchQuery: sidebarSearchQuery } = useSidebarSearch();
-  const effectiveSearchQuery = searchQuery ?? sidebarSearchQuery;
+export function ReportsDashboard() {
+  const { isApproved, getIdToken } = useAuth();
   const [timeframe, setTimeframe] = useState<TimeframeOption>("All-time");
-  const [store, setStore] = useState<StoreOption>("All Stores (30)");
+  const [store, setStore] = useState<string>(ALL_STORES_LABEL);
   const [category, setCategory] = useState<CategoryOption>("All Categories");
   const [auditModalOpen, setAuditModalOpen] = useState(false);
+  const [liveKpi, setLiveKpi] = useState<ApiKpiResponse | null>(null);
+  const [liveStores, setLiveStores] = useState<ApiStore[] | null>(null);
+  const [liveSeries, setLiveSeries] = useState<ApiReportsSeriesPoint[] | null>(null);
 
-  const kpis = useMemo(
-    () => getFilteredKpis(timeframe, store, category),
-    [timeframe, store, category]
-  );
+  useEffect(() => {
+    if (!isApproved) {
+      setLiveKpi(null);
+      setLiveStores(null);
+      setLiveSeries(null);
+      return;
+    }
+    let cancelled = false;
+    const api = createApiClient(getIdToken);
+    Promise.all([api.getKpi(), api.getStores(), api.getReportsSeries()])
+      .then(([kpiRes, storesRes, seriesRes]) => {
+        if (cancelled) return;
+        setLiveKpi(kpiRes);
+        setLiveStores(storesRes.items);
+        setLiveSeries(seriesRes.series);
+        setStore(`${ALL_STORES_LABEL} (${storesRes.total})`);
+      })
+      .catch(() => {
+        // leave the cards at "—": never show numbers the API did not return
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isApproved, getIdToken]);
 
-  // Deterministic scale factor for hardcoded charts when filters change
-  const chartScaleFactor = useMemo(() => {
-    let factor = 1;
-    if (timeframe === "This Quarter") factor *= 0.92;
-    if (timeframe === "Last 30 Days") factor *= 0.84;
-    if (timeframe === "Last 7 Days") factor *= 0.72;
-    if (store !== "All Stores (30)") factor *= 0.82;
-    if (category !== "All Categories") factor *= 0.85;
-    return factor;
-  }, [timeframe, store, category]);
+  const dynamicStoreOptions = useMemo(() => {
+    if (!liveStores) return undefined;
+    return [
+      `${ALL_STORES_LABEL} (${liveStores.length})`,
+      ...liveStores.map((s) => `${s.store_id} — ${s.store_name}`),
+    ];
+  }, [liveStores]);
 
-  const filteredActivities = useMemo(() => {
-    const q = effectiveSearchQuery.trim().toLowerCase();
-    return RECENT_SHELF_ACTIVITIES.filter((item) => {
-      if (store !== "All Stores (30)" && item.storeDistrict !== store) {
-        return false;
+  const kpis = useMemo(() => kpisFromApi(liveKpi), [liveKpi]);
+  const filteredActivities = NO_SHELF_ACTIVITIES;
+
+  const handleDownloadCsv = async () => {
+    if (isApproved) {
+      try {
+        const api = createApiClient(getIdToken);
+        const csvText = await api.exportCaptureLogCsv();
+        const blob = new Blob([csvText], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "capture-log.csv";
+        link.click();
+        URL.revokeObjectURL(url);
+        return;
+      } catch {
+        // fall through to summary export
       }
-      if (category !== "All Categories" && item.category !== category) {
-        return false;
-      }
-      if (
-        q &&
-        !item.productName.toLowerCase().includes(q) &&
-        !item.storeName.toLowerCase().includes(q) &&
-        !item.status.toLowerCase().includes(q)
-      ) {
-        return false;
-      }
-      return true;
-    });
-  }, [store, category, effectiveSearchQuery]);
-
-  const handleDownloadCsv = () => {
+    }
+    const show = (v: number | string | null, suffix = "") =>
+      v === null ? "—" : `${v}${suffix}`;
     const rows = [
       ["Metric", "Value"],
       ["Timeframe", timeframe],
       ["Store", store],
       ["Category", category],
-      ["Active Stores Monitored", `${kpis.activeStores}/${kpis.totalStores}`],
-      ["Total On-Shelf Units", String(kpis.totalOnShelfUnits)],
-      ["Avg. Inference Time", kpis.avgInferenceTime],
-      ["On-Shelf Availability (OSA)", `${kpis.osaPercent}%`],
-      ["Top 50 SKU Accuracy", `${kpis.top50SkuAccuracy}%`],
-      ["Restock Rate (vs Last Cycle)", kpis.restockRateDelta],
+      [
+        "Active Stores Monitored",
+        kpis.activeStores === null ? "—" : `${kpis.activeStores}/${kpis.totalStores ?? "—"}`,
+      ],
+      ["Total On-Shelf Units", show(kpis.totalOnShelfUnits)],
+      ["Avg. Inference Time", show(kpis.avgInferenceTime)],
+      ["On-Shelf Availability (OSA)", show(kpis.osaPercent, "%")],
+      ["Top 50 SKU Accuracy", show(kpis.top50SkuAccuracy, "%")],
+      ["Restock Rate (vs Last Cycle)", show(kpis.restockRateDelta)],
     ];
     const csv = rows.map((r) => r.map((v) => `"${v}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -92,9 +119,17 @@ export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
     <div className="mx-auto w-full px-4 pt-6 pb-8 sm:px-6 lg:px-7">
       {/* Page Header */}
       <header className="flex items-center justify-between border-b border-black/10 pb-[18px]">
-        <h1 className="text-[22px] font-normal leading-tight text-black">
-          Reports
-        </h1>
+        <div>
+          <h1 className="text-[22px] font-normal leading-tight text-black">
+            Reports
+          </h1>
+          {liveKpi && (
+            <p className="mt-1 text-[12px] text-[#6B7280]">
+              Live AWS data &middot; {liveKpi.captures_count} captures synced
+              &middot; {liveKpi.top_50_scope_note}
+            </p>
+          )}
+        </div>
 
         <button
           type="button"
@@ -112,6 +147,7 @@ export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
           timeframe={timeframe}
           store={store}
           category={category}
+          storeOptions={dynamicStoreOptions}
           onTimeframeChange={setTimeframe}
           onStoreChange={setStore}
           onCategoryChange={setCategory}
@@ -127,7 +163,7 @@ export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
           <KpiGrid metrics={kpis} />
         </div>
         <div className="xl:col-span-6">
-          <MonthlyStockChart scaleFactor={chartScaleFactor} />
+          <MonthlyStockChart series={liveSeries} />
         </div>
       </section>
 
@@ -137,7 +173,7 @@ export function ReportsDashboard({ searchQuery }: ReportsDashboardProps) {
         className="mt-[22px] grid grid-cols-1 gap-[22px] xl:grid-cols-12"
       >
         <div className="xl:col-span-8">
-          <TrendsInsightsChart scaleFactor={chartScaleFactor} />
+          <TrendsInsightsChart />
         </div>
         <div className="xl:col-span-4">
           <RecentActivitiesCard

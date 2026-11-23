@@ -1,0 +1,860 @@
+"""Serverless REST API Lambda for Project A Shelf Analytics (Platform B — NHAT-P01).
+
+Serves all /v1/* endpoints behind AWS WAF + API Gateway REST API + Cognito Authorizer.
+Enforces Cognito group RBAC:
+  - datagent:   read products/stores/reports/KPI/review-queue + export CSV
+  - field_team: datagent permissions + submit corrections + presigned uploads
+  - team_admin: all permissions + import SKU Master / Store List + admin seed
+  - no group:   403 PENDING_ROLE_ASSIGNMENT (for self-registered /register users)
+"""
+from __future__ import annotations
+
+import json
+import os
+import time
+import urllib.parse
+import uuid
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+import boto3
+from boto3.dynamodb.conditions import Key
+
+from common import (
+    CAPTURE_LOG_COLUMNS,
+    CV_OUTPUT_COLUMNS,
+    DEFAULT_ALIAS_MAP,
+    MILK_FLAG_THRESHOLD,
+    UNRECOGNIZED,
+    compute_validation_result,
+    from_dynamodb,
+    to_csv,
+    to_dynamodb_safe,
+)
+
+ICT = timezone(timedelta(hours=7))
+
+REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
+CAPTURES_TABLE = os.environ.get("CAPTURES_TABLE", "")
+LATEST_STOCK_TABLE = os.environ.get("LATEST_STOCK_TABLE", "")
+REVIEW_QUEUE_TABLE = os.environ.get("REVIEW_QUEUE_TABLE", "")
+SKU_MASTER_TABLE = os.environ.get("SKU_MASTER_TABLE", "")
+STORE_LIST_TABLE = os.environ.get("STORE_LIST_TABLE", "")
+CORRECTIONS_TABLE = os.environ.get("CORRECTIONS_TABLE", "")
+USER_PREFS_TABLE = os.environ.get("USER_PREFS_TABLE", "")
+ANALYTICS_BUCKET = os.environ.get("ANALYTICS_BUCKET", "")
+HUB_BUCKET = os.environ.get("HUB_BUCKET", "")
+ALLOWED_ORIGINS = {
+    o.strip()
+    for o in os.environ.get(
+        "ALLOWED_ORIGINS",
+        "https://main.d2k8euxy0yoiv8.amplifyapp.com,http://localhost:3000",
+    ).split(",")
+    if o.strip()
+}
+
+VALID_GROUPS = {"datagent", "field_team", "team_admin"}
+WRITE_CORRECTION_GROUPS = {"field_team", "team_admin"}
+ADMIN_GROUPS = {"team_admin"}
+
+
+def _clients():
+    s3 = boto3.client("s3", region_name=REGION)
+    ddb = boto3.resource("dynamodb", region_name=REGION)
+    return s3, ddb
+
+
+def _cors_headers(event: dict[str, Any]) -> dict[str, str]:
+    headers = event.get("headers") or {}
+    origin = headers.get("origin") or headers.get("Origin") or ""
+    allow_origin = origin if origin in ALLOWED_ORIGINS else next(iter(ALLOWED_ORIGINS), "*")
+    return {
+        "Access-Control-Allow-Origin": allow_origin,
+        "Access-Control-Allow-Headers": "Authorization,Content-Type",
+        "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
+        "Vary": "Origin",
+    }
+
+
+def _json_response(
+    status_code: int,
+    payload: Any,
+    event: dict[str, Any],
+    content_type: str = "application/json; charset=utf-8",
+    extra_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    hdrs = {"Content-Type": content_type, **_cors_headers(event)}
+    if extra_headers:
+        hdrs.update(extra_headers)
+    body = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    return {"statusCode": status_code, "headers": hdrs, "body": body}
+
+
+def _extract_user(event: dict[str, Any]) -> dict[str, Any]:
+    claims = (
+        event.get("requestContext", {})
+        .get("authorizer", {})
+        .get("claims", {})
+    )
+    raw_groups = claims.get("cognito:groups", "")
+    if isinstance(raw_groups, list):
+        groups = [g for g in raw_groups if g]
+    elif isinstance(raw_groups, str) and raw_groups.strip():
+        # API Gateway REST Cognito authorizer passes comma-separated string
+        cleaned = raw_groups.strip().strip("[]")
+        groups = [g.strip().strip('"').strip("'") for g in cleaned.split(",") if g.strip()]
+    else:
+        groups = []
+    return {
+        "sub": claims.get("sub", ""),
+        "email": claims.get("email", claims.get("cognito:username", "")),
+        "groups": groups,
+    }
+
+
+def _require_groups(user: dict[str, Any], allowed: set[str], event: dict[str, Any]) -> dict[str, Any] | None:
+    if not user["groups"]:
+        return _json_response(
+            403,
+            {
+                "error": "PENDING_ROLE_ASSIGNMENT",
+                "message": "Your account has been created and is waiting for team_admin to assign a Cognito group.",
+            },
+            event,
+        )
+    if not set(user["groups"]).intersection(allowed):
+        return _json_response(
+            403,
+            {
+                "error": "FORBIDDEN",
+                "message": f"Required role: one of {sorted(allowed)}",
+            },
+            event,
+        )
+    return None
+
+
+def _presign_frame(s3_client, image_key: str, source_bucket: str = "") -> str | None:
+    if not image_key:
+        return None
+    bucket = source_bucket or HUB_BUCKET or ANALYTICS_BUCKET
+    if not bucket:
+        return None
+    try:
+        return s3_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": image_key},
+            ExpiresIn=900,
+        )
+    except Exception:
+        return None
+
+
+def _parse_body(event: dict[str, Any]) -> dict[str, Any]:
+    raw = event.get("body") or "{}"
+    if isinstance(raw, dict):
+        return raw
+    return json.loads(raw)
+
+
+def _scan_all(table) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    resp = table.scan()
+    items.extend(resp.get("Items", []))
+    while "LastEvaluatedKey" in resp:
+        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
+        items.extend(resp.get("Items", []))
+    return from_dynamodb(items)
+
+
+def _load_products_catalog(ddb) -> tuple[list[dict[str, Any]], int, int]:
+    """Aggregate latest_stock across stores, enriched with sku_master & store_list."""
+    stock_items = _scan_all(ddb.Table(LATEST_STOCK_TABLE))
+    sku_items = _scan_all(ddb.Table(SKU_MASTER_TABLE))
+    store_items = _scan_all(ddb.Table(STORE_LIST_TABLE))
+
+    sku_map = {s["sku_id"]: s for s in sku_items}
+    total_stores = max(len(store_items), len({x["store_id"] for x in stock_items}) or 1)
+
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    unrecognized_max = 0
+    for item in stock_items:
+        if item["sku_id"] == UNRECOGNIZED:
+            unrecognized_max += int(item.get("smoothed_count", item.get("unit_count", 0)))
+            continue
+        grouped[item["sku_id"]].append(item)
+
+    all_sku_ids = sorted(set(sku_map.keys()) | set(grouped.keys()))
+    products: list[dict[str, Any]] = []
+
+    for sku_id in all_sku_ids:
+        master = sku_map.get(sku_id)
+        rows = grouped.get(sku_id, [])
+        total_units = sum(int(r.get("smoothed_count", r.get("unit_count", 0))) for r in rows)
+        stores_avail = sum(1 for r in rows if int(r.get("smoothed_count", r.get("unit_count", 0))) > 0)
+
+        # Unit-weighted average confidence across stores (per doc p.11)
+        weight_sum = sum(int(r.get("unit_count", 0)) for r in rows)
+        if weight_sum > 0:
+            weighted_conf = sum(float(r.get("confidence_score", 0.0)) * int(r.get("unit_count", 0)) for r in rows) / weight_sum
+        elif rows:
+            weighted_conf = sum(float(r.get("confidence_score", 0.0)) for r in rows) / len(rows)
+        else:
+            weighted_conf = 0.0
+
+        latest_row = max(rows, key=lambda r: str(r.get("capture_timestamp", ""))) if rows else None
+        is_flagged = bool(latest_row.get("is_flagged")) if latest_row else False
+
+        products.append({
+            "sku_id": sku_id,
+            "sku_name": (master or {}).get("sku_name_vi") or (latest_row or {}).get("sku_name") or sku_id,
+            "sku_name_en": (master or {}).get("sku_name_en"),
+            "model_alias": (master or {}).get("model_alias") or (latest_row or {}).get("model_alias") or "",
+            "brand": (master or {}).get("brand"),
+            "manufacturer": (master or {}).get("manufacturer"),
+            "category": (master or {}).get("category"),
+            "subcategory": (master or {}).get("subcategory"),
+            "pack_type": (master or {}).get("pack_type"),
+            "pack_size": (master or {}).get("pack_size"),
+            "barcode": (master or {}).get("barcode"),
+            "image_url": (master or {}).get("image_url"),
+            "in_sku_master": master is not None,
+            "unit_count": total_units,
+            "confidence_score": round(weighted_conf, 2),
+            "is_flagged": is_flagged,
+            "flag_reason": (latest_row or {}).get("flag_reason", ""),
+            "stores_available": stores_avail,
+            "stores_total": total_stores,
+            "capture_id": (latest_row or {}).get("capture_id"),
+            "capture_timestamp": (latest_row or {}).get("capture_timestamp"),
+            "processing_time_ms": (latest_row or {}).get("processing_time_ms", 0),
+        })
+
+    return products, unrecognized_max, total_stores
+
+
+def _handle_get_products(event: dict[str, Any], ddb) -> dict[str, Any]:
+    params = event.get("queryStringParameters") or {}
+    q = (params.get("q") or "").strip().lower()
+    category = params.get("category") or ""
+    status_filter = params.get("status") or ""
+    sort_by = params.get("sort") or "stock_desc"
+
+    products, unrecognized_units, total_stores = _load_products_catalog(ddb)
+
+    filtered = []
+    for p in products:
+        if category and category.lower() != "all" and (p.get("category") or "").lower() != category.lower():
+            continue
+        if status_filter and status_filter.lower() != "all":
+            if status_filter.lower() == "flagged" and not p["is_flagged"]:
+                continue
+            if status_filter.lower() == "validated" and p["is_flagged"]:
+                continue
+        if q:
+            haystack = " ".join(
+                str(x or "") for x in (p["sku_id"], p["sku_name"], p["model_alias"], p["barcode"], p["brand"])
+            ).lower()
+            if q not in haystack:
+                continue
+        filtered.append(p)
+
+    if sort_by == "stock_asc":
+        filtered.sort(key=lambda x: x["unit_count"])
+    elif sort_by == "confidence_desc":
+        filtered.sort(key=lambda x: x["confidence_score"], reverse=True)
+    elif sort_by == "name_asc":
+        filtered.sort(key=lambda x: x["sku_name"].lower())
+    else:
+        filtered.sort(key=lambda x: x["unit_count"], reverse=True)
+
+    return _json_response(
+        200,
+        {
+            "items": filtered,
+            "total": len(filtered),
+            "unrecognized_units": unrecognized_units,
+            "stores_total": total_stores,
+            "flag_threshold": MILK_FLAG_THRESHOLD,
+        },
+        event,
+    )
+
+
+def _handle_get_product_detail(sku_id_raw: str, event: dict[str, Any], s3, ddb) -> dict[str, Any]:
+    # Decision 21/11: sku_id can contain spaces & Vietnamese accents -> URL decode
+    sku_id = urllib.parse.unquote(sku_id_raw)
+    master = from_dynamodb(ddb.Table(SKU_MASTER_TABLE).get_item(Key={"sku_id": sku_id}).get("Item"))
+    stock_items = [
+        item for item in _scan_all(ddb.Table(LATEST_STOCK_TABLE)) if item.get("sku_id") == sku_id
+    ]
+    corrections = [
+        c for c in _scan_all(ddb.Table(CORRECTIONS_TABLE)) if c.get("sku_id") == sku_id
+    ]
+    queue_items = [
+        q for q in _scan_all(ddb.Table(REVIEW_QUEUE_TABLE)) if q.get("sku_id") == sku_id
+    ]
+
+    if not master and not stock_items:
+        return _json_response(404, {"error": "NOT_FOUND", "sku_id": sku_id}, event)
+
+    latest = max(stock_items, key=lambda r: str(r.get("capture_timestamp", ""))) if stock_items else None
+    latest_correction = max(corrections, key=lambda c: str(c.get("correction_date", ""))) if corrections else None
+    latest_queue = queue_items[0] if queue_items else None
+
+    if latest_correction:
+        status_label = "Đã sửa"
+    elif latest_queue:
+        status_label = latest_queue.get("status", "Chờ duyệt")
+    else:
+        status_label = "Đã xác nhận"
+
+    discrepancy = (latest_correction or {}).get("discrepancy_category")
+    sku_match_ok = (latest_correction or {}).get("sku_match_correct")
+    result_label = compute_validation_result(sku_match_ok, discrepancy)
+
+    bboxes = []
+    if latest and latest.get("bounding_box_json"):
+        bboxes = json.loads(latest["bounding_box_json"])
+
+    frame_url = _presign_frame(
+        s3,
+        (latest or {}).get("image_key", ""),
+        (latest or {}).get("source_bucket", ""),
+    )
+
+    return _json_response(
+        200,
+        {
+            "sku_id": sku_id,
+            "in_sku_master": master is not None,
+            "product_information": master or {
+                "sku_id": sku_id,
+                "sku_name_vi": (latest or {}).get("sku_name", sku_id),
+                "brand": None,
+                "manufacturer": None,
+                "category": None,
+                "pack_type": None,
+                "pack_size": None,
+                "barcode": None,
+            },
+            "cv_output": {
+                "reading_id": (latest or {}).get("reading_id"),
+                "capture_id": (latest or {}).get("capture_id"),
+                "store_id": (latest or {}).get("store_id"),
+                "camera_id": (latest or {}).get("camera_id"),
+                "capture_timestamp": (latest or {}).get("capture_timestamp"),
+                "capture_source": (latest or {}).get("capture_source", "CCTV"),
+                "image_filename": (latest or {}).get("image_filename"),
+                "image_key": (latest or {}).get("image_key"),
+                "frame_presigned_url": frame_url,
+                "unit_count": (latest or {}).get("unit_count", 0),
+                "smoothed_count": (latest or {}).get("smoothed_count", 0),
+                "confidence_score": (latest or {}).get("confidence_score", 0.0),
+                "detection_method": "Visual",
+                "bounding_box": bboxes,
+                "is_flagged": (latest or {}).get("is_flagged", False),
+                "flag_reason": (latest or {}).get("flag_reason", ""),
+                "processing_time_ms": (latest or {}).get("processing_time_ms", 0),
+                "faces_blurred": (latest or {}).get("faces_blurred", 0),
+            },
+            "validation": {
+                "result": result_label,
+                "status": status_label,
+                "expected_label": (latest_correction or {}).get("corrected_sku_id") or sku_id,
+                "mismatch_type": discrepancy or "None",
+                "reviewed_at": (latest_correction or {}).get("correction_date"),
+                "accuracy": None,  # populated once human_audit runs
+            },
+            "stores": stock_items,
+            "corrections": corrections,
+        },
+        event,
+    )
+
+
+def _handle_get_stores(event: dict[str, Any], ddb) -> dict[str, Any]:
+    stores = _scan_all(ddb.Table(STORE_LIST_TABLE))
+    captures = _scan_all(ddb.Table(CAPTURES_TABLE))
+    last_by_store: dict[str, str] = {}
+    for c in captures:
+        sid = c.get("store_id", "")
+        ts = str(c.get("capture_timestamp", ""))
+        if ts > last_by_store.get(sid, ""):
+            last_by_store[sid] = ts
+
+    enriched = []
+    for st in stores:
+        sid = st["store_id"]
+        enriched.append({
+            **st,
+            "last_capture_timestamp": last_by_store.get(sid),
+            "has_recent_capture": sid in last_by_store,
+        })
+
+    return _json_response(
+        200,
+        {
+            "items": enriched,
+            "total": len(enriched),
+            "active_monitored": sum(1 for s in enriched if s["has_recent_capture"]),
+        },
+        event,
+    )
+
+
+def _handle_search(event: dict[str, Any], ddb) -> dict[str, Any]:
+    q = ((event.get("queryStringParameters") or {}).get("q") or "").strip().lower()
+    products, _, _ = _load_products_catalog(ddb)
+    if q:
+        products = [
+            p for p in products
+            if q in f"{p['sku_id']} {p['sku_name']} {p.get('model_alias','')} {p.get('barcode','')} {p.get('brand','')}".lower()
+        ]
+    products.sort(key=lambda x: x["unit_count"], reverse=True)
+    return _json_response(200, {"products": products[:10], "total": len(products)}, event)
+
+
+def _handle_review_queue(event: dict[str, Any], s3, ddb) -> dict[str, Any]:
+    status_filter = (event.get("queryStringParameters") or {}).get("status") or ""
+    items = _scan_all(ddb.Table(REVIEW_QUEUE_TABLE))
+    if status_filter and status_filter.lower() != "all":
+        items = [i for i in items if (i.get("status") or "").lower() == status_filter.lower()]
+    items.sort(key=lambda x: str(x.get("capture_timestamp", "")), reverse=True)
+
+    for item in items:
+        item["bounding_box"] = json.loads(item.get("bounding_box_json") or "[]")
+        item["frame_presigned_url"] = _presign_frame(
+            s3, item.get("image_key", ""), item.get("source_bucket", "")
+        )
+
+    return _json_response(200, {"items": items, "total": len(items)}, event)
+
+
+def _handle_post_correction(event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
+    body = _parse_body(event)
+    store_id = body.get("store_id") or "DEMO-S01"
+    queue_key = body.get("queue_key", "")
+    sku_id = body.get("sku_id", "")
+    action = body.get("action", "correct")  # "correct" or "confirm"
+    now_iso = datetime.now(ICT).isoformat(timespec="seconds")
+
+    if action == "confirm":
+        if queue_key:
+            ddb.Table(REVIEW_QUEUE_TABLE).update_item(
+                Key={"store_id": store_id, "queue_key": queue_key},
+                UpdateExpression="SET #s = :st, reviewed_by = :u, reviewed_at = :t",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":st": "Đã xác nhận", ":u": user["email"], ":t": now_iso},
+            )
+        return _json_response(200, {"status": "Đã xác nhận", "reviewed_at": now_iso}, event)
+
+    correction_id = f"COR-{datetime.now(ICT).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    corr_item = to_dynamodb_safe({
+        "store_id": store_id,
+        "correction_id": correction_id,
+        "reading_id": body.get("reading_id", ""),
+        "capture_id": body.get("capture_id", ""),
+        "sku_id": sku_id,
+        "corrected_sku_id": body.get("corrected_sku_id") or sku_id,
+        "corrected_unit_count": body.get("corrected_unit_count"),
+        "discrepancy_category": body.get("discrepancy_category") or "Wrong SKU",
+        "sku_match_correct": bool(body.get("sku_match_correct", False)),
+        "notes": body.get("notes", ""),
+        "reviewer_email": user["email"],
+        "correction_date": now_iso,
+        "fed_back_to_model": False,
+    })
+    ddb.Table(CORRECTIONS_TABLE).put_item(Item=corr_item)
+
+    if queue_key:
+        ddb.Table(REVIEW_QUEUE_TABLE).update_item(
+            Key={"store_id": store_id, "queue_key": queue_key},
+            UpdateExpression="SET #s = :st, reviewed_by = :u, reviewed_at = :t, correction_id = :cid",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":st": "Đã sửa",
+                ":u": user["email"],
+                ":t": now_iso,
+                ":cid": correction_id,
+            },
+        )
+
+    return _json_response(201, {"correction_id": correction_id, "status": "Đã sửa", "correction_date": now_iso}, event)
+
+
+def _handle_import_sku_master(event: dict[str, Any], ddb) -> dict[str, Any]:
+    body = _parse_body(event)
+    items = body.get("items", [])
+    if not isinstance(items, list):
+        return _json_response(400, {"error": "items must be a list"}, event)
+
+    tbl = ddb.Table(SKU_MASTER_TABLE)
+    written = 0
+    for row in items:
+        sku_id = row.get("sku_id") or row.get("sku_name_vi")
+        if not sku_id:
+            continue
+        tbl.put_item(
+            Item=to_dynamodb_safe({
+                "sku_id": sku_id,
+                "sku_name_vi": row.get("sku_name_vi") or sku_id,
+                "sku_name_en": row.get("sku_name_en"),
+                "model_alias": row.get("model_alias", ""),
+                "brand": row.get("brand"),
+                "manufacturer": row.get("manufacturer"),
+                "category": row.get("category"),
+                "subcategory": row.get("subcategory"),
+                "pack_type": row.get("pack_type"),
+                "pack_size": row.get("pack_size"),
+                "barcode": row.get("barcode"),
+                "image_url": row.get("image_url"),
+                "is_active": bool(row.get("is_active", True)),
+                "updated_at": datetime.now(ICT).isoformat(timespec="seconds"),
+            })
+        )
+        written += 1
+
+    return _json_response(200, {"imported": written}, event)
+
+
+def _handle_import_store_list(event: dict[str, Any], ddb) -> dict[str, Any]:
+    body = _parse_body(event)
+    items = body.get("items", [])
+    if not isinstance(items, list):
+        return _json_response(400, {"error": "items must be a list"}, event)
+
+    tbl = ddb.Table(STORE_LIST_TABLE)
+    written = 0
+    for row in items:
+        store_id = row.get("store_id")
+        if not store_id:
+            continue
+        tbl.put_item(
+            Item=to_dynamodb_safe({
+                "store_id": store_id,
+                "store_name": row.get("store_name") or store_id,
+                "district": row.get("district", ""),
+                "camera_id": row.get("camera_id", ""),
+                "categories_in_view": row.get("categories_in_view", ["Milk"]),
+                "wifi_available": bool(row.get("wifi_available", True)),
+                "status": row.get("status", "active"),
+                "updated_at": datetime.now(ICT).isoformat(timespec="seconds"),
+            })
+        )
+        written += 1
+
+    return _json_response(200, {"imported": written}, event)
+
+
+def _handle_presigned_upload(event: dict[str, Any], user: dict[str, Any], s3) -> dict[str, Any]:
+    body = _parse_body(event)
+    upload_type = body.get("type", "human_audit")  # human_audit | phone_capture | sd_card
+    filename = os.path.basename(body.get("filename") or f"upload-{int(time.time())}.csv")
+    content_type = body.get("content_type") or "application/octet-stream"
+    date_part = datetime.now(ICT).strftime("%Y-%m-%d")
+    key = f"uploads/{upload_type}/{date_part}/{uuid.uuid4().hex[:8]}_{filename}"
+
+    url = s3.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": ANALYTICS_BUCKET, "Key": key, "ContentType": content_type},
+        ExpiresIn=600,
+    )
+    return _json_response(
+        200,
+        {"upload_url": url, "s3_key": key, "expires_in": 600, "requested_by": user["email"]},
+        event,
+    )
+
+
+def _handle_export_csv(kind: str, event: dict[str, Any], ddb) -> dict[str, Any]:
+    params = event.get("queryStringParameters") or {}
+    camera = params.get("camera") or ""
+    date_prefix = params.get("date") or ""  # YYYY-MM-DD
+
+    captures = _scan_all(ddb.Table(CAPTURES_TABLE))
+    if camera:
+        captures = [c for c in captures if c.get("camera_id") == camera]
+    if date_prefix:
+        captures = [c for c in captures if str(c.get("capture_timestamp", "")).startswith(date_prefix)]
+    captures.sort(key=lambda c: str(c.get("capture_timestamp", "")))
+
+    if kind == "capture-log":
+        logs = [json.loads(c["log_json"]) for c in captures if c.get("log_json")]
+        csv_text = to_csv(logs, CAPTURE_LOG_COLUMNS, bom=True)
+        return _json_response(
+            200,
+            csv_text,
+            event,
+            content_type="text/csv; charset=utf-8",
+            extra_headers={"Content-Disposition": 'attachment; filename="capture-log.csv"'},
+        )
+
+    all_rows: list[dict[str, Any]] = []
+    for c in captures:
+        if c.get("rows_json"):
+            all_rows.extend(json.loads(c["rows_json"]))
+    csv_text = to_csv(all_rows, CV_OUTPUT_COLUMNS, bom=True)
+    return _json_response(
+        200,
+        csv_text,
+        event,
+        content_type="text/csv; charset=utf-8",
+        extra_headers={"Content-Disposition": 'attachment; filename="cv-output.csv"'},
+    )
+
+
+def _handle_kpi(event: dict[str, Any], ddb) -> dict[str, Any]:
+    products, unrecognized_units, total_stores = _load_products_catalog(ddb)
+    captures = _scan_all(ddb.Table(CAPTURES_TABLE))
+    active_stores = len({c.get("store_id") for c in captures if c.get("store_id")})
+
+    # Per A7 (doc p.7): avg_processing_time_ms = mean of one value per capture from capture_log
+    proc_times = [int(c.get("processing_time_ms", 0)) for c in captures if int(c.get("processing_time_ms", 0)) > 0]
+    avg_proc_ms = round(sum(proc_times) / len(proc_times)) if proc_times else 0
+    total_units = sum(p["unit_count"] for p in products)
+
+    return _json_response(
+        200,
+        {
+            "active_stores_monitored": active_stores,
+            "total_stores": total_stores,
+            "total_on_shelf_units": total_units,
+            "unrecognized_units": unrecognized_units,
+            "avg_processing_time_ms": avg_proc_ms,
+            "top_50_sku_accuracy": None,
+            "top_50_scope_note": "Pending first Human Audit cycle; currently tracking all available SKUs.",
+            "captures_count": len(captures),
+            "flag_threshold": MILK_FLAG_THRESHOLD,
+        },
+        event,
+    )
+
+
+def _handle_reports_series(event: dict[str, Any], ddb) -> dict[str, Any]:
+    captures = _scan_all(ddb.Table(CAPTURES_TABLE))
+    by_day: dict[str, list[int]] = defaultdict(list)
+    for c in captures:
+        day = str(c.get("capture_timestamp", ""))[:10]
+        if day:
+            by_day[day].append(int(c.get("units_found", 0)))
+
+    series = [
+        {
+            "date": day,
+            "avg_units": round(sum(vals) / len(vals), 1),
+            "max_units": max(vals),
+            "captures": len(vals),
+        }
+        for day, vals in sorted(by_day.items())
+    ]
+    return _json_response(200, {"series": series}, event)
+
+
+def _handle_get_settings(event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
+    """Phase-1 Settings (5 approved sections per NHAT-P01 / doc p.14-15)."""
+    prefs = from_dynamodb(
+        ddb.Table(USER_PREFS_TABLE).get_item(Key={"user_sub": user["sub"]}).get("Item") or {}
+    )
+    stores = _scan_all(ddb.Table(STORE_LIST_TABLE))
+    return _json_response(
+        200,
+        {
+            "account": {
+                "email": user["email"],
+                "groups": user["groups"],
+                "readonly": True,
+            },
+            "preferences": {
+                "date_format": prefs.get("date_format", "DD MMM YYYY, HH:mm"),
+                "default_landing": prefs.get("default_landing", "Home"),
+            },
+            "timezone": {"value": "Asia/Ho_Chi_Minh (UTC+7)", "readonly": True},
+            "flag_threshold": {"value": MILK_FLAG_THRESHOLD, "readonly": True},
+            "stores": stores,
+        },
+        event,
+    )
+
+
+def _handle_put_settings(event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
+    body = _parse_body(event)
+    date_format = body.get("date_format", "DD MMM YYYY, HH:mm")
+    default_landing = body.get("default_landing", "Home")
+    now_iso = datetime.now(ICT).isoformat(timespec="seconds")
+
+    ddb.Table(USER_PREFS_TABLE).put_item(
+        Item={
+            "user_sub": user["sub"],
+            "email": user["email"],
+            "date_format": date_format,
+            "default_landing": default_landing,
+            "updated_at": now_iso,
+        }
+    )
+    return _json_response(
+        200,
+        {"date_format": date_format, "default_landing": default_landing, "updated_at": now_iso},
+        event,
+    )
+
+
+def _handle_seed_initial_data(event: dict[str, Any], ddb) -> dict[str, Any]:
+    """Seed initial DEMO-S01 store and 16 SKUs (12 milk + 4 Slide snacks per doc p.8)."""
+    now_iso = datetime.now(ICT).isoformat(timespec="seconds")
+    ddb.Table(STORE_LIST_TABLE).put_item(
+        Item=to_dynamodb_safe({
+            "store_id": "DEMO-S01",
+            "store_name": "Demo Store S01",
+            "district": "Ho Chi Minh City",
+            "camera_id": "CAM-S01-A",
+            "categories_in_view": ["Milk", "Snacks"],
+            "wifi_available": True,
+            "status": "active",
+            "updated_at": now_iso,
+        })
+    )
+    sku_tbl = ddb.Table(SKU_MASTER_TABLE)
+    for alias, meta in DEFAULT_ALIAS_MAP.items():
+        sku_tbl.put_item(
+            Item=to_dynamodb_safe({
+                "sku_id": meta["sku_id"],
+                "sku_name_vi": meta["sku_name_vi"],
+                "sku_name_en": meta["sku_name_en"],
+                "model_alias": alias,
+                "brand": meta["brand"],
+                "manufacturer": meta["manufacturer"],
+                "category": meta["category"],
+                "subcategory": meta["subcategory"],
+                "pack_type": meta["pack_type"],
+                "pack_size": meta["pack_size"],
+                "barcode": None,
+                "image_url": None,
+                "is_active": True,
+                "updated_at": now_iso,
+            })
+        )
+    return _json_response(200, {"seeded_stores": 1, "seeded_skus": len(DEFAULT_ALIAS_MAP)}, event)
+
+
+def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
+    method = (event.get("httpMethod") or "GET").upper()
+    path = event.get("path") or "/"
+    # Strip optional stage prefix (/v1) if present
+    if path.startswith("/v1/"):
+        route_path = path[3:]
+    elif path == "/v1":
+        route_path = "/"
+    else:
+        route_path = path
+
+    if method == "OPTIONS":
+        return _json_response(204, "", event)
+
+    # Public health endpoint
+    if method == "GET" and route_path == "/health":
+        return _json_response(
+            200,
+            {
+                "status": "ok",
+                "service": "milk-backend-api",
+                "region": REGION,
+                "flag_threshold": MILK_FLAG_THRESHOLD,
+            },
+            event,
+        )
+
+    user = _extract_user(event)
+
+    # /me allows checking current Cognito group status (even if pending assignment)
+    if method == "GET" and route_path == "/me":
+        return _json_response(
+            200,
+            {
+                "sub": user["sub"],
+                "email": user["email"],
+                "groups": user["groups"],
+                "approved": bool(user["groups"]),
+            },
+            event,
+        )
+
+    # All other endpoints require an assigned Cognito group
+    denied = _require_groups(user, VALID_GROUPS, event)
+    if denied:
+        return denied
+
+    s3, ddb = _clients()
+
+    try:
+        if method == "GET" and route_path == "/products":
+            return _handle_get_products(event, ddb)
+
+        if method == "GET" and route_path.startswith("/products/"):
+            sku_param = route_path[len("/products/"):]
+            return _handle_get_product_detail(sku_param, event, s3, ddb)
+
+        if method == "GET" and route_path == "/stores":
+            return _handle_get_stores(event, ddb)
+
+        if method == "GET" and route_path == "/search":
+            return _handle_search(event, ddb)
+
+        if method == "GET" and route_path == "/review-queue":
+            return _handle_review_queue(event, s3, ddb)
+
+        if method == "POST" and route_path == "/corrections":
+            err = _require_groups(user, WRITE_CORRECTION_GROUPS, event)
+            if err:
+                return err
+            return _handle_post_correction(event, user, ddb)
+
+        if method == "POST" and route_path == "/uploads":
+            err = _require_groups(user, WRITE_CORRECTION_GROUPS, event)
+            if err:
+                return err
+            return _handle_presigned_upload(event, user, s3)
+
+        if method == "POST" and route_path == "/imports/sku-master":
+            err = _require_groups(user, ADMIN_GROUPS, event)
+            if err:
+                return err
+            return _handle_import_sku_master(event, ddb)
+
+        if method == "POST" and route_path == "/imports/store-list":
+            err = _require_groups(user, ADMIN_GROUPS, event)
+            if err:
+                return err
+            return _handle_import_store_list(event, ddb)
+
+        if method == "POST" and route_path == "/admin/seed":
+            err = _require_groups(user, ADMIN_GROUPS, event)
+            if err:
+                return err
+            return _handle_seed_initial_data(event, ddb)
+
+        if method == "GET" and route_path == "/exports/cv-output.csv":
+            return _handle_export_csv("cv-output", event, ddb)
+
+        if method == "GET" and route_path == "/exports/capture-log.csv":
+            return _handle_export_csv("capture-log", event, ddb)
+
+        if method == "GET" and route_path == "/kpi":
+            return _handle_kpi(event, ddb)
+
+        if method == "GET" and route_path == "/reports/series":
+            return _handle_reports_series(event, ddb)
+
+        if method == "GET" and route_path == "/settings":
+            return _handle_get_settings(event, user, ddb)
+
+        if method == "PUT" and route_path == "/settings":
+            return _handle_put_settings(event, user, ddb)
+
+        return _json_response(404, {"error": "ROUTE_NOT_FOUND", "method": method, "path": route_path}, event)
+
+    except json.JSONDecodeError:
+        return _json_response(400, {"error": "INVALID_JSON"}, event)
+    except Exception as exc:  # noqa: BLE001
+        return _json_response(500, {"error": "INTERNAL_ERROR", "detail": str(exc)}, event)

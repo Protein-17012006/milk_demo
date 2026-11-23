@@ -30,6 +30,9 @@ data/
 *.jpeg
 *.png
 !server/milk/web/static/*.png
+# Website logo and product thumbnails ship with the static frontend
+!frontend/public/images/*.png
+!frontend/public/images/products/*.png
 
 # Editors and OS
 .vscode/

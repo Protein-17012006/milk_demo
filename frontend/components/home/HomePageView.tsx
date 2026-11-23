@@ -13,10 +13,12 @@ import {
 import {
   DEFAULT_RECENT_PAGES,
   HOME_SEARCH_PAGES,
-  HOME_SEARCH_PRODUCTS,
   type HomeSearchPageItem,
   type HomeSearchProduct,
-} from "@/data/home-mock";
+} from "@/lib/home-ui";
+import { useAuth } from "@/lib/auth";
+import { createApiClient } from "@/lib/api";
+import { LIVE_REFRESH_MS } from "@/lib/config";
 
 function PackBoxIcon() {
   return (
@@ -74,9 +76,13 @@ type FlatSearchItem =
 
 export function HomePageView() {
   const router = useRouter();
+  const { user, isApproved, getIdToken } = useAuth();
   const [query, setQuery] = useState("");
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [liveProducts, setLiveProducts] = useState<HomeSearchProduct[] | null>(
+    null
+  );
   const [recentProducts, setRecentProducts] = useState<HomeSearchProduct[]>([]);
   const [selectedProduct, setSelectedProduct] =
     useState<HomeSearchProduct | null>(null);
@@ -84,18 +90,62 @@ export function HomePageView() {
   const searchContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Load real SKU catalog from AWS when authenticated & approved, and refresh its live unit counts
+  // every LIVE_REFRESH_MS while the tab is visible (HOANG-P10 Nextstep 9).
+  useEffect(() => {
+    if (!isApproved) {
+      setLiveProducts(null);
+      return;
+    }
+    let cancelled = false;
+    const api = createApiClient(getIdToken);
+    const load = () => api
+      .getProducts()
+      .then((res) => {
+        if (cancelled) return;
+        setLiveProducts(
+          res.items.map((p) => ({
+            id: p.sku_id,
+            name: p.sku_name,
+            sku: p.model_alias || p.sku_id,
+            manufacturer: p.manufacturer || p.brand || "Unassigned",
+            category: p.category || "Milk",
+            packType: (p.pack_type || "").toLowerCase().includes("bottle")
+              ? "bottle"
+              : "box",
+            units: p.unit_count,
+            storesActive: p.stores_available,
+            storesTotal: p.stores_total,
+          }))
+        );
+      })
+      .catch(() => {
+        // keep the last live list (or none): never fill in sample products
+      });
+    void load();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void load();
+    }, LIVE_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [isApproved, getIdToken]);
+
+  const catalogProducts = useMemo(() => liveProducts ?? [], [liveProducts]);
+
   // Filter products & pages based on query; default matches exact Figma suggestions
   const { visibleProducts, visiblePages, totalResultCount } = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) {
       return {
-        visibleProducts: HOME_SEARCH_PRODUCTS.slice(0, 3),
+        visibleProducts: catalogProducts.slice(0, 3),
         visiblePages: HOME_SEARCH_PAGES.slice(0, 1),
-        totalResultCount: 14,
+        totalResultCount: catalogProducts.length + HOME_SEARCH_PAGES.length,
       };
     }
 
-    const matchedProducts = HOME_SEARCH_PRODUCTS.filter(
+    const matchedProducts = catalogProducts.filter(
       (p) =>
         p.name.toLowerCase().includes(q) ||
         p.sku.toLowerCase().includes(q) ||
@@ -114,7 +164,7 @@ export function HomePageView() {
       visiblePages: matchedPages.slice(0, 3),
       totalResultCount: matchedProducts.length + matchedPages.length,
     };
-  }, [query]);
+  }, [query, catalogProducts]);
 
   const flatItems: FlatSearchItem[] = useMemo(
     () => [
@@ -209,11 +259,15 @@ export function HomePageView() {
       <div className="flex flex-col items-center text-center">
         <h1 className="text-[30px] leading-tight tracking-[-0.015em] text-black sm:text-[40px]">
           <span className="font-normal">Let&rsquo;s back to work </span>
-          <span className="font-medium">example1234</span>
+          <span className="font-medium">
+            {user?.email ? user.email.split("@")[0] : "Datagent"}
+          </span>
           <span className="font-normal">!</span>
         </h1>
         <p className="mt-[10px] text-[13px] font-normal text-black/60">
-          Look back your previous work - Last accessed in 08 Oct, 02:14 (UTC+7)
+          {liveProducts
+            ? `Connected to live AWS Singapore backend · ${liveProducts.length} SKUs synced (UTC+7)`
+            : "Look back your previous work · Sign in to sync live shelf data (UTC+7)"}
         </p>
       </div>
 

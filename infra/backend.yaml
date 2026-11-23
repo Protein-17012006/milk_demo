@@ -1,0 +1,810 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Project A — Serverless Website Backend (Platform B, NHAT-P01):
+  Cognito User Pool + MFA + 3 RBAC groups, REST API Gateway + Cognito Authorizer + AWS WAFv2,
+  Python 3.12 API & Ingest Lambdas, SQS + DLQ + EventBridge hourly official selector,
+  7 DynamoDB tables (PITR + SSE), Private S3 Analytics Bucket + Glue Catalog + Athena Workgroup.
+  Region: ap-southeast-1 (Singapore).
+
+Parameters:
+  Env:
+    Type: String
+    Default: development
+    AllowedValues:
+      - development
+      - test
+      - staging
+      - production
+  CodeBucket:
+    Type: String
+    Description: Existing S3 bucket storing Lambda deployment zip packages.
+  ApiCodeKey:
+    Type: String
+    Description: S3 key for api_lambda.zip
+  IngestCodeKey:
+    Type: String
+    Description: S3 key for ingest_lambda.zip
+  HubDataBucket:
+    Type: String
+    Default: milk-demo-base-databucket-xh85udq9bhrr
+    Description: Hub S3 bucket (read-only access for blurred frames & result ingestion).
+  HubCapturesTable:
+    Type: String
+    Default: milk-demo-base-CapturesTable-1623FFBNLNMQO
+    Description: Existing hub DynamoDB captures table (read-only backfill source).
+  AllowedOrigins:
+    Type: String
+    Default: "https://main.d2k8euxy0yoiv8.amplifyapp.com,http://localhost:3000"
+  MfaConfiguration:
+    Type: String
+    Default: OPTIONAL
+    AllowedValues:
+      - OPTIONAL
+      - "ON"
+    Description: TOTP MFA mode (OPTIONAL in dev for smooth test onboarding; ON in production).
+  EnableWaf:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Address that receives backend alarms (ingest DLQ). Empty = alarm topic without a subscriber.
+
+Conditions:
+  UseWaf: !Equals [!Ref EnableWaf, "true"]
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+
+Resources:
+  # =========================================================================
+  # 1. COGNITO USER POOL + TOTP MFA + 3 RBAC GROUPS
+  # =========================================================================
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "milk-backend-${Env}-users"
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      MfaConfiguration: !Ref MfaConfiguration
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "milk-backend-${Env}-web"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 7
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+
+  GroupDatagent:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: datagent
+      Description: Read inventory, reports, KPIs and export CV Output CSV
+      Precedence: 30
+      UserPoolId: !Ref UserPool
+
+  GroupFieldTeam:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: field_team
+      Description: Review flagged low-confidence rows, submit corrections and upload audit files
+      Precedence: 20
+      UserPoolId: !Ref UserPool
+
+  GroupTeamAdmin:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: team_admin
+      Description: Import SKU Master and Store List, assign user groups and manage configuration
+      Precedence: 10
+      UserPoolId: !Ref UserPool
+
+  # =========================================================================
+  # 2. DYNAMODB TABLES (HOT WEBSITE DATA — PAY_PER_REQUEST + PITR + SSE)
+  # =========================================================================
+  CapturesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "milk-backend-${Env}-captures"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: camera_id
+          AttributeType: S
+        - AttributeName: capture_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: camera_id
+          KeyType: HASH
+        - AttributeName: capture_id
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
+  LatestStockTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "milk-backend-${Env}-latest-stock"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: store_id
+          AttributeType: S
+        - AttributeName: sku_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: store_id
+          KeyType: HASH
+        - AttributeName: sku_id
+          KeyType: RANGE
+
+  ReviewQueueTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "milk-backend-${Env}-review-queue"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: store_id
+          AttributeType: S
+        - AttributeName: queue_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: store_id
+          KeyType: HASH
+        - AttributeName: queue_key
+          KeyType: RANGE
+
+  SkuMasterTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "milk-backend-${Env}-sku-master"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: sku_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sku_id
+          KeyType: HASH
+
+  StoreListTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "milk-backend-${Env}-store-list"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: store_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: store_id
+          KeyType: HASH
+
+  CorrectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "milk-backend-${Env}-corrections"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: store_id
+          AttributeType: S
+        - AttributeName: correction_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: store_id
+          KeyType: HASH
+        - AttributeName: correction_id
+          KeyType: RANGE
+
+  UserPrefsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "milk-backend-${Env}-user-prefs"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: user_sub
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_sub
+          KeyType: HASH
+
+  # =========================================================================
+  # 3. PRIVATE S3 ANALYTICS BUCKET + GLUE CATALOG + ATHENA WORKGROUP
+  # =========================================================================
+  AnalyticsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "milk-backend-${Env}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-official-frames-90d
+            Status: Enabled
+            Prefix: frames/official/
+            ExpirationInDays: 90
+          - Id: expire-temp-uploads-7d
+            Status: Enabled
+            Prefix: uploads/
+            ExpirationInDays: 7
+          - Id: expire-athena-results-14d
+            Status: Enabled
+            Prefix: athena-results/
+            ExpirationInDays: 14
+
+  AnalyticsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AnalyticsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyPlainHttp
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt AnalyticsBucket.Arn
+              - !Sub "${AnalyticsBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "milk_backend_${Env}"
+        Description: "Data Dictionary tables for Project A Shelf Analytics (NHAT-P01)"
+
+  GlueCvOutputTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: cv_output
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+        StorageDescriptor:
+          Location: !Sub "s3://${AnalyticsBucket}/warehouse/cv_output/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+          Columns:
+            - { Name: reading_id, Type: string }
+            - { Name: capture_id, Type: string }
+            - { Name: store_id, Type: string }
+            - { Name: camera_id, Type: string }
+            - { Name: capture_timestamp, Type: string }
+            - { Name: capture_source, Type: string }
+            - { Name: image_filename, Type: string }
+            - { Name: sku_id, Type: string }
+            - { Name: sku_name, Type: string }
+            - { Name: unit_count, Type: int }
+            - { Name: confidence_score, Type: double }
+            - { Name: detection_method, Type: string }
+            - { Name: bounding_box, Type: string }
+            - { Name: is_flagged, Type: boolean }
+            - { Name: flag_reason, Type: string }
+            - { Name: processing_time_ms, Type: int }
+
+  GlueCaptureLogTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: capture_log
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+        StorageDescriptor:
+          Location: !Sub "s3://${AnalyticsBucket}/warehouse/capture_log/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+          Columns:
+            - { Name: capture_id, Type: string }
+            - { Name: store_id, Type: string }
+            - { Name: camera_id, Type: string }
+            - { Name: capture_timestamp, Type: string }
+            - { Name: capture_source, Type: string }
+            - { Name: image_filename, Type: string }
+            - { Name: rows_written, Type: int }
+            - { Name: units_found, Type: int }
+            - { Name: flagged_rows, Type: int }
+            - { Name: processing_time_ms, Type: int }
+
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "milk-backend-${Env}"
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${AnalyticsBucket}/athena-results/"
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+
+  # =========================================================================
+  # 4. SQS INGEST QUEUE + DLQ
+  # =========================================================================
+  IngestDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "milk-backend-${Env}-ingest-dlq"
+      MessageRetentionPeriod: 1209600
+
+  IngestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "milk-backend-${Env}-ingest-queue"
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IngestDLQ.Arn
+        maxReceiveCount: 3
+
+  # The hub bucket's results/ notifications land here (HOANG-P10 decision 3, NHAT-T001).
+  # Only that bucket, in this account, may send. The notification itself is declared in infra/base.yaml.
+  IngestQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref IngestQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: HubBucketResults
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt IngestQueue.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:s3:::${HubDataBucket}"
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  # Results that failed three times sit in the DLQ: tell someone (HOANG-P10 Nextstep 10).
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "milk-backend-${Env}-alerts"
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  IngestDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "milk-backend-${Env}-ingest-dlq-not-empty"
+      AlarmDescription: >-
+        Hub results failed ingestion three times and wait in the DLQ. Read the ingest Lambda log,
+        fix the cause, then move the messages back to the ingest queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt IngestDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # =========================================================================
+  # 5. LAMBDA IAM ROLE + API & INGEST FUNCTIONS (PYTHON 3.12)
+  # =========================================================================
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "milk-backend-${Env}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: MilkBackendLeastPrivilege
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt CapturesTable.Arn
+                  - !GetAtt LatestStockTable.Arn
+                  - !GetAtt ReviewQueueTable.Arn
+                  - !GetAtt SkuMasterTable.Arn
+                  - !GetAtt StoreListTable.Arn
+                  - !GetAtt CorrectionsTable.Arn
+                  - !GetAtt UserPrefsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${HubCapturesTable}"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt AnalyticsBucket.Arn
+                  - !Sub "${AnalyticsBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${HubDataBucket}"
+                  - !Sub "arn:aws:s3:::${HubDataBucket}/*"
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource:
+                  - !GetAtt IngestQueue.Arn
+
+  ApiLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "milk-backend-${Env}-api"
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref ApiCodeKey
+      Environment:
+        Variables:
+          CAPTURES_TABLE: !Ref CapturesTable
+          LATEST_STOCK_TABLE: !Ref LatestStockTable
+          REVIEW_QUEUE_TABLE: !Ref ReviewQueueTable
+          SKU_MASTER_TABLE: !Ref SkuMasterTable
+          STORE_LIST_TABLE: !Ref StoreListTable
+          CORRECTIONS_TABLE: !Ref CorrectionsTable
+          USER_PREFS_TABLE: !Ref UserPrefsTable
+          ANALYTICS_BUCKET: !Ref AnalyticsBucket
+          HUB_BUCKET: !Ref HubDataBucket
+          ALLOWED_ORIGINS: !Ref AllowedOrigins
+
+  IngestLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "milk-backend-${Env}-ingest"
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref IngestCodeKey
+      Environment:
+        Variables:
+          CAPTURES_TABLE: !Ref CapturesTable
+          LATEST_STOCK_TABLE: !Ref LatestStockTable
+          REVIEW_QUEUE_TABLE: !Ref ReviewQueueTable
+          ANALYTICS_BUCKET: !Ref AnalyticsBucket
+          CAPTURE_TTL_DAYS: "7"
+
+  IngestEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt IngestQueue.Arn
+      FunctionName: !Ref IngestLambda
+      BatchSize: 5
+
+  HourlyOfficialRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "milk-backend-${Env}-hourly-official"
+      Description: Select one official capture per camera each hour for CV Output & S3 archive
+      ScheduleExpression: rate(1 hour)
+      State: ENABLED
+      Targets:
+        - Id: IngestHourlyOfficial
+          Arn: !GetAtt IngestLambda.Arn
+          Input: '{"action": "select_hourly_official"}'
+
+  HourlyOfficialPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HourlyOfficialRule.Arn
+
+  # =========================================================================
+  # 6. REST API GATEWAY + COGNITO AUTHORIZER + CORS
+  # =========================================================================
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "milk-backend-${Env}-api"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  CognitoAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoJwtAuthorizer
+      Type: COGNITO_USER_POOLS
+      RestApiId: !Ref RestApi
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !GetAtt UserPool.Arn
+
+  HealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: health
+
+  HealthGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref HealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambda.Arn}/invocations"
+
+  ProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: "{proxy+}"
+
+  ProxyAnyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ProxyResource
+      HttpMethod: ANY
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambda.Arn}/invocations"
+
+  ProxyOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ProxyResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambda.Arn}/invocations"
+
+  ApiGatewayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*"
+
+  GatewayResponseDefault4XX:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref RestApi
+      ResponseType: DEFAULT_4XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'GET,POST,PUT,OPTIONS'"
+
+  GatewayResponseDefault5XX:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref RestApi
+      ResponseType: DEFAULT_5XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'GET,POST,PUT,OPTIONS'"
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - HealthGetMethod
+      - ProxyAnyMethod
+      - ProxyOptionsMethod
+      - GatewayResponseDefault4XX
+      - GatewayResponseDefault5XX
+    Properties:
+      RestApiId: !Ref RestApi
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref RestApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: v1
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingRateLimit: 100
+          ThrottlingBurstLimit: 200
+
+  # =========================================================================
+  # 7. AWS WAFv2 REGIONAL WEB ACL (ATTACHED DIRECTLY TO REST API STAGE)
+  # =========================================================================
+  ApiWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Condition: UseWaf
+    Properties:
+      Name: !Sub "milk-backend-${Env}-waf"
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "milkBackend${Env}Waf"
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: RateLimit2000Per5Min
+          Priority: 1
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitRule
+            SampledRequestsEnabled: true
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: CommonRuleSet
+            SampledRequestsEnabled: true
+
+  ApiWafAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Condition: UseWaf
+    DependsOn: ApiStage
+    Properties:
+      ResourceArn: !Sub "arn:aws:apigateway:${AWS::Region}::/restapis/${RestApi}/stages/${ApiStage}"
+      WebACLArn: !GetAtt ApiWebAcl.Arn
+
+Outputs:
+  ApiBaseUrl:
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/v1"
+  CognitoUserPoolId:
+    Value: !Ref UserPool
+  CognitoClientId:
+    Value: !Ref UserPoolClient
+  AnalyticsBucketName:
+    Value: !Ref AnalyticsBucket
+  IngestQueueUrl:
+    Value: !Ref IngestQueue
+  IngestQueueArn:
+    Description: Pass to the hub stack (infra/base.yaml, parameter IngestQueueArn) to send results/ here.
+    Value: !GetAtt IngestQueue.Arn
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+  IngestLambdaName:
+    Value: !Ref IngestLambda
+  ApiLambdaName:
+    Value: !Ref ApiLambda
+  GlueDatabaseName:
+    Value: !Ref GlueDatabase
+  AthenaWorkGroupName:
+    Value: !Ref AthenaWorkGroup
