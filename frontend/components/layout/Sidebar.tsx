@@ -8,6 +8,7 @@ import {
   Home,
   PieChart,
   Box,
+  Gauge,
   Settings,
   Search,
   ArrowUpDown,
@@ -16,27 +17,30 @@ import {
   LogOut,
   UserPlus,
 } from "lucide-react";
-import { useAuth } from "@/lib/auth";
+import { useAuth, type CognitoGroup } from "@/lib/auth";
 import { useSidebarSearch } from "./SidebarContext";
 
-export type NavItemId = "home" | "dashboard" | "category" | "settings";
+export type NavItemId = "home" | "dashboard" | "category" | "model" | "settings";
 
 const PRIMARY_NAV_ITEMS: {
   id: NavItemId;
   label: string;
   href: string;
   icon: React.ComponentType<{ className?: string; strokeWidth?: number }>;
+  /** Only these groups see the item; none means everyone. */
+  groups?: CognitoGroup[];
 }[] = [
   { id: "home", label: "Home", href: "/", icon: Home },
   { id: "dashboard", label: "Dashboard", href: "/dashboard", icon: PieChart },
   { id: "category", label: "Category", href: "/category", icon: Box },
+  { id: "model", label: "Model", href: "/model", icon: Gauge, groups: ["team_admin", "field_team"] },
 ];
 
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const { searchQuery, setSearchQuery } = useSidebarSearch();
-  const { user, isAuthenticated, signOut } = useAuth();
+  const { user, isAuthenticated, signOut, hasGroup } = useAuth();
   const pathname = usePathname();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const accountMenuRef = useRef<HTMLDivElement>(null);
@@ -215,7 +219,7 @@ export function Sidebar() {
       {/* Navigation Items — every icon stays locked in a 32px left slot at x=12px */}
       <nav className="flex flex-1 flex-col pt-[10px] overflow-y-auto overflow-x-hidden">
         <ul className="flex flex-col gap-[5px] px-[12px]">
-          {PRIMARY_NAV_ITEMS.map((item) => {
+          {PRIMARY_NAV_ITEMS.filter((item) => !item.groups || hasGroup(...item.groups)).map((item) => {
             const Icon = item.icon;
             const isActive = isPathActive(item.href);
             return (
