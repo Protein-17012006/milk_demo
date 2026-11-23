@@ -1,12 +1,12 @@
-# Worker đếm trên GPU (máy long)
+# Worker đếm trên GPU
 
-Kiến trúc hybrid: AWS là hub (nhận luồng từ tiệm, dashboard, lưu trữ), còn việc đếm chạy
-trên GPU của máy long. Worker kéo luồng từ hub qua RTSPS, đếm, rồi gửi kết quả về hub qua
-HTTPS kèm token. Máy long **không mở cổng nào, không giữ key AWS, không lưu ảnh**: ảnh đã
-che mặt do hub lưu lên S3.
+Kiến trúc hybrid: AWS là hub (nhận luồng từ tiệm, dashboard, lưu trữ), còn việc đếm chạy trên GPU của một máy
+trong team. Từ 23/11/2026 đó là máy HUYHOANG (Windows, xem mục "Chạy trên Windows"); trước đó là máy long
+(Linux, systemd). Worker kéo luồng từ hub qua RTSPS, đếm, rồi gửi kết quả về hub qua HTTPS kèm token. Máy chạy
+worker **không mở cổng nào, không giữ key AWS, không lưu ảnh**: ảnh đã che mặt do hub lưu lên S3.
 
 ```
-camera -> relay tại tiệm -> hub AWS (MediaMTX) --RTSPS--> worker máy long (GPU)
+camera -> relay tại tiệm -> hub AWS (MediaMTX) --RTSPS--> worker trên máy GPU
                                    ^                            |
                                    +------ HTTPS + token -------+  (kết quả, ảnh đã che mặt)
 ```
@@ -90,6 +90,6 @@ systemd của user, có giới hạn RAM và nice 10 như các job P05, P06. Fil
 
 ## Tiết kiệm băng thông
 
-Luồng từ hub về máy long tính phí ra internet của AWS (100 GB/tháng đầu miễn phí, khoảng
+Luồng từ hub về máy chạy worker tính phí ra internet của AWS (100 GB/tháng đầu miễn phí, khoảng
 2 GB mỗi giờ với luồng 4K 4–6 Mbps). Tắt worker khi không dùng; `MILK_MAX_FPS` và
 `MILK_PUBLISH_FPS` giới hạn số khung đếm và số lần gửi về dashboard mỗi giây.
