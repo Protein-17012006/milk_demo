@@ -171,8 +171,10 @@ phải SKU của danh mục.
 - Một hộp của model là một lần phát hiện.
 - **Số thật của vị s:** số hộp `correct` có nhãn s, cộng số hộp `wrong_sku` có `true_sku_id` = s, cộng số điểm
   sót của s. Hộp UNRECOGNIZED `correct` không tính vào vị nào.
-- **Số model của vị s:** số hộp có nhãn s. Hộp UNRECOGNIZED nằm ở dòng `null`.
-- **Dòng so sánh** (một dòng cho mỗi cặp khung × vị, với mọi vị có số model > 0 hoặc số thật > 0), theo phần A của Accuracy Report:
+- **Số model của vị s:** số hộp có nhãn s.
+- **Hộp UNRECOGNIZED không có dòng so sánh**, vì hàng ngoài danh mục không có số thật. Nó vẫn được tính ở ma trận
+  nhầm lẫn, ở chỉ số #12 và ở chỉ số #1–2 (khi thật là một SKU). Đây là quyết định lúc lập kế hoạch ngày 23/11.
+- **Dòng so sánh** (một dòng cho mỗi cặp khung × SKU của danh mục, với mọi SKU có số model > 0 hoặc số thật > 0), theo phần A của Accuracy Report:
   - `count_difference` = số model − số thật.
   - `count_accuracy_pct` = max(0, 1 − |chênh| / số thật) khi số thật > 0; bằng 0 khi số thật = 0.
 - **Loại lỗi `discrepancy_category`**, xét theo thứ tự, gặp điều kiện nào trước thì lấy loại đó:
