@@ -864,7 +864,50 @@ def _handle_model_audit_skip(audit_id: str, event: dict[str, Any], user: dict[st
     return _json_response(200, _audit_view(saved), event)
 
 
+def _hour_within_days(hour: str, days: int) -> bool:
+    if days <= 0:
+        return True
+    try:
+        start = datetime.strptime(hour, "%Y%m%d-%H").replace(tzinfo=ICT)
+    except ValueError:
+        return False
+    return start >= datetime.now(ICT) - timedelta(days=days)
+
+
+def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
+    params = event.get("queryStringParameters") or {}
+    days = int(params.get("days") or 7)
+    version = params.get("model_version") or "all"
+    done = [a for a in _scan_all(ddb.Table(AUDITS_TABLE))
+            if a.get("status") == "done" and _within_days(str(a.get("capture_timestamp", "")), days)]
+    latest: dict[str, str] = {}
+    for a in done:
+        v = a.get("model_version") or "unknown"
+        latest[v] = max(latest.get(v, ""), str(a.get("capture_timestamp", "")))
+    chosen = [a for a in done if version == "all" or (a.get("model_version") or "unknown") == version]
+    health = [h for h in _scan_all(ddb.Table(MODEL_HEALTH_TABLE)) if _hour_within_days(str(h.get("hour", "")), days)]
+    processing = [float(h["processing_ms_median"]) for h in health if "processing_ms_median" in h
+                  for _ in range(int(h.get("captures", 0)))]
+    return _json_response(200, {
+        **summarize([_audit_view(a) for a in chosen], processing),
+        "model_versions": sorted(latest, key=lambda v: latest[v], reverse=True),
+        "range": {"days": days, "model_version": version},
+    }, event)
+
+
+def _handle_model_health(event: dict[str, Any], ddb) -> dict[str, Any]:
+    params = event.get("queryStringParameters") or {}
+    days = int(params.get("days") or 7)
+    items = sorted((h for h in _scan_all(ddb.Table(MODEL_HEALTH_TABLE)) if _hour_within_days(str(h.get("hour", "")), days)),
+                   key=lambda h: (str(h.get("hour", "")), str(h.get("camera_id", ""))))
+    return _json_response(200, {"items": items}, event)
+
+
 def _route_model(method: str, route_path: str, event: dict[str, Any], user: dict[str, Any], s3, ddb):
+    if method == "GET" and route_path == "/model/summary":
+        return _handle_model_summary(event, ddb)
+    if method == "GET" and route_path == "/model/health":
+        return _handle_model_health(event, ddb)
     parts = route_path.strip("/").split("/")  # model, audits, <id>, skip
     if parts[:2] == ["model", "audits"]:
         if len(parts) == 2 and method == "GET":

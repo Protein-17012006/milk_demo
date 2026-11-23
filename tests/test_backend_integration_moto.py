@@ -351,6 +351,56 @@ def test_an_unknown_audit_is_not_found(monkeypatch: pytest.MonkeyPatch):
     api, _ = _backend(monkeypatch)
     assert _call(api, "GET", "/v1/model/audits/AUD-NOPE")[0] == 404
 
+
+@mock_aws
+def test_summary_without_labelled_frames_has_no_numbers(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _one_pending_audit(ingest)
+    status, summary = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
+    assert status == 200 and summary["n_audits"] == 0
+    assert all(k["value"] is None and k["n"] == 0 for name, k in summary["kpis"].items()
+               if name != "avg_processing_time_ms")  # speed comes from hourly health, not from labels
+
+
+@mock_aws
+def test_summary_after_labelling_one_frame(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "130000", [("hot160", 1)])
+    _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)], model_version="v3", with_frame=True)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body={
+        "verdicts": [{"box_id": 1, "verdict": "correct"},
+                     {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "original145"}],
+        "missed": []})
+    status, summary = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
+    assert status == 200 and summary["n_audits"] == 1
+    assert summary["kpis"]["overall_identification_accuracy"]["value"] == 0.5
+    assert summary["model_versions"] == ["v3"]
+    assert summary["kpis"]["avg_processing_time_ms"]["value"] == 20  # every capture of hour 14 took 20 ms
+
+
+@mock_aws
+def test_summary_for_a_version_without_frames(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _one_pending_audit(ingest)
+    _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body={
+        "verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}], "missed": []})
+    status, summary = _call(api, "GET", "/v1/model/summary", query={"days": "0", "model_version": "v9"})
+    assert status == 200 and summary["n_audits"] == 0
+    assert summary["kpis"]["overall_identification_accuracy"]["value"] is None
+
+
+@mock_aws
+def test_health_lists_hours_in_order(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "150000", [("hot160", 1)])
+    _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)])
+    ingest.lambda_handler({"action": "backfill_model_health", "days": 1, "until": "20261121-16"})
+    status, health = _call(api, "GET", "/v1/model/health", query={"days": "0"})
+    assert status == 200
+    assert [(h["camera_id"], h["hour"], h["captures"]) for h in health["items"]] == [
+        ("CAM-S01-A", "20261121-14", 1), ("CAM-S01-A", "20261121-15", 1)]
+
 @mock_aws
 def test_end_to_end_ingest_review_and_export_with_moto(monkeypatch: pytest.MonkeyPatch):
     region = "ap-southeast-1"
