@@ -304,8 +304,9 @@ export function ModelQualityView() {
         ) : (
           <>
             <p data-health-totals className="mb-2 text-[12px] text-[#6B7280]">
-              {health.reduce((s, h) => s + h.captures, 0)} captures in {health.length} camera-hours · duplicate boxes{" "}
-              {health.reduce((s, h) => s + (h.duplicate_pairs ?? 0), 0)} (should be 0) · versions{" "}
+              {health.reduce((s, h) => s + h.captures, 0)} captures in {health.length} camera-hours · duplicate boxes
+              in the latest hour ({hourLabel(health[health.length - 1].hour)}):{" "}
+              {health[health.length - 1].duplicate_pairs ?? 0} (should be 0) · versions{" "}
               {[...new Set(health.flatMap((h) => h.model_versions ?? []))].join(", ")}
             </p>
             <div className="h-[220px]">
