@@ -773,11 +773,6 @@ def _at(api, monkeypatch: pytest.MonkeyPatch, iso: str) -> None:
     monkeypatch.setattr(api, "_now", lambda: datetime.fromisoformat(iso))
 
 
-def _call(api, method: str, path: str, groups: str = "datagent", body: dict | None = None, query: dict | None = None):
-    resp = api.lambda_handler(_auth_event(method, path, groups=groups, body=body, query=query))
-    return resp["statusCode"], json.loads(resp["body"]) if resp["body"] else None
-
-
 @mock_aws
 def test_shelf_plan_starts_as_the_suggestion(monkeypatch: pytest.MonkeyPatch):
     api, _ = _backend(monkeypatch)
@@ -793,7 +788,7 @@ def test_shelf_plan_starts_as_the_suggestion(monkeypatch: pytest.MonkeyPatch):
 def test_only_team_admin_saves_a_shelf_plan(monkeypatch: pytest.MonkeyPatch):
     api, _ = _backend(monkeypatch)
     plan = {"open_time": "06:00", "close_time": "22:00", "expected_skus": [CHEESE]}
-    assert _call(api, "PUT", PLAN_PATH, body=plan)[0] == 403
+    assert _call(api, "PUT", PLAN_PATH, groups="datagent", body=plan)[0] == 403
     status, body = _call(api, "PUT", PLAN_PATH, groups="team_admin", body=plan)
     assert status == 200 and body["source"] == "saved" and body["expected_skus"] == [CHEESE]
     assert (body["open_time"], body["close_time"]) == ("06:00", "22:00")
