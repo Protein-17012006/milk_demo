@@ -59,6 +59,8 @@ def _create_mock_infra(region: str = "ap-southeast-1"):
         ("test-user-prefs", "user_sub", None),
         ("test-audits", "store_id", "audit_id"),
         ("test-model-health", "camera_id", "hour"),
+        ("test-shelf", "store_id", "key"),
+        ("test-shelf-events", "store_id", "event_key"),
     ]
     for name, pk, sk in tables:
         key_schema = [{"AttributeName": pk, "KeyType": "HASH"}]
@@ -97,6 +99,8 @@ def _backend(monkeypatch: pytest.MonkeyPatch):
         "USER_PREFS_TABLE": "test-user-prefs",
         "AUDITS_TABLE": "test-audits",
         "MODEL_HEALTH_TABLE": "test-model-health",
+        "SHELF_TABLE": "test-shelf",
+        "SHELF_EVENTS_TABLE": "test-shelf-events",
         "ANALYTICS_BUCKET": "test-analytics-bucket",
         "HUB_BUCKET": "test-hub-bucket",
     }
@@ -669,3 +673,92 @@ def test_end_to_end_ingest_review_and_export_with_moto(monkeypatch: pytest.Monke
     header = csv_resp["body"].lstrip("\ufeff").splitlines()[0].split(",")
     assert header == common.CV_OUTPUT_COLUMNS
     assert len(header) == 16
+
+
+# --- Dashboard shelf metrics (spec docs/superpowers/specs/2026-11-24-dashboard-shelf-metrics-design.md) ---
+
+CHEESE = "Slide Cheese 145g"
+HOT = "Slide Hot & Spicy 160g"
+
+
+def _shelf_plan(open_time="06:00", close_time="22:00", expected=(CHEESE,), **extra) -> None:
+    """Give DEMO-S01 opening hours and expected SKUs, as the Settings page will."""
+    fields = {"open_time": open_time, "close_time": close_time, "expected_skus": list(expected), **extra}
+    _table("test-store-list").update_item(
+        Key={"store_id": "DEMO-S01"},
+        UpdateExpression="SET " + ", ".join(f"#{k} = :{k}" for k in fields),
+        ExpressionAttributeNames={f"#{k}": k for k in fields},
+        ExpressionAttributeValues={f":{k}": v for k, v in fields.items()},
+    )
+
+
+def _cheese_then_empty(ingest) -> None:
+    """5 cans at 14:00 and 14:05, none at 14:10 and 14:15 (21/11)."""
+    for hhmmss, units in [("140010", 5), ("140510", 5), ("141010", 0), ("141510", 0)]:
+        _ingest(ingest, "CAM-S01-A", hhmmss, [("cheese145", units)] if units else [])
+
+
+def _tick(ingest, now="2026-11-21T14:22:00+07:00") -> dict:
+    return ingest.lambda_handler({"action": "shelf_tick", "now": now})
+
+
+def _shelf(key: str) -> dict | None:
+    return _table("test-shelf").get_item(Key={"store_id": "DEMO-S01", "key": key}).get("Item")
+
+
+def _event_keys() -> list[str]:
+    return sorted(i["event_key"] for i in _table("test-shelf-events").scan()["Items"])
+
+
+@mock_aws
+def test_shelf_tick_finds_an_out_of_stock(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    _cheese_then_empty(ingest)
+    _tick(ingest)
+    assert _event_keys() == [f"20261121-1410#{CHEESE}#OOS"]
+
+
+@mock_aws
+def test_shelf_tick_twice_counts_once(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    _cheese_then_empty(ingest)
+    _tick(ingest)
+    _tick(ingest)
+    assert _shelf("hour#20261121-14")["skus"][CHEESE]["checks"] == 4
+    assert _event_keys() == [f"20261121-1410#{CHEESE}#OOS"]
+
+
+@mock_aws
+def test_a_bucket_closed_under_two_minutes_waits(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    _cheese_then_empty(ingest)
+    _tick(ingest, now="2026-11-21T14:21:30+07:00")
+    assert _shelf("state")["last_bucket"] == "20261121-1410"
+
+
+@mock_aws
+def test_closed_hours_do_not_count(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan(close_time="14:10")
+    _cheese_then_empty(ingest)
+    _tick(ingest)
+    assert _event_keys() == []
+    assert _shelf("hour#20261121-14")["checks"] == 2
+
+
+@mock_aws
+def test_a_saved_plan_is_recomputed_on_the_next_tick(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    _cheese_then_empty(ingest)
+    _tick(ingest)
+    _shelf_plan(expected=(CHEESE, HOT), shelf_recompute_requested_at="2026-11-21T14:22:30+07:00")
+    _tick(ingest)
+    store = _table("test-store-list").get_item(Key={"store_id": "DEMO-S01"})["Item"]
+    assert "shelf_recompute_requested_at" not in store
+    hot = _shelf("hour#20261121-14")["skus"][HOT]
+    assert (hot["checks"], hot["available"]) == (4, 0)
+    assert _event_keys() == [f"20261121-1410#{CHEESE}#OOS"]

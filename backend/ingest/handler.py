@@ -6,6 +6,8 @@ Receives captures from:
    - {"action": "ingest_record", "record": {...}, "source_bucket": "..."}
    - {"action": "backfill_from_table", "source_table": "...", "source_bucket": "...", "limit": 50}
    - {"action": "select_hourly_official", "hour_prefix": "YYYY-MM-DDTHH"} (EventBridge hourly)
+   - {"action": "shelf_tick", "now": <ISO, optional>} (EventBridge every 5 minutes: Dashboard shelf metrics)
+   - {"action": "shelf_recompute", "store_id": "...", "days": 15, "now": <ISO, optional>}
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import boto3
+import shelf
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from common import (
@@ -43,6 +46,9 @@ CAPTURE_TTL_DAYS = int(os.environ.get("CAPTURE_TTL_DAYS", "7"))
 AUDITS_TABLE = os.environ.get("AUDITS_TABLE", "")
 MODEL_HEALTH_TABLE = os.environ.get("MODEL_HEALTH_TABLE", "")
 HEALTH_TTL_DAYS = 90
+SHELF_TABLE = os.environ.get("SHELF_TABLE", "")
+SHELF_EVENTS_TABLE = os.environ.get("SHELF_EVENTS_TABLE", "")
+STORE_LIST_TABLE = os.environ.get("STORE_LIST_TABLE", "")
 
 
 def _aws_clients():
@@ -520,8 +526,278 @@ def _handle_backfill_health(event: dict[str, Any], s3_client, ddb_resource) -> d
     return {"action": "backfill_model_health", "hours": len(hours), "health_items": written}
 
 
+# --- Dashboard shelf metrics (spec docs/superpowers/specs/2026-11-24-dashboard-shelf-metrics-design.md) ---
+
+
+def _now_of(event: dict[str, Any]) -> datetime:
+    raw = event.get("now")
+    return datetime.fromisoformat(raw).astimezone(UTC) if raw else datetime.now(UTC)
+
+
+def _query_all(table, **kwargs) -> list[dict[str, Any]]:
+    resp = table.query(**kwargs)
+    items = resp.get("Items", [])
+    while "LastEvaluatedKey" in resp:
+        resp = table.query(ExclusiveStartKey=resp["LastEvaluatedKey"], **kwargs)
+        items.extend(resp.get("Items", []))
+    return from_dynamodb(items)
+
+
+def _shelf_range(store_id: str, first: str, last: str):
+    return Key("store_id").eq(store_id) & Key("key").between(first, last)
+
+
+def _store_cameras(ddb_resource, store_id: str) -> list[tuple[str, str]]:
+    """(camera_id, store code) of one store's cameras, from its latest_stock rows, as cameras() does."""
+    found: dict[str, str] = {}
+    rows = _query_all(ddb_resource.Table(LATEST_STOCK_TABLE), KeyConditionExpression=Key("store_id").eq(store_id))
+    for item in rows:
+        parts = str(item.get("capture_id", "")).split("-")
+        if item.get("camera_id") and len(parts) > 2 and parts[0] == "CAP":
+            found.setdefault(item["camera_id"], parts[1])
+    return sorted(found.items())
+
+
+def _last_closed_bucket(now_utc: datetime) -> str:
+    """The latest bucket that closed at least SETTLE_MINUTES ago, so captures arriving late are in it."""
+    return shelf.bucket_of((now_utc - timedelta(minutes=shelf.BUCKET_MINUTES + shelf.SETTLE_MINUTES)).isoformat())
+
+
+def _captures_by_bucket(ddb_resource, cameras: list[tuple[str, str]], first: str, last: str) -> dict[str, list]:
+    """Captures of the store's cameras from bucket `first` through bucket `last`, by bucket (ids CAP-<code>-...)."""
+    table = ddb_resource.Table(CAPTURES_TABLE)
+    end = (shelf.bucket_time(last) + timedelta(minutes=shelf.BUCKET_MINUTES - 1)).strftime("%Y%m%d-%H%M")
+    by_bucket: dict[str, list] = defaultdict(list)
+    for camera_id, code in cameras:
+        cond = Key("camera_id").eq(camera_id) & Key("capture_id").between(
+            f"CAP-{code}-{first}00", f"CAP-{code}-{end}59~"
+        )
+        for item in _query_all(table, KeyConditionExpression=cond):
+            by_bucket[shelf.bucket_of(item["capture_timestamp"])].append(item)
+    return by_bucket
+
+
+def _first_capture_bucket(ddb_resource, cameras: list[tuple[str, str]], since: str) -> str | None:
+    table = ddb_resource.Table(CAPTURES_TABLE)
+    firsts = []
+    for camera_id, code in cameras:
+        cond = Key("camera_id").eq(camera_id) & Key("capture_id").between(f"CAP-{code}-{since}00", f"CAP-{code}-~")
+        items = from_dynamodb(table.query(KeyConditionExpression=cond, Limit=1).get("Items", []))
+        if items:
+            firsts.append(shelf.bucket_of(items[0]["capture_timestamp"]))
+    return min(firsts) if firsts else None
+
+
+def _expected_skus(ddb_resource, store: dict[str, Any], now_utc: datetime) -> list[str]:
+    """The saved list, else the suggestion: SKUs seen confidently in the last SUGGEST_DAYS days (day rollups)."""
+    if store.get("expected_skus"):
+        return sorted(store["expected_skus"])
+    today = now_utc.astimezone(ICT)
+    first = (today - timedelta(days=shelf.SUGGEST_DAYS - 1)).strftime("%Y%m%d")
+    days = _query_all(
+        ddb_resource.Table(SHELF_TABLE),
+        KeyConditionExpression=_shelf_range(store["store_id"], f"day#{first}", f"day#{today.strftime('%Y%m%d')}"),
+    )
+    return sorted({sku for day in days for sku in day.get("confident_skus") or []})
+
+
+def _apply_check(check: dict, store: dict, expected: list[str], skus_state: dict) -> list[dict[str, Any]]:
+    """Mark the check open or not, record the list it was counted against, and step each expected SKU's state."""
+    check["open"] = shelf.is_open(check["bucket"], store.get("open_time"), store.get("close_time"))
+    check["expected"] = expected
+    events = []
+    if check["open"] and expected:
+        for sku in expected:
+            state, event = shelf.step_state(skus_state.get(sku), int(check["counts"].get(sku, 0)), check["bucket"])
+            skus_state[sku] = state
+            if event is not None:
+                events.append({**event, "sku_id": sku, "event_key": f"{event['at']}#{sku}#{event['type']}"})
+    return events
+
+
+def _expires(start: datetime, days: int) -> int:
+    return int((start + timedelta(days=days)).timestamp())
+
+
+def _check_item(store_id: str, check: dict) -> dict:
+    expires = _expires(shelf.bucket_time(check["bucket"]), shelf.CHECK_TTL_DAYS)
+    return to_dynamodb_safe({**check, "store_id": store_id, "key": f"check#{check['bucket']}", "expires_at": expires})
+
+
+def _event_item(store_id: str, event: dict) -> dict:
+    return to_dynamodb_safe(
+        {**event, "store_id": store_id, "expires_at": _expires(shelf.bucket_time(event["at"]), shelf.ROLLUP_TTL_DAYS)}
+    )
+
+
+def _write_rollups(ddb_resource, store_id: str, hours: set[str]) -> None:
+    """Rebuild hour# from the hour's checks and events, then day# from the day's hours. SET, so reruns agree."""
+    table = ddb_resource.Table(SHELF_TABLE)
+    events_table = ddb_resource.Table(SHELF_EVENTS_TABLE)
+    for hour in sorted(hours):
+        checks = _query_all(table, KeyConditionExpression=_shelf_range(store_id, f"check#{hour}00", f"check#{hour}59"))
+        cond = Key("store_id").eq(store_id) & Key("event_key").between(f"{hour}00", f"{hour}59~")
+        events = _query_all(events_table, KeyConditionExpression=cond)
+        start = datetime.strptime(hour, "%Y%m%d-%H").replace(tzinfo=ICT)
+        item = {**shelf.rollup(checks, events), "store_id": store_id, "key": f"hour#{hour}"}
+        table.put_item(Item=to_dynamodb_safe({**item, "expires_at": _expires(start, shelf.ROLLUP_TTL_DAYS)}))
+    for day in sorted({hour[:8] for hour in hours}):
+        hour_items = _query_all(
+            table, KeyConditionExpression=_shelf_range(store_id, f"hour#{day}-00", f"hour#{day}-23")
+        )
+        start = datetime.strptime(day, "%Y%m%d").replace(tzinfo=ICT)
+        item = {**shelf.merge(hour_items), "store_id": store_id, "key": f"day#{day}"}
+        table.put_item(Item=to_dynamodb_safe({**item, "expires_at": _expires(start, shelf.ROLLUP_TTL_DAYS)}))
+
+
+def _shelf_store_tick(ddb_resource, store: dict[str, Any], now_utc: datetime) -> int:
+    """Work the store's closed buckets after the last one done (at most MAX_BUCKETS_PER_TICK); returns checks made."""
+    store_id = store["store_id"]
+    flag = store.get("shelf_recompute_requested_at")
+    if flag:
+        done = shelf_recompute(ddb_resource, store_id, shelf.RECOMPUTE_DAYS, now_utc)
+        try:
+            ddb_resource.Table(STORE_LIST_TABLE).update_item(
+                Key={"store_id": store_id},
+                UpdateExpression="REMOVE shelf_recompute_requested_at",
+                ConditionExpression="shelf_recompute_requested_at = :flag",
+                ExpressionAttributeValues={":flag": flag},
+            )
+        except ClientError as exc:  # saved again meanwhile: the next tick recomputes once more
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+        return done["checks"]
+
+    cameras = _store_cameras(ddb_resource, store_id)
+    if not cameras:
+        return 0
+    table = ddb_resource.Table(SHELF_TABLE)
+    state_item = from_dynamodb(table.get_item(Key={"store_id": store_id, "key": "state"}).get("Item"))
+    if state_item:
+        first = shelf.add_buckets(state_item["last_bucket"], 1)
+    else:
+        since = shelf.bucket_of((now_utc - timedelta(days=CAPTURE_TTL_DAYS)).isoformat())
+        first = _first_capture_bucket(ddb_resource, cameras, since)
+        if first is None:
+            return 0
+    last = min(_last_closed_bucket(now_utc), shelf.add_buckets(first, shelf.MAX_BUCKETS_PER_TICK - 1))
+    if first > last:
+        return 0
+
+    by_bucket = _captures_by_bucket(ddb_resource, cameras, first, last)
+    expected = _expected_skus(ddb_resource, store, now_utc)
+    skus_state = dict((state_item or {}).get("skus") or {})
+    events_table = ddb_resource.Table(SHELF_EVENTS_TABLE)
+    hours: set[str] = set()
+    made = 0
+    bucket = first
+    while bucket <= last:
+        if by_bucket.get(bucket):
+            check = shelf.build_check(bucket, by_bucket[bucket])
+            events = _apply_check(check, store, expected, skus_state)
+            table.put_item(Item=_check_item(store_id, check))
+            for event in events:
+                events_table.put_item(Item=_event_item(store_id, event))
+                hours.add(event["at"][:11])
+            hours.add(bucket[:11])
+            made += 1
+        bucket = shelf.add_buckets(bucket, 1)
+
+    state = to_dynamodb_safe({"store_id": store_id, "key": "state", "last_bucket": last, "skus": skus_state})
+    try:  # only one run moves a store's state on; an overlapping run stops here
+        if state_item:
+            table.put_item(
+                Item=state,
+                ConditionExpression="last_bucket = :old",
+                ExpressionAttributeValues={":old": state_item["last_bucket"]},
+            )
+        else:
+            table.put_item(
+                Item=state, ConditionExpression="attribute_not_exists(#k)", ExpressionAttributeNames={"#k": "key"}
+            )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return 0
+        raise
+    _write_rollups(ddb_resource, store_id, hours)
+    return made
+
+
+def shelf_tick(ddb_resource, now_utc: datetime) -> dict[str, Any]:
+    """Every 5 minutes: each store's new checks, shelf state, events and rollups."""
+    stores = _scan_all(ddb_resource.Table(STORE_LIST_TABLE))
+    return {
+        "action": "shelf_tick",
+        "stores": {s["store_id"]: _shelf_store_tick(ddb_resource, s, now_utc) for s in stores},
+    }
+
+
+def shelf_recompute(ddb_resource, store_id: str, days: int, now_utc: datetime) -> dict[str, Any]:
+    """Rebuild a store's last `days` days with its current shelf plan: checks from captures still kept, older
+    checks as stored, then state, events and rollups replayed from scratch."""
+    store = from_dynamodb(ddb_resource.Table(STORE_LIST_TABLE).get_item(Key={"store_id": store_id}).get("Item"))
+    store = store or {"store_id": store_id}
+    table = ddb_resource.Table(SHELF_TABLE)
+    events_table = ddb_resource.Table(SHELF_EVENTS_TABLE)
+    now_ict = now_utc.astimezone(ICT)
+    first = (now_ict - timedelta(days=days)).strftime("%Y%m%d") + "-0000"
+    last = _last_closed_bucket(now_utc)
+
+    checks = {
+        c["bucket"]: c
+        for c in _query_all(table, KeyConditionExpression=_shelf_range(store_id, f"check#{first}", f"check#{last}"))
+    }
+    cameras = _store_cameras(ddb_resource, store_id)
+    if cameras:
+        kept_from = max(first, shelf.bucket_of((now_utc - timedelta(days=CAPTURE_TTL_DAYS)).isoformat()))
+        for bucket, caps in _captures_by_bucket(ddb_resource, cameras, kept_from, last).items():
+            if first <= bucket <= last:
+                checks[bucket] = shelf.build_check(bucket, caps)
+
+    stale = _query_all(table, KeyConditionExpression=_shelf_range(store_id, f"day#{first[:8]}", f"day#{last[:8]}"))
+    stale += _query_all(table, KeyConditionExpression=_shelf_range(store_id, f"hour#{first[:11]}", f"hour#{last[:11]}"))
+    old_events = _query_all(
+        events_table, KeyConditionExpression=Key("store_id").eq(store_id) & Key("event_key").between(first, f"{last}~")
+    )
+    with table.batch_writer() as writer:
+        for item in [*stale, {"key": "state"}]:
+            writer.delete_item(Key={"store_id": store_id, "key": item["key"]})
+    with events_table.batch_writer() as writer:
+        for item in old_events:
+            writer.delete_item(Key={"store_id": store_id, "event_key": item["event_key"]})
+
+    if store.get("expected_skus"):
+        expected = sorted(store["expected_skus"])
+    else:
+        suggest_from = shelf.bucket_of((now_utc - timedelta(days=shelf.SUGGEST_DAYS)).isoformat())
+        expected = sorted({s for b, c in checks.items() if b >= suggest_from for s in c.get("confident_skus") or []})
+
+    skus_state: dict[str, Any] = {}
+    hours: set[str] = set()
+    with table.batch_writer() as writer, events_table.batch_writer() as event_writer:
+        for bucket in sorted(checks):
+            check = {k: checks[bucket][k] for k in ("bucket", "counts", "captures", "cameras", "confident_skus")}
+            for event in _apply_check(check, store, expected, skus_state):
+                event_writer.put_item(Item=_event_item(store_id, event))
+                hours.add(event["at"][:11])
+            writer.put_item(Item=_check_item(store_id, check))
+            hours.add(bucket[:11])
+    table.put_item(
+        Item=to_dynamodb_safe({"store_id": store_id, "key": "state", "last_bucket": last, "skus": skus_state})
+    )
+    _write_rollups(ddb_resource, store_id, hours)
+    return {"action": "shelf_recompute", "store_id": store_id, "checks": len(checks), "hours": len(hours)}
+
+
 def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
     s3_client, ddb_resource = _aws_clients()
+
+    # 0. Dashboard shelf metrics: EventBridge every 5 minutes, or a recompute run by hand
+    if event.get("action") == "shelf_tick":
+        return shelf_tick(ddb_resource, _now_of(event))
+    if event.get("action") == "shelf_recompute":
+        days = int(event.get("days") or shelf.RECOMPUTE_DAYS)
+        return shelf_recompute(ddb_resource, event["store_id"], days, _now_of(event))
 
     # 1. EventBridge hourly run: first the Model page's frame to label and hourly health (light queries), then
     #    the official capture of the hour, which scans the whole captures table and may fail as it grows
