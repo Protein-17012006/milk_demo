@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import boto3
+from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
 from common import (
@@ -209,6 +210,8 @@ def ingest_capture(record: dict[str, Any], s3_client=None, ddb_resource=None, wr
                 })
             )
 
+    _count_down_missing(stock_tbl, store_id, camera_id, capture_ts, seen_skus)
+
     if write_analytics and ANALYTICS_BUCKET:
         _write_official_to_s3(s3_client, record, mapped_rows)
 
@@ -218,6 +221,36 @@ def ingest_capture(record: dict[str, Any], s3_client=None, ddb_resource=None, wr
         "skus_updated": len(seen_skus),
         "flagged_rows": record["flagged_rows"],
     }
+
+
+def _count_down_missing(stock_tbl, store_id: str, camera_id: str, capture_ts: str, seen_skus: set[str]) -> None:
+    """A SKU that this camera showed before but this capture does not is counted as 0 in the smoothing window,
+    so it leaves latest_stock after the usual smoothing instead of staying "on shelf" for good.
+
+    Only rows last written by this camera from an older capture change: another camera of the store may watch
+    other shelves, and SQS can deliver an older result after a newer one. The other fields keep the last
+    reading that saw the SKU (when, which frame, which boxes)."""
+    resp = stock_tbl.query(KeyConditionExpression=Key("store_id").eq(store_id))
+    items = resp.get("Items", [])
+    while "LastEvaluatedKey" in resp:
+        resp = stock_tbl.query(KeyConditionExpression=Key("store_id").eq(store_id),
+                               ExclusiveStartKey=resp["LastEvaluatedKey"])
+        items.extend(resp.get("Items", []))
+
+    for item in from_dynamodb(items):
+        if item["sku_id"] in seen_skus or item.get("camera_id") != camera_id:
+            continue
+        if str(item.get("capture_timestamp", "")) >= capture_ts:
+            continue
+        prev = [int(x) for x in item.get("recent_counts", [])]
+        recent = (prev + [0])[-3:]
+        if recent == prev:  # already three zeros
+            continue
+        stock_tbl.update_item(
+            Key={"store_id": store_id, "sku_id": item["sku_id"]},
+            UpdateExpression="SET unit_count = :zero, recent_counts = :recent, smoothed_count = :smoothed",
+            ExpressionAttributeValues={":zero": 0, ":recent": recent, ":smoothed": lower_median(recent)},
+        )
 
 
 def _write_official_to_s3(s3_client, record: dict[str, Any], mapped_rows: list[dict[str, Any]]) -> None:

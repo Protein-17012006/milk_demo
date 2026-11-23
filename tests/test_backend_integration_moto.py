@@ -75,6 +75,96 @@ def _create_mock_infra(region: str = "ap-southeast-1"):
     )
 
 
+TH_SWEET = "TH true MILK Sữa Tươi Tiệt Trùng Có Đường 180ml"  # official name of TMP-MLK-TH-01
+TH_LOW = "TH true MILK Sữa Tươi Tiệt Trùng Ít Đường 180ml"  # official name of TMP-MLK-TH-02
+
+
+def _backend(monkeypatch: pytest.MonkeyPatch):
+    """Both Lambdas on moto tables with the SKU master seeded. Call inside mock_aws."""
+    region = "ap-southeast-1"
+    env = {
+        "AWS_REGION": region,
+        "AWS_DEFAULT_REGION": region,
+        "CAPTURES_TABLE": "test-captures",
+        "LATEST_STOCK_TABLE": "test-latest-stock",
+        "REVIEW_QUEUE_TABLE": "test-review-queue",
+        "SKU_MASTER_TABLE": "test-sku-master",
+        "STORE_LIST_TABLE": "test-store-list",
+        "CORRECTIONS_TABLE": "test-corrections",
+        "USER_PREFS_TABLE": "test-user-prefs",
+        "ANALYTICS_BUCKET": "test-analytics-bucket",
+        "HUB_BUCKET": "test-analytics-bucket",
+    }
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    _create_mock_infra(region)
+    api = _load_module("moto_api_handler", ROOT / "backend" / "api" / "handler.py")
+    ingest = _load_module("moto_ingest_handler", ROOT / "backend" / "ingest" / "handler.py")
+    assert api.lambda_handler(_auth_event("POST", "/v1/admin/seed", groups="team_admin"))["statusCode"] == 200
+    return api, ingest
+
+
+def _ingest(ingest, camera_id: str, hhmmss: str, counts: list[tuple[str, int]]) -> None:
+    """Ingest one hub result of store DEMO-S01 taken on 21/11 at hhmmss; counts are (model label, units)."""
+    capture_id = f"CAP-S01-20261121-{hhmmss}"
+    ts = f"2026-11-21T{hhmmss[:2]}:{hhmmss[2:4]}:{hhmmss[4:]}+07:00"
+    image = f"{camera_id}_20261121_{hhmmss}.jpg"
+    head = {"capture_id": capture_id, "store_id": "DEMO-S01", "camera_id": camera_id, "capture_timestamp": ts,
+            "capture_source": "CCTV", "image_filename": image}
+    rows = [
+        {**head, "reading_id": f"RD-S01-20261121-{hhmmss}-{i:03d}", "sku_id": label, "sku_name": label,
+         "unit_count": units, "confidence_score": 0.9, "detection_method": "Visual",
+         "bounding_box": [[10 + 60 * k, 20, 50, 80] for k in range(units)], "is_flagged": False, "flag_reason": "",
+         "processing_time_ms": 20}
+        for i, (label, units) in enumerate(counts, start=1)
+    ]
+    total = sum(units for _, units in counts)
+    record = {**head, "image_key": f"frames/{camera_id}/2026-11-21/{image}", "processing_time_ms": 20,
+              "units_found": total, "flagged_rows": 0, "rows": rows,
+              "log": {**head, "units_found": total, "rows_written": len(rows), "flagged_rows": 0,
+                      "processing_time_ms": 20}}
+    assert ingest.ingest_capture(ingest._normalize_record(record))["status"] == "ingested"
+
+
+def _units(api) -> dict[str, int]:
+    resp = api.lambda_handler(_auth_event("GET", "/v1/products"))
+    assert resp["statusCode"] == 200
+    return {p["sku_id"]: p["unit_count"] for p in json.loads(resp["body"])["items"]}
+
+
+@mock_aws
+def test_a_sku_missing_from_the_next_capture_drops_to_zero(monkeypatch: pytest.MonkeyPatch):
+    # 22/11 night: false Vinamilk readings stayed "on shelf" because later captures never mentioned them
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140700", [("TMP-MLK-TH-02", 3), ("TMP-MLK-TH-01", 1)])
+    _ingest(ingest, "CAM-S01-A", "140710", [("TMP-MLK-TH-02", 3)])
+
+    units = _units(api)
+    assert (units[TH_SWEET], units[TH_LOW]) == (0, 3)
+    kpi = json.loads(api.lambda_handler(_auth_event("GET", "/v1/kpi"))["body"])
+    assert kpi["total_on_shelf_units"] == 3
+
+
+@mock_aws
+def test_a_capture_from_another_camera_leaves_the_first_cameras_skus(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140700", [("TMP-MLK-TH-01", 2)])
+    _ingest(ingest, "CAM-S01-B", "140710", [("TMP-MLK-TH-02", 3)])
+
+    units = _units(api)
+    assert (units[TH_SWEET], units[TH_LOW]) == (2, 3)
+
+
+@mock_aws
+def test_an_older_capture_arriving_late_leaves_a_newer_reading(monkeypatch: pytest.MonkeyPatch):
+    # SQS does not keep order: the 14:07:00 result can be ingested after the 14:07:10 one
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140710", [("TMP-MLK-TH-01", 2)])
+    _ingest(ingest, "CAM-S01-A", "140700", [("TMP-MLK-TH-02", 3)])
+
+    assert _units(api)[TH_SWEET] == 2
+
+
 @mock_aws
 def test_end_to_end_ingest_review_and_export_with_moto(monkeypatch: pytest.MonkeyPatch):
     region = "ap-southeast-1"
