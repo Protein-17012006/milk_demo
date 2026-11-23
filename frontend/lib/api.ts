@@ -125,6 +125,8 @@ export interface ApiReviewQueueItem {
   frame_presigned_url: string | null;
   status: string;
   updated_at?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
 }
 
 export interface ApiReviewQueueResponse {

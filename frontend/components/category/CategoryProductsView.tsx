@@ -2,9 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  AlertTriangle,
   ArrowDown,
-  ArrowRight,
   ArrowUp,
   Check,
   ChevronDown,
@@ -37,6 +35,7 @@ import {
 import { ProductDetailsModal } from "./ProductDetailsModal";
 import { ProductRow } from "./ProductRow";
 import { ProductGroupRow } from "./ProductGroupRow";
+import { ReviewBanner, ReviewQueueDialog } from "./ReviewQueue";
 import { groupProducts, groupSelection, type ProductGroup } from "@/lib/product-groups";
 
 interface ToolbarDropdownProps<T extends string> {
@@ -621,6 +620,29 @@ export function CategoryProductsView() {
     }
   };
 
+  // "Confirm AI" in the review queue: the reading was right, so its item becomes "Đã xác nhận".
+  const confirmQueueItem = async (det: ApiReviewQueueItem) => {
+    if (!hasGroup("field_team", "team_admin")) {
+      showToast("Only field_team or team_admin can confirm review items.");
+      return;
+    }
+    try {
+      const api = createApiClient(getIdToken);
+      await api.submitCorrection({
+        store_id: det.store_id,
+        queue_key: det.queue_key,
+        reading_id: det.reading_id,
+        capture_id: det.capture_id,
+        sku_id: det.sku_id,
+        action: "confirm",
+      });
+      showToast(`Confirmed ${det.sku_name || det.sku_id}`);
+      void loadLiveData();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not confirm this reading");
+    }
+  };
+
   const toggleStockSort = () => {
     setSortBy((prev) =>
       prev === "On-shelf stock (high → low)"
@@ -722,32 +744,13 @@ export function CategoryProductsView() {
           </div>
         </section>
 
-        {/* Unmatched Products Warning Banner (live count only) */}
-        {unrecognizedCount !== null && (
-        <div className="mt-[16px] flex flex-wrap items-center justify-between gap-2 rounded-[10px] border border-[#FED7AA] bg-[#FFF7ED] py-[10px] pl-[14px] pr-[16px]">
-          <div className="flex items-center gap-[10px]">
-            <AlertTriangle
-              className="h-[16px] w-[16px] shrink-0 text-[#C2560A]"
-              strokeWidth={1.9}
-            />
-            <p className="text-[13px] font-normal text-[#7C2D12]">
-              {unrecognizedCount}{" "}
-              {unrecognizedCount === 1
-                ? "unrecognized unit was"
-                : "unrecognized units were"}{" "}
-              seen on shelves in recent captures but matched no SKU (sku_id =
-              NULL), so they are excluded from this list.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setReviewQueueOpen(true)}
-            className="inline-flex items-center gap-1 text-[13px] font-semibold text-[#C2560A] hover:underline cursor-pointer"
-          >
-            <span>Open review queue</span>
-            <ArrowRight className="h-[14px] w-[14px]" strokeWidth={2.2} />
-          </button>
-        </div>
+        {/* Review queue: doubtful readings waiting for a person (live only) */}
+        {liveQueue !== null && (
+          <ReviewBanner
+            items={liveQueue}
+            unrecognizedUnits={unrecognizedCount}
+            onOpen={() => setReviewQueueOpen(true)}
+          />
         )}
 
         {/* SKU Table (Horizontal scroll wrapper for narrow viewports) */}
@@ -875,135 +878,13 @@ export function CategoryProductsView() {
         }
       />
 
-      {/* Unmatched / Flagged Review Queue Modal */}
-      {reviewQueueOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4 backdrop-blur-[1px]"
-          onClick={() => setReviewQueueOpen(false)}
-        >
-          <div
-            className="w-full max-w-[660px] overflow-hidden rounded-[14px] border border-[#E5E7EB] bg-white shadow-[0_10px_28px_rgba(0,0,0,0.14)]"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-[#EFF0F6] px-5 py-4">
-              <div>
-                <h3 className="text-[16px] font-semibold text-[#111827]">
-                  Flagged &amp; Unmatched Review Queue
-                </h3>
-                <p className="text-[12px] text-[#6B7280]">
-                  Rows with is_flagged = TRUE (confidence &lt; 0.70 or sku_id =
-                  NULL) ready for Datagent review
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setReviewQueueOpen(false)}
-                aria-label="Close review queue"
-                className="flex h-8 w-8 items-center justify-center rounded-lg text-[#6B7280] hover:bg-[#F3F4F6] hover:text-[#111827] cursor-pointer"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="max-h-[60vh] overflow-y-auto divide-y divide-[#EFF0F6] px-5 py-2">
-              {liveMode && liveQueue ? (
-                liveQueue.length === 0 ? (
-                  <p className="py-6 text-center text-[13px] text-[#6B7280]">
-                    No flagged rows waiting in the AWS review queue.
-                  </p>
-                ) : (
-                  liveQueue.map((det) => (
-                    <div
-                      key={det.queue_key}
-                      className="flex flex-wrap items-center justify-between gap-4 py-3"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="rounded-full bg-[#FFF7ED] px-2 py-0.5 text-[10.5px] font-semibold text-[#C2560A]">
-                            {det.flag_reason}
-                          </span>
-                          <span className="rounded-full bg-[#F3F4F6] px-2 py-0.5 text-[10.5px] font-medium text-[#374151]">
-                            {det.status}
-                          </span>
-                          <span className="font-mono text-[11.5px] text-[#374151]">
-                            {det.reading_id}
-                          </span>
-                        </div>
-                        <p className="mt-1 truncate text-[12.5px] font-medium text-[#111827]">
-                          {det.sku_name || det.sku_id} ({det.unit_count}{" "}
-                          {det.unit_count === 1 ? "unit" : "units"})
-                        </p>
-                        <p className="mt-0.5 text-[11.5px] text-[#6B7280]">
-                          {det.store_id} &middot; {det.camera_id} &middot; conf{" "}
-                          {Number(det.confidence_score).toFixed(2)}
-                          {det.frame_presigned_url && (
-                            <>
-                              {" "}
-                              &middot;{" "}
-                              <a
-                                href={det.frame_presigned_url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="font-medium text-[#0051C3] hover:underline"
-                              >
-                                View blurred frame (15m URL)
-                              </a>
-                            </>
-                          )}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          if (!hasGroup("field_team", "team_admin")) {
-                            showToast(
-                              "Only field_team or team_admin can confirm review items."
-                            );
-                            return;
-                          }
-                          try {
-                            const api = createApiClient(getIdToken);
-                            await api.submitCorrection({
-                              store_id: det.store_id,
-                              queue_key: det.queue_key,
-                              reading_id: det.reading_id,
-                              capture_id: det.capture_id,
-                              sku_id: det.sku_id,
-                              action: "confirm",
-                            });
-                            showToast(`Confirmed ${det.reading_id} (Đã xác nhận)`);
-                            void loadLiveData();
-                          } catch (err) {
-                            showToast(
-                              err instanceof Error
-                                ? err.message
-                                : "Action failed"
-                            );
-                          }
-                        }}
-                        className="shrink-0 rounded-[6px] border border-[#E5E7EB] px-2.5 py-1 text-[12px] font-medium text-[#111827] hover:bg-[#F9FAFB] cursor-pointer"
-                      >
-                        Confirm AI
-                      </button>
-                    </div>
-                  ))
-                )
-              ) : (
-                <p className="py-6 text-center text-[13px] text-[#6B7280]">
-                  Sign in with an approved account to see the review queue.
-                </p>
-              )}
-            </div>
-            <div className="flex justify-end border-t border-[#EFF0F6] px-5 py-3">
-              <button
-                type="button"
-                onClick={() => setReviewQueueOpen(false)}
-                className="rounded-[8px] bg-[#F3F4F6] px-4 py-1.5 text-[13px] font-medium text-[#111827] hover:bg-[#E5E7EB] cursor-pointer"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* Review queue: readings the model was unsure about (opened from the banner, live only) */}
+      {reviewQueueOpen && liveQueue && (
+        <ReviewQueueDialog
+          items={liveQueue}
+          onClose={() => setReviewQueueOpen(false)}
+          onConfirm={(det) => void confirmQueueItem(det)}
+        />
       )}
 
       {/* Import SKU Master Modal */}
