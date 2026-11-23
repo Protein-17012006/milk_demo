@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import PurePath
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -33,6 +34,14 @@ def _roi(raw: str | None) -> tuple[float, float, float, float] | None:
     if not (0 <= x < 1 and 0 <= y < 1 and 0 < w <= 1 and 0 < h <= 1):
         raise ValueError(f"MILK_ROI values must be fractions of the frame, got {raw!r}")
     return x, y, w, h
+
+
+def default_model_version(pipeline: str, slide_weights: str) -> str:
+    """Model version when MILK_MODEL_VERSION is not set: the pipeline, plus the Slide training run when the
+    pipeline counts Slide cans (runs_v3/best.pt -> "long+slide:runs_v3")."""
+    if "slide" in pipeline and slide_weights:
+        return f"{pipeline}:{PurePath(slide_weights).parent.name}"
+    return pipeline
 
 
 @dataclass(frozen=True)
@@ -66,6 +75,7 @@ class Settings:
     flag_threshold: float
     mediamtx_api: str
     utc_offset_hours: int
+    model_version: str
     cookie_secure: bool = True
     environment: str = "local"
     version: str = "dev"
@@ -113,6 +123,8 @@ def load(env_file: str | None = None) -> Settings:
         flag_threshold=float(_env("MILK_FLAG_THRESHOLD", "0.70")),
         mediamtx_api=_env("MILK_MEDIAMTX_API", "http://127.0.0.1:9997"),
         utc_offset_hours=int(_env("MILK_UTC_OFFSET_HOURS", "7")),
+        model_version=_env("MILK_MODEL_VERSION")
+        or default_model_version(_env("MILK_PIPELINE", "null"), _env("MILK_SLIDE_WEIGHTS", "")),
         # The session cookie is Secure by default (CloudFront serves HTTPS). The pipeline's
         # environments are plain HTTP behind the load balancer, so they set this to false.
         cookie_secure=_flag("MILK_COOKIE_SECURE", True),

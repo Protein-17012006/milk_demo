@@ -156,6 +156,111 @@ export interface ApiReportsSeriesResponse {
   series: ApiReportsSeriesPoint[];
 }
 
+// --- Model page (GET/PUT /model/*) -------------------------------------------------------------------
+
+export type AuditStatus = "pending" | "done" | "skipped";
+
+/** One box the model drew on a sampled frame; sku_id is the model label (null = UNRECOGNIZED). */
+export interface ApiAuditBox {
+  box_id: number;
+  sku_id: string | null;
+  conf: number;
+  box: [number, number, number, number]; // x, y, w, h in frame pixels
+}
+
+export interface ApiAuditListItem {
+  audit_id: string;
+  camera_id: string;
+  capture_id: string;
+  capture_timestamp: string;
+  model_version: string;
+  status: AuditStatus;
+  n_boxes: number;
+  labeled_by?: string | null;
+}
+
+export interface ApiAuditListResponse {
+  items: ApiAuditListItem[];
+  counts: Record<AuditStatus, number>;
+}
+
+export interface ApiAuditVerdict {
+  box_id: number;
+  verdict: "correct" | "wrong_sku" | "not_product";
+  true_sku_id?: string;
+}
+
+export interface ApiAuditDetail {
+  audit_id: string;
+  store_id: string;
+  camera_id: string;
+  capture_id: string;
+  capture_timestamp: string;
+  model_version: string;
+  status: AuditStatus;
+  ai_boxes: ApiAuditBox[];
+  verdicts: ApiAuditVerdict[];
+  missed: { sku_id: string; x: number; y: number }[];
+  frame_url: string | null; // signed for 15 minutes; never logged
+  sku_choices: { label: string; name: string }[];
+  labeled_by?: string;
+  labeled_at?: string;
+  skip_reason?: string;
+  skip_note?: string;
+}
+
+export interface ApiKpiValue {
+  value: number | null;
+  target: [string, number];
+  met: boolean | null;
+  n: number;
+  exact_or_minor?: number | null;
+}
+
+export interface ApiModelSummary {
+  n_audits: number;
+  kpis: Record<string, ApiKpiValue>;
+  per_sku: {
+    sku_id: string;
+    model_units: number;
+    true_units: number;
+    id_accuracy: number | null;
+    missed_units: number;
+    confused_as: string | null;
+    confused_count: number;
+  }[];
+  confusion: { rows: string[]; cols: string[]; cells: Record<string, number> };
+  by_day: {
+    day: string;
+    audits: number;
+    overall_identification_accuracy: number | null;
+    unit_count_mae: number | null;
+    exact_or_minor_rate: number | null;
+  }[];
+  model_versions: string[];
+  range: { days: number; model_version: string };
+}
+
+/** Health of one camera-hour; shares are absent when there was nothing to divide by. */
+export interface ApiModelHealthItem {
+  camera_id: string;
+  hour: string; // YYYYMMDD-HH, UTC+7
+  captures: number;
+  model_versions?: string[];
+  conf_median?: number;
+  conf_mean?: number;
+  flagged_row_pct?: number;
+  unrecognized_box_pct?: number;
+  units_median?: number;
+  units_min?: number;
+  units_max?: number;
+  jitter?: number;
+  duplicate_pairs?: number;
+  processing_ms_median?: number;
+  processing_ms_p90?: number;
+  latency_ms_median?: number;
+}
+
 export interface ApiSettingsResponse {
   account: {
     email: string;
@@ -327,6 +432,39 @@ export function createApiClient(getIdToken: TokenGetter) {
 
     exportCaptureLogCsv: () =>
       requestWithAuth("/exports/capture-log.csv", getIdToken, {}, true) as Promise<string>,
+
+    listAudits: (status?: AuditStatus, days = 7) => {
+      const sp = new URLSearchParams({ days: String(days) });
+      if (status) sp.set("status", status);
+      return requestWithAuth(`/model/audits?${sp.toString()}`, getIdToken) as Promise<ApiAuditListResponse>;
+    },
+
+    getAudit: (auditId: string) =>
+      requestWithAuth(`/model/audits/${encodeURIComponent(auditId)}`, getIdToken) as Promise<ApiAuditDetail>,
+
+    saveAudit: (
+      auditId: string,
+      body: { verdicts: ApiAuditVerdict[]; missed: { sku_id: string; x: number; y: number }[] }
+    ) =>
+      requestWithAuth(`/model/audits/${encodeURIComponent(auditId)}`, getIdToken, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }) as Promise<ApiAuditDetail>,
+
+    skipAudit: (auditId: string, reason: string, note?: string) =>
+      requestWithAuth(`/model/audits/${encodeURIComponent(auditId)}/skip`, getIdToken, {
+        method: "POST",
+        body: JSON.stringify({ reason, note: note ?? "" }),
+      }) as Promise<ApiAuditDetail>,
+
+    getModelSummary: (days: number, modelVersion?: string) => {
+      const sp = new URLSearchParams({ days: String(days) });
+      if (modelVersion && modelVersion !== "all") sp.set("model_version", modelVersion);
+      return requestWithAuth(`/model/summary?${sp.toString()}`, getIdToken) as Promise<ApiModelSummary>;
+    },
+
+    getModelHealth: (days: number) =>
+      requestWithAuth(`/model/health?days=${days}`, getIdToken) as Promise<{ items: ApiModelHealthItem[] }>,
   };
 }
 

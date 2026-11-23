@@ -9,6 +9,7 @@ from milk.cvoutput import (
     Detection,
     build_capture,
     counts_of,
+    persist_record,
     to_csv,
 )
 
@@ -213,3 +214,11 @@ def test_counts_use_unrecognized_key():
     assert counts["TMP-MLK-TH-01"] == 7
     assert counts["UNRECOGNIZED"] == 2
     assert sum(counts.values()) == 34
+
+
+def test_persist_record_keeps_every_box_with_its_own_score():
+    dets = [Detection("hot160", "Slide Hot & Spicy 160g", 0.8744, (947.4, 326.0, 74.0, 165.6))]
+    rec = persist_record({"capture_id": "CAP-S01-20261123-125654-2"}, [], {"hot160": 1}, 104, dets, "v3")
+    assert rec["model_version"] == "v3"
+    assert rec["detections"] == [{"sku_id": "hot160", "conf": 0.874, "box": [947, 326, 74, 166]}]
+    assert rec["capture_id"] == "CAP-S01-20261123-125654-2" and rec["latency_ms"] == 104

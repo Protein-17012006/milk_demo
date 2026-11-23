@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import boto3
@@ -29,6 +30,7 @@ from common import (
     to_dynamodb_safe,
     validate_capture_payload,
 )
+from model_health import capture_boxes, hour_stats
 
 ICT = timezone(timedelta(hours=7))
 
@@ -38,6 +40,9 @@ LATEST_STOCK_TABLE = os.environ.get("LATEST_STOCK_TABLE", "")
 REVIEW_QUEUE_TABLE = os.environ.get("REVIEW_QUEUE_TABLE", "")
 ANALYTICS_BUCKET = os.environ.get("ANALYTICS_BUCKET", "")
 CAPTURE_TTL_DAYS = int(os.environ.get("CAPTURE_TTL_DAYS", "7"))
+AUDITS_TABLE = os.environ.get("AUDITS_TABLE", "")
+MODEL_HEALTH_TABLE = os.environ.get("MODEL_HEALTH_TABLE", "")
+HEALTH_TTL_DAYS = 90
 
 
 def _aws_clients():
@@ -53,6 +58,11 @@ def _normalize_record(raw: dict[str, Any], source_bucket: str = "") -> dict[str,
     log = raw.get("log")
     if log is None and "log_json" in raw:
         log = json.loads(raw["log_json"]) if isinstance(raw["log_json"], str) else raw["log_json"]
+    detections = raw.get("detections")
+    if detections is None and raw.get("detections_json"):
+        detections = (
+            json.loads(raw["detections_json"]) if isinstance(raw["detections_json"], str) else raw["detections_json"]
+        )
 
     record = {
         "capture_id": raw.get("capture_id") or (log or {}).get("capture_id", ""),
@@ -69,6 +79,8 @@ def _normalize_record(raw: dict[str, Any], source_bucket: str = "") -> dict[str,
         "flagged_rows": int(raw.get("flagged_rows") or (log or {}).get("flagged_rows") or 0),
         "faces_blurred": int(raw.get("faces_blurred") or 0),
         "pipeline": raw.get("pipeline", "long"),
+        "model_version": raw.get("model_version") or "unknown",
+        "detections": from_dynamodb(detections) if detections is not None else None,
         "counts": from_dynamodb(raw.get("counts") or {}),
         "rows": from_dynamodb(rows or []),
         "log": from_dynamodb(log or {}),
@@ -132,6 +144,12 @@ def ingest_capture(
             "unrecognized_units": unrecognized_units,
             "faces_blurred": record["faces_blurred"],
             "pipeline": record["pipeline"],
+            "model_version": record.get("model_version") or "unknown",
+            "detections_json": (
+                json.dumps(record["detections"], separators=(",", ":"))
+                if record.get("detections") is not None
+                else None
+            ),
             "rows_json": json.dumps(mapped_rows, ensure_ascii=False),
             "log_json": json.dumps(record["log"], ensure_ascii=False),
             "expires_at": now_epoch + CAPTURE_TTL_DAYS * 86400,
@@ -373,12 +391,150 @@ def _handle_hourly_official(s3_client, ddb_resource) -> dict[str, Any]:
     return {"action": "select_hourly_official", "hour": prev_hour, "official_written": written}
 
 
+# --- Model page: one random frame per camera-hour to label, and hourly health (spec 2026-11-23) ---------------
+
+
+def previous_hour(now_utc: datetime) -> str:
+    """The last full clock hour in ICT before `now_utc`, as YYYYMMDD-HH (the schedule is not on the hour)."""
+    return (now_utc.astimezone(ICT) - timedelta(hours=1)).strftime("%Y%m%d-%H")
+
+
+def _scan_all(table, **kwargs) -> list[dict[str, Any]]:
+    resp = table.scan(**kwargs)
+    items = resp.get("Items", [])
+    while "LastEvaluatedKey" in resp:
+        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"], **kwargs)
+        items.extend(resp.get("Items", []))
+    return from_dynamodb(items)
+
+
+def cameras(ddb_resource) -> list[tuple[str, str]]:
+    """(camera_id, store code) of every camera that has stock rows; the code comes from CAP-<code>-... ids."""
+    found: dict[str, str] = {}
+    for item in _scan_all(ddb_resource.Table(LATEST_STOCK_TABLE), ProjectionExpression="camera_id, capture_id"):
+        parts = str(item.get("capture_id", "")).split("-")
+        if item.get("camera_id") and len(parts) > 2 and parts[0] == "CAP":
+            found.setdefault(item["camera_id"], parts[1])
+    return sorted(found.items())
+
+
+def captures_in_hour(ddb_resource, camera_id: str, store_code: str, hour: str) -> list[dict[str, Any]]:
+    """Captures of one camera in one ICT hour, found by their id (CAP-S01-20261123-13...), not by a scan."""
+    table = ddb_resource.Table(CAPTURES_TABLE)
+    cond = Key("camera_id").eq(camera_id) & Key("capture_id").begins_with(f"CAP-{store_code}-{hour}")
+    resp = table.query(KeyConditionExpression=cond)
+    items = resp.get("Items", [])
+    while "LastEvaluatedKey" in resp:
+        resp = table.query(KeyConditionExpression=cond, ExclusiveStartKey=resp["LastEvaluatedKey"])
+        items.extend(resp.get("Items", []))
+    return from_dynamodb(items)
+
+
+def sample_audit(
+    s3_client, ddb_resource, camera_id: str, items: list[dict[str, Any]], hour: str, rng: random.Random
+) -> str | None:
+    """Picks one capture with a frame at random, copies the frame to the analytics bucket and writes a
+    pending audit. Returns the audit id, or None when the hour has no frame or already has its audit."""
+    with_frame = sorted((it for it in items if it.get("image_key")), key=lambda it: it["capture_id"])
+    if not with_frame:
+        return None
+    table = ddb_resource.Table(AUDITS_TABLE)
+    store_id = with_frame[0]["store_id"]
+    audit_id = f"AUD-{camera_id}-{hour}"
+    if table.get_item(Key={"store_id": store_id, "audit_id": audit_id}).get("Item"):
+        return None
+    pick = rng.choice(with_frame)
+    filename = pick.get("image_filename") or pick["image_key"].rsplit("/", 1)[-1]
+    image_key = f"audits/frames/{camera_id}/{pick['capture_timestamp'][:10]}/{filename}"
+    s3_client.copy_object(
+        Bucket=ANALYTICS_BUCKET, Key=image_key, CopySource={"Bucket": pick["source_bucket"], "Key": pick["image_key"]}
+    )
+    try:
+        table.put_item(
+            Item=to_dynamodb_safe(
+                {
+                    "store_id": store_id,
+                    "audit_id": audit_id,
+                    "camera_id": camera_id,
+                    "capture_id": pick["capture_id"],
+                    "capture_timestamp": pick["capture_timestamp"],
+                    "image_key": image_key,
+                    "model_version": pick.get("model_version") or "unknown",
+                    "pipeline": pick.get("pipeline", ""),
+                    "status": "pending",
+                    "sampled_at": datetime.now(ICT).isoformat(timespec="seconds"),
+                    "ai_boxes_json": json.dumps(capture_boxes(pick), separators=(",", ":")),
+                    "verdicts_json": "[]",
+                    "missed_json": "[]",
+                }
+            ),
+            ConditionExpression="attribute_not_exists(audit_id)",
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return None
+        raise
+    return audit_id
+
+
+def record_health(ddb_resource, camera_id: str, hour: str, items: list[dict[str, Any]]) -> None:
+    stats = hour_stats(items)
+    if not stats["captures"]:
+        return
+    ddb_resource.Table(MODEL_HEALTH_TABLE).put_item(
+        Item=to_dynamodb_safe(
+            {
+                "camera_id": camera_id,
+                "hour": hour,
+                **stats,
+                "expires_at": int(time.time()) + HEALTH_TTL_DAYS * 86400,
+            }
+        )
+    )
+
+
+def _run_hour(s3_client, ddb_resource, hour: str, rng: random.Random, sample: bool = True) -> dict[str, Any]:
+    audits, health = [], 0
+    for camera_id, store_code in cameras(ddb_resource):
+        try:
+            items = captures_in_hour(ddb_resource, camera_id, store_code, hour)
+            if not items:
+                continue
+            record_health(ddb_resource, camera_id, hour, items)
+            health += 1
+            if sample:
+                audit_id = sample_audit(s3_client, ddb_resource, camera_id, items, hour, rng)
+                if audit_id:
+                    audits.append(audit_id)
+        except Exception as exc:  # noqa: BLE001 - one camera failing must not stop the others
+            print(json.dumps({"model_page_hour_failed": camera_id, "hour": hour, "error": repr(exc)}))
+    return {"hour": hour, "audits": audits, "health_items": health}
+
+
+def _handle_backfill_health(event: dict[str, Any], s3_client, ddb_resource) -> dict[str, Any]:
+    """Health for the `days` x 24 hours ending at `until` (default: the previous hour); no sampling."""
+    until = event.get("until") or previous_hour(datetime.now(UTC))
+    end = datetime.strptime(until, "%Y%m%d-%H")
+    hours = [(end - timedelta(hours=h)).strftime("%Y%m%d-%H") for h in range(int(event.get("days", 7)) * 24)]
+    written = sum(_run_hour(s3_client, ddb_resource, h, random.Random(), sample=False)["health_items"] for h in hours)
+    return {"action": "backfill_model_health", "hours": len(hours), "health_items": written}
+
+
 def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
     s3_client, ddb_resource = _aws_clients()
 
-    # 1. EventBridge scheduled hourly selection
+    # 1. EventBridge hourly run: first the Model page's frame to label and hourly health (light queries), then
+    #    the official capture of the hour, which scans the whole captures table and may fail as it grows
     if event.get("source") == "aws.events" or event.get("action") == "select_hourly_official":
-        return _handle_hourly_official(s3_client, ddb_resource)
+        model_page = _run_hour(s3_client, ddb_resource, previous_hour(datetime.now(UTC)), random.Random())
+        return {**_handle_hourly_official(s3_client, ddb_resource), "model_page": model_page}
+
+    if event.get("action") == "sample_audits":
+        hour = event.get("hour") or previous_hour(datetime.now(UTC))
+        return {"action": "sample_audits", **_run_hour(s3_client, ddb_resource, hour, random.Random())}
+
+    if event.get("action") == "backfill_model_health":
+        return _handle_backfill_health(event, s3_client, ddb_resource)
 
     # 2. Direct backfill invocation
     if event.get("action") == "backfill_from_table":

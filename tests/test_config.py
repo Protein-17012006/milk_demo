@@ -37,6 +37,23 @@ def test_bad_roi_is_rejected(monkeypatch, raw):
         config.load()
 
 
+def test_model_version_comes_from_the_env(monkeypatch):
+    monkeypatch.setenv("MILK_MODEL_VERSION", "long-2026-10-13+slide-v3")
+    assert config.load().model_version == "long-2026-10-13+slide-v3"
+
+
+def test_model_version_defaults_to_pipeline_and_slide_run(monkeypatch):
+    monkeypatch.delenv("MILK_MODEL_VERSION", raising=False)
+    assert (
+        config.default_model_version("long+slide", "~/Desktop/Datagent/slide_pilot/runs_v3/best.pt")
+        == "long+slide:runs_v3"
+    )
+    assert config.default_model_version("long", "") == "long"
+    monkeypatch.setenv("MILK_PIPELINE", "long+slide")
+    monkeypatch.setenv("MILK_SLIDE_WEIGHTS", "/home/long/Desktop/Datagent/slide_pilot/runs_v3/best.pt")
+    assert config.load().model_version == "long+slide:runs_v3"
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"), [(None, True), ("true", True), ("false", False), ("0", False), ("OFF", False)]
 )

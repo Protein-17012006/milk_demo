@@ -36,6 +36,18 @@ python -m milk.counter --env ~/milk-camera/worker.env
 Đúng thì log có dòng `camera CAM-S01-A, pipeline ... on cuda` và dashboard hiện
 `Model: ... (cuda · gpu-worker)`.
 
+## Phiên bản model
+
+Mỗi kết quả worker lưu đều có trường `model_version`. Trang Model trên website dựa vào trường này
+để so trước và sau mỗi lần đổi model. Mỗi lần đổi trọng số thì đặt lại biến trong `worker.env`, ví dụ:
+
+```
+MILK_MODEL_VERSION=long-2026-10-13+slide-v3
+```
+
+Không đặt thì worker tự ghép `MILK_PIPELINE` với tên thư mục chứa `MILK_SLIDE_WEIGHTS`, ví dụ
+`long+slide:runs_v3`. Kết quả còn có `detections`: từng hộp với độ tin cậy riêng của nó.
+
 ## Chạy nền
 
 Theo quy tắc dùng máy chung (job dài hơn 30 phút thì ghi vào `RESOURCES.md`), chạy bằng
