@@ -106,11 +106,17 @@ def _backend(monkeypatch: pytest.MonkeyPatch):
     return api, ingest
 
 
-def _ingest(ingest, camera_id: str, hhmmss: str, counts: list[tuple[str, int]]) -> None:
-    """Ingest one hub result of store DEMO-S01 taken on 21/11 at hhmmss; counts are (model label, units)."""
+def _ingest(ingest, camera_id: str, hhmmss: str, counts: list[tuple[str, int]], *, detections=None,
+            model_version=None, with_frame: bool = False) -> None:
+    """Ingest one hub result of store DEMO-S01 taken on 21/11 at hhmmss (may carry a -2 suffix); counts are
+    (model label, units). with_frame puts a fake frame in the hub bucket, as the hub does."""
     capture_id = f"CAP-S01-20261121-{hhmmss}"
-    ts = f"2026-11-21T{hhmmss[:2]}:{hhmmss[2:4]}:{hhmmss[4:]}+07:00"
+    ts = f"2026-11-21T{hhmmss[:2]}:{hhmmss[2:4]}:{hhmmss[4:6]}+07:00"
     image = f"{camera_id}_20261121_{hhmmss}.jpg"
+    image_key = f"frames/{camera_id}/2026-11-21/{image}" if with_frame else ""
+    if with_frame:
+        boto3.client("s3", region_name="ap-southeast-1").put_object(
+            Bucket="test-hub-bucket", Key=image_key, Body=f"jpeg {hhmmss}".encode())
     head = {"capture_id": capture_id, "store_id": "DEMO-S01", "camera_id": camera_id, "capture_timestamp": ts,
             "capture_source": "CCTV", "image_filename": image}
     rows = [
@@ -121,11 +127,102 @@ def _ingest(ingest, camera_id: str, hhmmss: str, counts: list[tuple[str, int]]) 
         for i, (label, units) in enumerate(counts, start=1)
     ]
     total = sum(units for _, units in counts)
-    record = {**head, "image_key": f"frames/{camera_id}/2026-11-21/{image}", "processing_time_ms": 20,
+    record = {**head, "image_key": image_key, "processing_time_ms": 20,
               "units_found": total, "flagged_rows": 0, "rows": rows,
               "log": {**head, "units_found": total, "rows_written": len(rows), "flagged_rows": 0,
                       "processing_time_ms": 20}}
-    assert ingest.ingest_capture(ingest._normalize_record(record))["status"] == "ingested"
+    if detections is not None:
+        record["detections"] = detections
+    if model_version is not None:
+        record["model_version"] = model_version
+    normalized = ingest._normalize_record(record, source_bucket="test-hub-bucket")
+    assert ingest.ingest_capture(normalized)["status"] == "ingested"
+
+
+def _table(name: str):
+    return boto3.resource("dynamodb", region_name="ap-southeast-1").Table(name)
+
+
+@mock_aws
+def test_previous_hour_is_in_ict(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    from datetime import datetime, timezone
+    assert ingest.previous_hour(datetime(2026, 11, 23, 6, 24, tzinfo=timezone.utc)) == "20261123-12"
+
+
+@mock_aws
+def test_capture_keeps_model_version_and_boxes(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    dets = [{"sku_id": "hot160", "conf": 0.87, "box": [948, 326, 72, 167]},
+            {"sku_id": "hot160", "conf": 0.94, "box": [1190, 288, 74, 150]}]
+    _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)], detections=dets, model_version="v3")
+    _ingest(ingest, "CAM-S01-A", "140710", [("hot160", 2)])
+    new = _table("test-captures").get_item(Key={"camera_id": "CAM-S01-A", "capture_id": "CAP-S01-20261121-140700"})["Item"]
+    old = _table("test-captures").get_item(Key={"camera_id": "CAM-S01-A", "capture_id": "CAP-S01-20261121-140710"})["Item"]
+    assert new["model_version"] == "v3" and json.loads(new["detections_json"]) == dets
+    assert old["model_version"] == "unknown" and "detections_json" not in old
+
+
+@mock_aws
+def test_hourly_sampling_picks_one_frame_and_copies_it(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    for t in ("140700", "140710", "140710-2"):
+        _ingest(ingest, "CAM-S01-A", t, [("hot160", 2)], with_frame=True)
+    _ingest(ingest, "CAM-S01-A", "150000", [("hot160", 1)], with_frame=True)
+
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+
+    audits = _table("test-audits").scan()["Items"]
+    assert [a["audit_id"] for a in audits] == ["AUD-CAM-S01-A-20261121-14"]
+    audit = audits[0]
+    assert audit["status"] == "pending"
+    assert audit["capture_id"] in {"CAP-S01-20261121-140700", "CAP-S01-20261121-140710", "CAP-S01-20261121-140710-2"}
+    assert [b["box"] for b in json.loads(audit["ai_boxes_json"])] == [[10, 20, 50, 80], [70, 20, 50, 80]]
+    assert audit["image_key"].startswith("audits/frames/CAM-S01-A/2026-11-21/CAM-S01-A_20261121_14")
+    copied = boto3.client("s3", region_name="ap-southeast-1").get_object(
+        Bucket="test-analytics-bucket", Key=audit["image_key"])["Body"].read()
+    assert copied == f"jpeg {audit['capture_id'].rsplit('20261121-', 1)[1]}".encode()
+
+
+@mock_aws
+def test_sampling_the_same_hour_twice_keeps_one_audit(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    for t in ("140700", "140710"):
+        _ingest(ingest, "CAM-S01-A", t, [("hot160", 2)], with_frame=True)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    first = _table("test-audits").scan()["Items"][0]["capture_id"]
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    audits = _table("test-audits").scan()["Items"]
+    assert len(audits) == 1 and audits[0]["capture_id"] == first
+
+
+@mock_aws
+def test_an_hour_whose_captures_have_no_frame_gets_no_audit(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    for t in ("140700", "140710"):
+        _ingest(ingest, "CAM-S01-A", t, [("hot160", 2)])
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    assert _table("test-audits").scan()["Items"] == []
+
+
+@mock_aws
+def test_health_item_for_the_hour(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    for t in ("140700", "140710", "140710-2"):
+        _ingest(ingest, "CAM-S01-A", t, [("hot160", 2)], with_frame=True)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    item = _table("test-model-health").get_item(Key={"camera_id": "CAM-S01-A", "hour": "20261121-14"})["Item"]
+    assert item["captures"] == 3 and item["expires_at"] > 0
+
+
+@mock_aws
+def test_backfill_writes_health_for_past_hours(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)])
+    _ingest(ingest, "CAM-S01-A", "150000", [("hot160", 1)])
+    ingest.lambda_handler({"action": "backfill_model_health", "days": 1, "until": "20261121-16"})
+    hours = sorted(i["hour"] for i in _table("test-model-health").scan()["Items"])
+    assert hours == ["20261121-14", "20261121-15"]
 
 
 def _units(api) -> dict[str, int]:
