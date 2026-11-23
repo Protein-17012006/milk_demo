@@ -1,0 +1,2 @@
+# Load-test tool for scripts/ci/load_test.sh (installed on the GitHub runner only).
+locust==2.47.0

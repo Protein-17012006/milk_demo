@@ -51,7 +51,10 @@ CCTV 4K --RTSP/LAN--> relay --RTSPS/SRT--> MediaMTX :8322 / :8890 --RTSPS (read)
 | `infra/remote/` | Scripts that run on the server |
 | `edge/RELAY.md` | How the store relay pushes the camera stream (Vietnamese) |
 | `worker/` | Running the counter on a GPU machine: guide (Vietnamese) and systemd user unit |
-| `tests/` | Unit tests; `pytest` |
+| `tests/` | Unit tests; `pytest` (`tests/load/` = Locust load test) |
+| `Dockerfile`, `docker-compose.yml` | The hub as one image (also runs `milk.selfcheck` and `milk.reindex`) |
+| `infra/platform.yml`, `infra/app.yml`, `infra/params/` | CloudFormation for the CI/CD pipeline on ECS Fargate (ap-southeast-1) |
+| `.github/workflows/`, `scripts/ci/` | CI checks and the dev → test → staging → production pipeline |
 
 ## Deploy
 
@@ -74,6 +77,13 @@ GPU once the quota allows it (the Elastic IP, URL and data stay the same):
 .\infra\deploy.ps1 -InstanceType g4dn.xlarge -RootVolumeGiB 100 `
   -ImageParam /aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-24.04/latest/ami-id
 ```
+
+## CI/CD pipeline (ECS Fargate)
+
+Separately from the EC2 hub above, every merge to `main` builds one image and deploys the hub
+to development, test and staging on ECS Fargate in ap-southeast-1; production deploys after a
+reviewer approves it in GitHub. One-time setup, releasing, rollback and re-ingest:
+[docs/runbook.md](docs/runbook.md). Run the hub locally with `docker compose up --build`.
 
 ## Settings
 

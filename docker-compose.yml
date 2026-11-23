@@ -1,0 +1,16 @@
+# Runs the same image as the pipeline on a laptop: docker compose up --build
+# then open http://localhost:8000 and log in with the password below.
+# No S3/DynamoDB here, so saving captures and the CSV exports answer 503.
+services:
+  hub:
+    build: .
+    image: milk:local
+    ports:
+      - "8000:8000"
+    environment:
+      MILK_ENVIRONMENT: local
+      MILK_VERSION: local
+      MILK_COOKIE_SECURE: "false"
+      MILK_WEB_PASSWORD: local-password
+      MILK_WEB_SECRET: local-session-secret-not-for-real-use
+      MILK_INTERNAL_TOKEN: local-internal-token

@@ -5,6 +5,7 @@ always with the internal token. The hub stores frames and results with the serve
 IAM role, so counting workers never hold AWS keys. Browsers long-poll /api/live. State lives
 in memory, so run exactly one process.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -69,18 +70,23 @@ def state_for(camera: str | None) -> CameraState:
 
 # --- access control -------------------------------------------------------------------
 
+
 @app.middleware("http")
 async def guard(request: Request, call_next):
     client = request.client.host if request.client else ""
     local = client in LOCAL_HOSTS
     # Only CloudFront knows the origin secret; anything else reaching the server directly is refused.
-    if not local and ORIGIN_SECRET and not hmac.compare_digest(
-            request.headers.get("x-origin-verify", ""), ORIGIN_SECRET):
+    if (
+        not local
+        and ORIGIN_SECRET
+        and not hmac.compare_digest(request.headers.get("x-origin-verify", ""), ORIGIN_SECRET)
+    ):
         return Response(status_code=403)
     # Counting workers, local or remote, must present the internal token.
     if request.url.path.startswith("/internal/") and not (
-            settings.internal_token
-            and hmac.compare_digest(request.headers.get("x-internal-token", ""), settings.internal_token)):
+        settings.internal_token
+        and hmac.compare_digest(request.headers.get("x-internal-token", ""), settings.internal_token)
+    ):
         return Response(status_code=403)
     return await call_next(request)
 
@@ -105,7 +111,8 @@ def _require(request: Request) -> None:
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True}
+    # The pipeline's smoke test reads the version to know which build answers.
+    return {"ok": True, "environment": settings.environment, "version": settings.version}
 
 
 @app.get("/")
@@ -133,8 +140,14 @@ async def login(request: Request):
         raise HTTPException(status_code=401, detail="Sai mật khẩu")
     expires = int(time.time()) + SESSION_HOURS * 3600
     response = JSONResponse({"ok": True})
-    response.set_cookie(SESSION_COOKIE, _sign(expires), max_age=SESSION_HOURS * 3600,
-                        httponly=True, secure=True, samesite="lax")
+    response.set_cookie(
+        SESSION_COOKIE,
+        _sign(expires),
+        max_age=SESSION_HOURS * 3600,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+    )
     return response
 
 
@@ -147,6 +160,7 @@ async def logout():
 
 # --- from the counter (localhost only) -------------------------------------------------
 
+
 @app.post("/internal/result")
 async def internal_result(request: Request):
     payload = await request.json()
@@ -157,11 +171,13 @@ async def internal_result(request: Request):
         st.seq += 1
         meta["seq"] = st.seq
         st.meta, st.jpeg = meta, jpeg
-        st.history.append({"t": meta["received_at"], "total": sum(meta["smoothed"].values()),
-                           "smoothed": meta["smoothed"]})
+        st.history.append(
+            {"t": meta["received_at"], "total": sum(meta["smoothed"].values()), "smoothed": meta["smoothed"]}
+        )
         for row in meta.get("flagged", []):
-            st.flags.appendleft({**row, "capture_id": meta["capture_id"],
-                                 "capture_timestamp": meta["capture_timestamp"]})
+            st.flags.appendleft(
+                {**row, "capture_id": meta["capture_id"], "capture_timestamp": meta["capture_timestamp"]}
+            )
         st.cond.notify_all()
     return {"ok": True, "seq": st.seq}
 
@@ -186,11 +202,18 @@ async def internal_persist(request: Request):
 
 # --- dashboard API ---------------------------------------------------------------------
 
+
 def _status_view(st: CameraState) -> dict:
     age = time.time() - st.status_at if st.status_at else None
-    storage = None if PERSIST is None else {
-        "saved": PERSIST.saved, "dropped": PERSIST.dropped, "last_error": PERSIST.last_error,
-    }
+    storage = (
+        None
+        if PERSIST is None
+        else {
+            "saved": PERSIST.saved,
+            "dropped": PERSIST.dropped,
+            "last_error": PERSIST.last_error,
+        }
+    )
     return {
         "worker_ok": age is not None and age < 10,
         "worker": st.status,
@@ -232,7 +255,7 @@ async def history(request: Request, camera: str | None = None, minutes: float = 
 @app.get("/api/flags")
 async def flags(request: Request, camera: str | None = None, limit: int = 50):
     _require(request)
-    return JSONResponse(list(state_for(camera).flags)[:max(1, min(limit, 300))], headers=NO_STORE)
+    return JSONResponse(list(state_for(camera).flags)[: max(1, min(limit, 300))], headers=NO_STORE)
 
 
 @app.get("/api/skus")
@@ -245,9 +268,13 @@ def _mediamtx_path(path: str) -> dict:
     try:
         with urllib.request.urlopen(f"{settings.mediamtx_api}/v3/paths/get/{path}", timeout=2) as response:
             info = json.load(response)
-        return {"ready": bool(info.get("ready")), "tracks": info.get("tracks"),
-                "source": (info.get("source") or {}).get("type"), "bytes_received": info.get("bytesReceived"),
-                "ready_time": info.get("readyTime")}
+        return {
+            "ready": bool(info.get("ready")),
+            "tracks": info.get("tracks"),
+            "source": (info.get("source") or {}).get("type"),
+            "bytes_received": info.get("bytesReceived"),
+            "ready_time": info.get("readyTime"),
+        }
     except urllib.error.HTTPError as exc:
         return {"ready": False, "error": "no publisher" if exc.code == 404 else f"HTTP {exc.code}"}
     except Exception as exc:  # noqa: BLE001
@@ -259,8 +286,15 @@ async def status(request: Request, camera: str | None = None):
     _require(request)
     st = state_for(camera)
     ingest = await asyncio.to_thread(_mediamtx_path, settings.camera_path)
-    return JSONResponse({**_status_view(st), "ingest": ingest, "camera_id": camera or settings.camera_id,
-                         "store_id": settings.store_id}, headers=NO_STORE)
+    return JSONResponse(
+        {
+            **_status_view(st),
+            "ingest": ingest,
+            "camera_id": camera or settings.camera_id,
+            "store_id": settings.store_id,
+        },
+        headers=NO_STORE,
+    )
 
 
 # --- exports in Datagent's format ------------------------------------------------------
@@ -292,8 +326,9 @@ def _query_day(camera: str, day: str) -> list[dict]:
         kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
 
-async def _export(request: Request, camera: str | None, date: str | None, field: str,
-                  columns: list[str], name: str) -> Response:
+async def _export(
+    request: Request, camera: str | None, date: str | None, field: str, columns: list[str], name: str
+) -> Response:
     _require(request)
     if not settings.table:
         raise HTTPException(status_code=503, detail="storage not configured")
@@ -305,8 +340,11 @@ async def _export(request: Request, camera: str | None, date: str | None, field:
         records += value if isinstance(value, list) else [value]
     body = to_csv(records, columns).encode("utf-8")
     filename = f"{name}_{camera}_{day}.csv"
-    return Response(body, media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"', **NO_STORE})
+    return Response(
+        body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', **NO_STORE},
+    )
 
 
 @app.get("/api/export/cv-output.csv")

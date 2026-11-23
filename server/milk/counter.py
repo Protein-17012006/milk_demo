@@ -6,6 +6,7 @@ it never holds AWS keys, because the hub stores frames and results.
 
     python -m milk.counter --env worker.env
 """
+
 from __future__ import annotations
 
 import argparse
@@ -75,8 +76,7 @@ class HubClient:
             self._base + path,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             method="POST",
-            headers={"Content-Type": "application/json", "X-Internal-Token": self._token,
-                     "User-Agent": "milk-counter"},
+            headers={"Content-Type": "application/json", "X-Internal-Token": self._token, "User-Agent": "milk-counter"},
         )
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
@@ -112,8 +112,14 @@ def main(argv: list[str] | None = None) -> None:
     device = getattr(pipeline, "device", "cpu")
     min_gap = 1.0 / s.max_fps if s.max_fps > 0 else 0.0
     publish_gap = 1.0 / s.publish_fps if s.publish_fps > 0 else 0.0
-    log.info("camera %s, pipeline %s on %s, blur %s, hub %s",
-             s.camera_id, pipeline.name, device, "on" if blurrer else "OFF", s.hub_url)
+    log.info(
+        "camera %s, pipeline %s on %s, blur %s, hub %s",
+        s.camera_id,
+        pipeline.name,
+        device,
+        "on" if blurrer else "OFF",
+        s.hub_url,
+    )
 
     last_seq = 0
     last_start = last_status = last_publish = last_persist = 0.0
@@ -128,17 +134,20 @@ def main(argv: list[str] | None = None) -> None:
         frame = reader.newer_than(last_seq, timeout=2.0)
         now = time.time()
         if now - last_status >= 2.0:
-            hub.post("/internal/status", {
-                "camera_id": s.camera_id,
-                "connected": reader.connected,
-                "last_error": reader.last_error,
-                "stream": reader.stream_info,
-                "pipeline": pipeline.name,
-                "device": device,
-                "worker": worker_name,
-                "blur": blurrer is not None,
-                "frames_last_minute": sum(1 for t in done_at if now - t <= 60),
-            })
+            hub.post(
+                "/internal/status",
+                {
+                    "camera_id": s.camera_id,
+                    "connected": reader.connected,
+                    "last_error": reader.last_error,
+                    "stream": reader.stream_info,
+                    "pipeline": pipeline.name,
+                    "device": device,
+                    "worker": worker_name,
+                    "blur": blurrer is not None,
+                    "frames_last_minute": sum(1 for t in done_at if now - t <= 60),
+                },
+            )
             last_status = now
         if frame is None:
             continue
@@ -147,7 +156,7 @@ def main(argv: list[str] | None = None) -> None:
             image = frame.image
             height, width = image.shape[:2]
             x0, y0, cw, ch = roi_pixels(s.roi, width, height)
-            crop = image if (cw, ch) == (width, height) else image[y0:y0 + ch, x0:x0 + cw]
+            crop = image if (cw, ch) == (width, height) else image[y0 : y0 + ch, x0 : x0 + cw]
 
             started = time.perf_counter()
             detections = normalise(pipeline.detect(crop), x0, y0)
@@ -156,8 +165,13 @@ def main(argv: list[str] | None = None) -> None:
 
             ts = datetime.fromtimestamp(frame.received_at, tz)
             rows, log_line = build_capture(
-                detections, stem=ids.stem(s.store_code, ts), store_id=s.store_id, camera_id=s.camera_id,
-                capture_source=s.capture_source, ts=ts, processing_time_ms=processing_ms,
+                detections,
+                stem=ids.stem(s.store_code, ts),
+                store_id=s.store_id,
+                camera_id=s.camera_id,
+                capture_source=s.capture_source,
+                ts=ts,
+                processing_time_ms=processing_ms,
                 flag_threshold=s.flag_threshold,
             )
             counts = counts_of(rows)
@@ -184,12 +198,18 @@ def main(argv: list[str] | None = None) -> None:
                     "received_at": frame.received_at,
                     "processing_time_ms": processing_ms,
                     "latency_ms": latency_ms,
-                    "frame_w": width, "frame_h": height,
-                    "display_w": display_w, "display_h": display_h,
+                    "frame_w": width,
+                    "frame_h": height,
+                    "display_w": display_w,
+                    "display_h": display_h,
                     "roi": None if s.roi is None else [x0, y0, cw, ch],
                     "detections": [
-                        {"sku_id": d.sku_id, "conf": round(d.confidence, 3), "box": list(d.box),
-                         "flagged": d.sku_id is None or d.confidence < s.flag_threshold}
+                        {
+                            "sku_id": d.sku_id,
+                            "conf": round(d.confidence, 3),
+                            "box": list(d.box),
+                            "flagged": d.sku_id is None or d.confidence < s.flag_threshold,
+                        }
                         for d in detections
                     ],
                     "counts": counts,
@@ -198,7 +218,8 @@ def main(argv: list[str] | None = None) -> None:
                     "flagged_rows": log_line["flagged_rows"],
                     "flagged": [
                         {k: r[k] for k in ("sku_id", "sku_name", "unit_count", "confidence_score", "flag_reason")}
-                        for r in rows if r["is_flagged"]
+                        for r in rows
+                        if r["is_flagged"]
                     ],
                     "faces_blurred": faces,
                     "pipeline": pipeline.name,

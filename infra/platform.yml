@@ -1,0 +1,317 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Milk hub pipeline, shared platform (stack milk-platform): network, one Application Load
+  Balancer with one listener per environment, the ECR repository, the ECS clusters, the
+  alarm topic. (Cost alerts: the account's existing budgets.) Deployed by .github/workflows/infra.yml after approval.
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Email for alarms (repo variable ALERT_EMAIL). Empty = no email subscription.
+
+Conditions:
+  HasEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+
+Resources:
+  # --- network: two public subnets, no NAT gateway (tasks get a public IP to pull images) ---
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.40.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: milk
+        - Key: project
+          Value: milk
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: project
+          Value: milk
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.40.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: milk-public-a
+        - Key: project
+          Value: milk
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.40.1.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: milk-public-b
+        - Key: project
+          Value: milk
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: project
+          Value: milk
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetARoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetBRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: milk load balancer - one port per environment
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: production
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - Description: staging, test, development
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8082
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: project
+          Value: milk
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: milk ECS tasks - the hub port, only from the load balancer
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: hub from the load balancer
+          IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Tags:
+        - Key: project
+          Value: milk
+
+  # --- one load balancer, one listener per environment ---------------------------------------
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: GatewayAttachment
+    Properties:
+      Name: milk-alb
+      Type: application
+      Scheme: internet-facing
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      SecurityGroups: [!Ref AlbSecurityGroup]
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60" # /api/live long-polls for up to 20 s
+      Tags:
+        - Key: project
+          Value: milk
+
+  ProductionListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig: { StatusCode: "503", ContentType: text/plain, MessageBody: production is not deployed }
+
+  StagingListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 8080
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig: { StatusCode: "503", ContentType: text/plain, MessageBody: staging is not deployed }
+
+  TestListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 8081
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig: { StatusCode: "503", ContentType: text/plain, MessageBody: test is not deployed }
+
+  DevelopmentListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 8082
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig: { StatusCode: "503", ContentType: text/plain, MessageBody: development is not deployed }
+
+  # --- images and clusters ---------------------------------------------------------------------
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: milk
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Untagged layers left by failed pushes",
+                "selection": { "tagStatus": "untagged", "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 1 },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep the 30 newest images (rollback targets)",
+                "selection": { "tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 30 },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: project
+          Value: milk
+
+  NonprodCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: milk-nonprod
+      CapacityProviders: [FARGATE, FARGATE_SPOT]
+      ClusterSettings:
+        - Name: containerInsights
+          Value: disabled
+      Tags:
+        - Key: project
+          Value: milk
+
+  ProdCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: milk-prod
+      CapacityProviders: [FARGATE, FARGATE_SPOT]
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: project
+          Value: milk
+
+  # --- alarms ---------------------------------------------------------------------------
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: milk-alerts
+      Tags:
+        - Key: project
+          Value: milk
+
+  AlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref AlertTopic]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CloudWatchAlarms
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+    Export: { Name: !Sub "${AWS::StackName}-VpcId" }
+  Subnets:
+    Value: !Join [",", [!Ref PublicSubnetA, !Ref PublicSubnetB]]
+    Export: { Name: !Sub "${AWS::StackName}-Subnets" }
+  TaskSecurityGroup:
+    Value: !Ref TaskSecurityGroup
+    Export: { Name: !Sub "${AWS::StackName}-TaskSecurityGroup" }
+  AlbDns:
+    Value: !GetAtt LoadBalancer.DNSName
+    Export: { Name: !Sub "${AWS::StackName}-AlbDns" }
+  AlbFullName:
+    Value: !GetAtt LoadBalancer.LoadBalancerFullName
+    Export: { Name: !Sub "${AWS::StackName}-AlbFullName" }
+  ProductionListener:
+    Value: !Ref ProductionListener
+    Export: { Name: !Sub "${AWS::StackName}-listener-production" }
+  StagingListener:
+    Value: !Ref StagingListener
+    Export: { Name: !Sub "${AWS::StackName}-listener-staging" }
+  TestListener:
+    Value: !Ref TestListener
+    Export: { Name: !Sub "${AWS::StackName}-listener-test" }
+  DevelopmentListener:
+    Value: !Ref DevelopmentListener
+    Export: { Name: !Sub "${AWS::StackName}-listener-development" }
+  NonprodCluster:
+    Value: !Ref NonprodCluster
+    Export: { Name: !Sub "${AWS::StackName}-cluster-nonprod" }
+  ProdCluster:
+    Value: !Ref ProdCluster
+    Export: { Name: !Sub "${AWS::StackName}-cluster-prod" }
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+    Export: { Name: !Sub "${AWS::StackName}-RepositoryUri" }
+  AlertTopic:
+    Value: !Ref AlertTopic
+    Export: { Name: !Sub "${AWS::StackName}-AlertTopic" }

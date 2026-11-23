@@ -1,0 +1,9 @@
+{
+  "EnvName": "production",
+  "Port": "80",
+  "Cpu": "512",
+  "Memory": "1024",
+  "ClusterKind": "prod",
+  "CapacityProvider": "FARGATE",
+  "LogRetentionDays": "14"
+}

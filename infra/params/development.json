@@ -1,0 +1,9 @@
+{
+  "EnvName": "development",
+  "Port": "8082",
+  "Cpu": "256",
+  "Memory": "1024",
+  "ClusterKind": "nonprod",
+  "CapacityProvider": "FARGATE_SPOT",
+  "LogRetentionDays": "14"
+}

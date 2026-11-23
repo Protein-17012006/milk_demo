@@ -1,0 +1,75 @@
+# Reusable: deploys ONE environment with ONE image tag through scripts/ci/deploy_env.sh.
+# Called by cd.yml (promotion) and rollback.yml. The job runs in the GitHub environment of the
+# same name, so production waits for its required reviewer: that is the manual approval gate.
+name: Deploy one environment
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      image_tag:
+        type: string
+        required: true
+      rollback:
+        type: boolean
+        default: false
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.deploy.outputs.url }}
+    # One release per environment at a time; a running deployment is never cancelled.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      AWS_REGION: ap-southeast-1
+      ENV_NAME: ${{ inputs.environment }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      ROLLBACK: ${{ inputs.rollback }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        if: inputs.environment == 'staging' || inputs.environment == 'production'
+        with:
+          python-version: "3.12"
+      - name: Install Locust
+        if: inputs.environment == 'staging' || inputs.environment == 'production'
+        run: pip install -r tests/load/requirements.txt
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-southeast-1
+
+      - name: Deploy ${{ inputs.environment }} ${{ inputs.image_tag }}
+        id: deploy
+        run: scripts/ci/deploy_env.sh "$ENV_NAME" "$IMAGE_TAG"
+
+      - name: Upload Locust statistics
+        if: always() && hashFiles('locust-out/locust_stats.csv') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: locust-${{ inputs.environment }}-${{ inputs.image_tag }}${{ inputs.rollback && '-rollback' || '' }}
+          path: |
+            locust-out/*.csv
+            locust-out/report.html
+            locust-out/locust.log
+          retention-days: 30
+          overwrite: true

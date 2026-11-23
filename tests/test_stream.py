@@ -34,7 +34,7 @@ class Trickle(io.RawIOBase):
 
     def readinto(self, b):
         chunk = self._data.read(min(3, len(b)))
-        b[:len(chunk)] = chunk
+        b[: len(chunk)] = chunk
         return len(chunk)
 
 

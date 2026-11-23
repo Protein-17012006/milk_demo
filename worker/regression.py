@@ -8,6 +8,7 @@ slightly from the report even when the code is identical.
 
     <carton_recognition>/.venv/bin/python worker/regression.py ~/Desktop/Datagent/cv_output_sample
 """
+
 from __future__ import annotations
 
 import argparse
@@ -24,9 +25,23 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "server"))
 from milk.cvoutput import CaptureStem, build_capture  # noqa: E402
 from milk.long_adapter import LongPipeline  # noqa: E402
 
-FIELDS = ["reading_id", "capture_id", "store_id", "camera_id", "capture_timestamp", "capture_source", "image_filename",
-          "sku_id", "sku_name", "unit_count", "confidence_score", "detection_method", "bounding_box", "is_flagged",
-          "flag_reason"]
+FIELDS = [
+    "reading_id",
+    "capture_id",
+    "store_id",
+    "camera_id",
+    "capture_timestamp",
+    "capture_source",
+    "image_filename",
+    "sku_id",
+    "sku_name",
+    "unit_count",
+    "confidence_score",
+    "detection_method",
+    "bounding_box",
+    "is_flagged",
+    "flag_reason",
+]
 
 
 def theirs_row(row: dict) -> dict:
@@ -65,17 +80,29 @@ def main() -> int:
         units = pipe.read_units(image)
         times.append((time.perf_counter() - started) * 1000)
 
-        capture = dict(store_id=f"TEST-{store_code}", camera_id=camera, capture_source="Phone", time=when,
-                       stamp=f"{date}-{rest}", image_filename=path.name)
+        capture = dict(
+            store_id=f"TEST-{store_code}",
+            camera_id=camera,
+            capture_source="Phone",
+            time=when,
+            stamp=f"{date}-{rest}",
+            image_filename=path.name,
+        )
         theirs, _ = cvo.readings(units, capture, 0)
-        ours, log = build_capture(pipe.to_detections(units), stem=CaptureStem(store_code, date, rest),
-                                  store_id=f"TEST-{store_code}", camera_id=camera, capture_source="Phone",
-                                  ts=when, processing_time_ms=0)
+        ours, log = build_capture(
+            pipe.to_detections(units),
+            stem=CaptureStem(store_code, date, rest),
+            store_id=f"TEST-{store_code}",
+            camera_id=camera,
+            capture_source="Phone",
+            ts=when,
+            processing_time_ms=0,
+        )
         a, b = [theirs_row(r) for r in theirs], [ours_row(r) for r in ours]
         if a != b:
             mismatches += 1
             print(f"MISMATCH {path.name}")
-            for x, y in zip(a, b):
+            for x, y in zip(a, b, strict=False):
                 for f in FIELDS:
                     if x[f] != y[f]:
                         print(f"   {x['reading_id']} {f}: pipeline={x[f]!r} worker={y[f]!r}")

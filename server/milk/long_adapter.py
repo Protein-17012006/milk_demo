@@ -12,6 +12,7 @@ pipeline's environment (torch, ultralytics, lancedb) and its files:
     MILK_DEVICE      "cuda" or "cpu"; give "cuda", not "cuda:0": the pipeline turns on
                      half precision only for the exact string "cuda"
 """
+
 from __future__ import annotations
 
 import os
@@ -55,8 +56,10 @@ class LongPipeline:
         return self._cvo.read_units(image, self._yolo, self._rec, self._conf, self._imgsz)
 
     def to_detections(self, units: list[dict]) -> list[Detection]:
-        return [Detection(u["sku_id"], self._cvo.NAME_OF.get(u["sku_id"]), float(u["unit_score"]), tuple(u["box"]))
-                for u in units]
+        return [
+            Detection(u["sku_id"], self._cvo.NAME_OF.get(u["sku_id"]), float(u["unit_score"]), tuple(u["box"]))
+            for u in units
+        ]
 
     def detect(self, image: np.ndarray) -> list[Detection]:
         return self.to_detections(self.read_units(image))

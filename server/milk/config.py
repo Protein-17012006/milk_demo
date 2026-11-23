@@ -1,4 +1,5 @@
 """Settings read from the environment (systemd loads /etc/milk/milk.env)."""
+
 from __future__ import annotations
 
 import os
@@ -65,6 +66,14 @@ class Settings:
     flag_threshold: float
     mediamtx_api: str
     utc_offset_hours: int
+    cookie_secure: bool = True
+    environment: str = "local"
+    version: str = "dev"
+
+
+def _flag(name: str, default: bool) -> bool:
+    value = _env(name)
+    return default if value is None else value.strip().lower() not in ("0", "false", "no", "off")
 
 
 def load(env_file: str | None = None) -> Settings:
@@ -104,4 +113,9 @@ def load(env_file: str | None = None) -> Settings:
         flag_threshold=float(_env("MILK_FLAG_THRESHOLD", "0.70")),
         mediamtx_api=_env("MILK_MEDIAMTX_API", "http://127.0.0.1:9997"),
         utc_offset_hours=int(_env("MILK_UTC_OFFSET_HOURS", "7")),
+        # The session cookie is Secure by default (CloudFront serves HTTPS). The pipeline's
+        # environments are plain HTTP behind the load balancer, so they set this to false.
+        cookie_secure=_flag("MILK_COOKIE_SECURE", True),
+        environment=_env("MILK_ENVIRONMENT", "local"),
+        version=_env("MILK_VERSION", "dev"),  # image tag, set by the pipeline
     )

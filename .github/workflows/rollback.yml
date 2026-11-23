@@ -1,0 +1,74 @@
+# Redeploys an earlier image to one environment through the same deploy.yml, with
+# rollback=true: no end-to-end test. Staging and production still run the load test, and
+# production still needs approval. Run it with an empty tag to list the 10 newest tags.
+# A CD run waiting at the production gate holds the production lock: reject it first.
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to roll back
+        type: choice
+        options: [production, staging, test, development]
+        default: production
+      image_tag:
+        description: Earlier image tag (empty = only list the 10 newest tags)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  tags:
+    name: newest tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+    env:
+      AWS_REGION: ap-southeast-1
+      ENV_NAME: ${{ inputs.environment }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-southeast-1
+      - name: List tags and check the requested one
+        id: check
+        run: |
+          source scripts/ci/lib.sh
+          current=$(service_tag "$(env_cluster "$ENV_NAME")" "milk-$ENV_NAME")
+          {
+            echo "### Newest images (\`$ENV_NAME\` runs \`$current\`)"
+            echo ""
+            echo "| Tag | Pushed (UTC) |"
+            echo "|---|---|"
+            aws ecr describe-images --repository-name "$ECR_REPOSITORY" --filter tagStatus=TAGGED \
+              --query 'reverse(sort_by(imageDetails, &imagePushedAt))[:10].[imageTags[0], imagePushedAt]' --output text |
+              while read -r tag pushed; do echo "| \`$tag\` | $pushed |"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$IMAGE_TAG" ]; then
+            echo "No tag given: listed the newest tags only."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$IMAGE_TAG" =~ ^[0-9a-f]{7,40}$ ]] || fail "image tag must be a commit hash, got '$IMAGE_TAG'"
+          aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids "imageTag=$IMAGE_TAG" >/dev/null 2>&1 ||
+            fail "image $ECR_REPOSITORY:$IMAGE_TAG is not in ECR (expired by the lifecycle rule?)"
+          echo "Rolling $ENV_NAME back from \`$current\` to \`$IMAGE_TAG\`." >> "$GITHUB_STEP_SUMMARY"
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+  rollback:
+    needs: tags
+    if: needs.tags.outputs.proceed == 'true'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: ${{ inputs.environment }}
+      image_tag: ${{ inputs.image_tag }}
+      rollback: true
+    secrets: inherit

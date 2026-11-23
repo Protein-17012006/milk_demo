@@ -1,0 +1,57 @@
+# Rebuilds an environment's captures table from the result files in its S3 bucket
+# (python -m milk.reindex as a one-off ECS task). Its log appears in this job's log.
+# Runs in the GitHub environment of the same name, so production needs approval.
+name: Re-ingest
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [production, staging, test, development]
+        default: production
+      prefix:
+        description: Under results/, e.g. CAM-S01-A/2026-11-18 (empty = everything)
+        type: string
+        required: false
+      dry_run:
+        description: Count the files, write nothing
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  reingest:
+    name: reindex ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment:
+      name: ${{ inputs.environment }}
+    concurrency:
+      group: reingest-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      AWS_REGION: ap-southeast-1
+      ENV_NAME: ${{ inputs.environment }}
+      PREFIX: ${{ inputs.prefix }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-southeast-1
+      - name: Run milk.reindex
+        run: |
+          source scripts/ci/lib.sh
+          [[ "$PREFIX" =~ ^[A-Za-z0-9._/-]*$ ]] || fail "prefix may only hold letters, digits, . _ / -"
+          stack="milk-$ENV_NAME"
+          [ "$(stack_status "$stack")" != NONE ] || fail "$stack does not exist; deploy $ENV_NAME first"
+          cmd=(python -m milk.reindex)
+          [ -z "$PREFIX" ] || cmd+=(--prefix "$PREFIX")
+          [ "$DRY_RUN" != true ] || cmd+=(--dry-run)
+          scripts/ci/run_task.sh "$ENV_NAME" "$(stack_output "$stack" Cluster)" "$(stack_output "$stack" JobTaskFamily)" \
+            "$(stack_output "$PLATFORM_STACK" Subnets)" "$(stack_output "$PLATFORM_STACK" TaskSecurityGroup)" 1800 "${cmd[@]}"

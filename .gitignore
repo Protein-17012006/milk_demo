@@ -39,3 +39,9 @@ data/
 .idea/
 Thumbs.db
 desktop.ini
+
+# CI/CD: cicd.env holds the pipeline's AWS key (covered by *.env above); local tool output
+cicd.env
+locust-out/
+coverage.xml
+.coverage

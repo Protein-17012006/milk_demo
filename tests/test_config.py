@@ -8,11 +8,7 @@ from milk import config
 def test_env_file_fills_missing_settings_but_never_overrides(tmp_path, monkeypatch):
     env = tmp_path / "worker.env"
     env.write_text(
-        "# comment line\n"
-        "MILK_TEST_A=from-file\n"
-        "MILK_TEST_B = 'quoted value'\n"
-        "MILK_TEST_C=from-file\n"
-        "not a setting\n",
+        "# comment line\nMILK_TEST_A=from-file\nMILK_TEST_B = 'quoted value'\nMILK_TEST_C=from-file\nnot a setting\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("MILK_TEST_C", "from-environment")
@@ -39,3 +35,21 @@ def test_bad_roi_is_rejected(monkeypatch, raw):
     monkeypatch.setenv("MILK_ROI", raw)
     with pytest.raises(ValueError):
         config.load()
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [(None, True), ("true", True), ("false", False), ("0", False), ("OFF", False)]
+)
+def test_cookie_secure_flag(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv("MILK_COOKIE_SECURE", raising=False)
+    else:
+        monkeypatch.setenv("MILK_COOKIE_SECURE", raw)
+    assert config.load().cookie_secure is expected
+
+
+def test_environment_and_version_come_from_the_pipeline(monkeypatch):
+    monkeypatch.setenv("MILK_ENVIRONMENT", "staging")
+    monkeypatch.setenv("MILK_VERSION", "1d58130")
+    s = config.load()
+    assert (s.environment, s.version) == ("staging", "1d58130")

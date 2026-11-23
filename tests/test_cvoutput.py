@@ -1,4 +1,5 @@
 """CV Output must match the format of the 17/10 sample sent to Datagent, byte for byte."""
+
 from datetime import datetime, timedelta, timezone
 
 from milk.cvoutput import (
@@ -16,29 +17,75 @@ ICT = timezone(timedelta(hours=7))
 # Rows of CV_Output_Example_1_image.csv (17/10/2026), image PHONE-S02-A_20261012_083216-2.jpg:
 # (sku_id, sku_name, row confidence, boxes) in the order the file lists them.
 SAMPLE = [
-    ("TMP-MLK-TH-01", "TH true MILK Sữa Tươi Tiệt Trùng Có Đường 180ml", 0.45,
-     [[121, 466, 38, 73], [195, 430, 33, 67], [179, 439, 33, 68], [212, 419, 32, 69],
-      [155, 444, 39, 74], [137, 454, 40, 75], [150, 548, 87, 97]]),
-    ("TMP-MLK-VNM-08", "Vinamilk Sữa Hạt Đậu Nành Hạnh Nhân Ít Đường 180ml", 0.68,
-     [[277, 302, 23, 63], [335, 277, 23, 57], [347, 273, 22, 56], [289, 296, 24, 60], [360, 269, 19, 55]]),
-    ("TMP-MLK-VNM-10", "Vinamilk Sữa Hạt 9 Loại Hạt Ít Đường 180ml", 0.58,
-     [[262, 308, 25, 64], [246, 314, 25, 63], [372, 264, 18, 53], [387, 259, 18, 53]]),
-    ("TMP-MLK-VNM-06", "Vinamilk 100% Sữa Tươi Tách Béo Tiệt Trùng Dưa Lưới 180ml", 0.75,
-     [[213, 326, 29, 64], [196, 333, 30, 67], [405, 251, 15, 52]]),
-    ("TMP-MLK-VNM-01", "Vinamilk 100% Sữa Tươi Tiệt Trùng Không Đường 180ml", 0.95,
-     [[1, 411, 38, 84], [22, 399, 40, 81]]),
-    ("TMP-MLK-VNM-02", "Vinamilk 100% Sữa Tươi Tiệt Trùng Ít Đường 180ml", 0.93,
-     [[44, 388, 39, 82], [68, 380, 34, 80]]),
-    ("TMP-MLK-VNM-03", "Vinamilk 100% Sữa Tươi Tiệt Trùng Có Đường 180ml", 0.89,
-     [[106, 365, 35, 78], [89, 373, 34, 79]]),
-    ("TMP-MLK-VNM-04", "Vinamilk 100% Sữa Tươi Tách Béo Tiệt Trùng Sôcôla Đậm Đặc 180ml", 0.86,
-     [[142, 353, 34, 71], [123, 359, 33, 74]]),
-    ("TMP-MLK-VNM-05", "Vinamilk 100% Sữa Tươi Tiệt Trùng Giảm Béo Chuối 180ml", 0.91,
-     [[179, 340, 31, 68], [162, 348, 32, 68]]),
-    ("TMP-MLK-VNM-09", "Vinamilk Sữa Hạt Đậu Nành Mè Đen Ít Đường 180ml", 0.7,
-     [[319, 282, 24, 60], [303, 289, 24, 62]]),
-    ("TMP-MLK-VNM-07", "Vinamilk Sữa Đậu Nành Cao Canxi Ít Đường 180ml", 0.51,
-     [[231, 321, 28, 64]]),
+    (
+        "TMP-MLK-TH-01",
+        "TH true MILK Sữa Tươi Tiệt Trùng Có Đường 180ml",
+        0.45,
+        [
+            [121, 466, 38, 73],
+            [195, 430, 33, 67],
+            [179, 439, 33, 68],
+            [212, 419, 32, 69],
+            [155, 444, 39, 74],
+            [137, 454, 40, 75],
+            [150, 548, 87, 97],
+        ],
+    ),
+    (
+        "TMP-MLK-VNM-08",
+        "Vinamilk Sữa Hạt Đậu Nành Hạnh Nhân Ít Đường 180ml",
+        0.68,
+        [[277, 302, 23, 63], [335, 277, 23, 57], [347, 273, 22, 56], [289, 296, 24, 60], [360, 269, 19, 55]],
+    ),
+    (
+        "TMP-MLK-VNM-10",
+        "Vinamilk Sữa Hạt 9 Loại Hạt Ít Đường 180ml",
+        0.58,
+        [[262, 308, 25, 64], [246, 314, 25, 63], [372, 264, 18, 53], [387, 259, 18, 53]],
+    ),
+    (
+        "TMP-MLK-VNM-06",
+        "Vinamilk 100% Sữa Tươi Tách Béo Tiệt Trùng Dưa Lưới 180ml",
+        0.75,
+        [[213, 326, 29, 64], [196, 333, 30, 67], [405, 251, 15, 52]],
+    ),
+    (
+        "TMP-MLK-VNM-01",
+        "Vinamilk 100% Sữa Tươi Tiệt Trùng Không Đường 180ml",
+        0.95,
+        [[1, 411, 38, 84], [22, 399, 40, 81]],
+    ),
+    (
+        "TMP-MLK-VNM-02",
+        "Vinamilk 100% Sữa Tươi Tiệt Trùng Ít Đường 180ml",
+        0.93,
+        [[44, 388, 39, 82], [68, 380, 34, 80]],
+    ),
+    (
+        "TMP-MLK-VNM-03",
+        "Vinamilk 100% Sữa Tươi Tiệt Trùng Có Đường 180ml",
+        0.89,
+        [[106, 365, 35, 78], [89, 373, 34, 79]],
+    ),
+    (
+        "TMP-MLK-VNM-04",
+        "Vinamilk 100% Sữa Tươi Tách Béo Tiệt Trùng Sôcôla Đậm Đặc 180ml",
+        0.86,
+        [[142, 353, 34, 71], [123, 359, 33, 74]],
+    ),
+    (
+        "TMP-MLK-VNM-05",
+        "Vinamilk 100% Sữa Tươi Tiệt Trùng Giảm Béo Chuối 180ml",
+        0.91,
+        [[179, 340, 31, 68], [162, 348, 32, 68]],
+    ),
+    (
+        "TMP-MLK-VNM-09",
+        "Vinamilk Sữa Hạt Đậu Nành Mè Đen Ít Đường 180ml",
+        0.7,
+        [[319, 282, 24, 60], [303, 289, 24, 62]],
+    ),
+    ("TMP-MLK-VNM-07", "Vinamilk Sữa Đậu Nành Cao Canxi Ít Đường 180ml", 0.51, [[231, 321, 28, 64]]),
     (None, None, 0.3, [[64, 580, 102, 109], [108, 566, 97, 106]]),
 ]
 
@@ -73,8 +120,13 @@ def _build(reverse_groups: bool = False):
     alloc.stem("S02", ts)  # the first capture of that second has no suffix
     stem = alloc.stem("S02", ts)
     return build_capture(
-        _sample_detections(reverse_groups), stem=stem, store_id="TEST-S02",
-        camera_id="PHONE-S02-A", capture_source="Phone", ts=ts, processing_time_ms=1037,
+        _sample_detections(reverse_groups),
+        stem=stem,
+        store_id="TEST-S02",
+        camera_id="PHONE-S02-A",
+        capture_source="Phone",
+        ts=ts,
+        processing_time_ms=1037,
     )
 
 
@@ -90,10 +142,12 @@ def test_output_does_not_depend_on_the_order_the_model_lists_skus():
 
 def test_capture_log_matches_the_17_10_sample():
     _, log = _build()
-    expected = ("capture_id,store_id,camera_id,capture_timestamp,capture_source,image_filename,"
-                "rows_written,units_found,flagged_rows,processing_time_ms\n"
-                "CAP-S02-20261012-083216-2,TEST-S02,PHONE-S02-A,2026-10-12T08:32:16+07:00,Phone,"
-                "PHONE-S02-A_20261012_083216-2.jpg,12,34,5,1037\n")
+    expected = (
+        "capture_id,store_id,camera_id,capture_timestamp,capture_source,image_filename,"
+        "rows_written,units_found,flagged_rows,processing_time_ms\n"
+        "CAP-S02-20261012-083216-2,TEST-S02,PHONE-S02-A,2026-10-12T08:32:16+07:00,Phone,"
+        "PHONE-S02-A_20261012_083216-2.jpg,12,34,5,1037\n"
+    )
     assert to_csv([log], CAPTURE_LOG_COLUMNS, bom=False) == expected
 
 
@@ -105,8 +159,9 @@ def test_csv_starts_with_bom_for_excel():
 def test_empty_frame_gives_no_rows_but_a_log_line():
     ts = datetime(2026, 11, 18, 17, 9, 0, tzinfo=ICT)
     stem = CaptureIdAllocator().stem("S01", ts)
-    rows, log = build_capture([], stem=stem, store_id="DEMO-S01", camera_id="CAM-S01-A",
-                              capture_source="CCTV", ts=ts, processing_time_ms=99)
+    rows, log = build_capture(
+        [], stem=stem, store_id="DEMO-S01", camera_id="CAM-S01-A", capture_source="CCTV", ts=ts, processing_time_ms=99
+    )
     assert rows == []
     assert log["capture_id"] == "CAP-S01-20261118-170900"
     assert log["image_filename"] == "CAM-S01-A_20261118_170900.jpg"
@@ -123,8 +178,15 @@ def test_allocator_suffixes_reset_each_second():
 def _one_row(confidences):
     ts = datetime(2026, 11, 18, 18, 0, 0, tzinfo=ICT)
     dets = [Detection("TMP-MLK-VNM-01", "x", c, (i, 0, 10, 20)) for i, c in enumerate(confidences)]
-    rows, _ = build_capture(dets, stem=CaptureIdAllocator().stem("S01", ts), store_id="DEMO-S01",
-                            camera_id="CAM-S01-A", capture_source="CCTV", ts=ts, processing_time_ms=1)
+    rows, _ = build_capture(
+        dets,
+        stem=CaptureIdAllocator().stem("S01", ts),
+        store_id="DEMO-S01",
+        camera_id="CAM-S01-A",
+        capture_source="CCTV",
+        ts=ts,
+        processing_time_ms=1,
+    )
     return rows[0]
 
 

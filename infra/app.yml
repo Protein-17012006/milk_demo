@@ -1,0 +1,570 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Milk hub pipeline, one environment (stack milk-<env>): the hub as an ECS service behind
+  its listener on the shared load balancer, a one-off job task definition (selfcheck,
+  reindex), its own S3 bucket, DynamoDB table, secret, task role, log group, dashboard and
+  (production) alarms. Deployed only by scripts/ci/deploy_env.sh from GitHub Actions.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [development, test, staging, production]
+  ImageTag:
+    Type: String
+    Description: Image tag in the milk ECR repository (first 7 characters of the commit).
+    AllowedPattern: "^[0-9a-f]{7,40}$"
+  Port:
+    Type: Number
+    Description: Listener port on the shared load balancer.
+  Cpu:
+    Type: String
+    AllowedValues: ["256", "512"]
+  Memory:
+    Type: String
+    AllowedValues: ["1024", "2048"]
+  ClusterKind:
+    Type: String
+    AllowedValues: [nonprod, prod]
+  CapacityProvider:
+    Type: String
+    AllowedValues: [FARGATE, FARGATE_SPOT]
+  DesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 1
+    Description: The hub keeps state in memory, so it runs as exactly one task (0 = stopped).
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [7, 14, 30]
+  DataRetentionDays:
+    Type: Number
+    Default: 30
+  PlatformStack:
+    Type: String
+    Default: milk-platform
+
+Conditions:
+  IsProd: !Equals [!Ref EnvName, production]
+
+Resources:
+  # --- data ------------------------------------------------------------------------------------
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub milk-${EnvName}-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-frames
+            Status: Enabled
+            Prefix: frames/
+            ExpirationInDays: !Ref DataRetentionDays
+          - Id: expire-results
+            Status: Enabled
+            Prefix: results/
+            ExpirationInDays: !Ref DataRetentionDays
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: project
+          Value: milk
+        - Key: environment
+          Value: !Ref EnvName
+
+  DataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyPlainHttp
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt DataBucket.Arn
+              - !Sub "${DataBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  CapturesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub milk-${EnvName}-captures
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: camera_id
+          AttributeType: S
+        - AttributeName: capture_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: camera_id
+          KeyType: HASH
+        - AttributeName: capture_id
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+      Tags:
+        - Key: project
+          Value: milk
+        - Key: environment
+          Value: !Ref EnvName
+
+  # web_password is generated here; deploy_env.sh adds web_secret and internal_token once.
+  AppSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub milk/${EnvName}/app
+      Description: !Sub Dashboard password, session secret and worker token of milk ${EnvName}
+      GenerateSecretString:
+        SecretStringTemplate: "{}"
+        GenerateStringKey: web_password
+        PasswordLength: 20
+        ExcludePunctuation: true
+      Tags:
+        - Key: project
+          Value: milk
+        - Key: environment
+          Value: !Ref EnvName
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /milk/${EnvName}
+      RetentionInDays: !Ref LogRetentionDays
+
+  # --- roles -------------------------------------------------------------------------------------
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: read-app-secret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref AppSecret
+      Tags:
+        - Key: project
+          Value: milk
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: own-environment-data
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt DataBucket.Arn
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: !Sub "${DataBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                Resource: !GetAtt CapturesTable.Arn
+      Tags:
+        - Key: project
+          Value: milk
+
+  # --- load balancing ------------------------------------------------------------------------------
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub milk-${EnvName}
+      VpcId:
+        Fn::ImportValue: !Sub ${PlatformStack}-VpcId
+      Port: 8000
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "25" # longer than the 20 s long-poll, much shorter than the 300 s default
+      Tags:
+        - Key: project
+          Value: milk
+
+  ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Fn::ImportValue: !Sub ${PlatformStack}-listener-${EnvName}
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: ["/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # --- tasks and service ------------------------------------------------------------------------
+  AppTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub milk-${EnvName}-app
+      Cpu: !Ref Cpu
+      Memory: !Ref Memory
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Sub
+            - "${Repo}:${ImageTag}"
+            - Repo:
+                Fn::ImportValue: !Sub ${PlatformStack}-RepositoryUri
+          Essential: true
+          StopTimeout: 30
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          Environment:
+            - { Name: MILK_ENVIRONMENT, Value: !Ref EnvName }
+            - { Name: MILK_VERSION, Value: !Ref ImageTag }
+            - { Name: MILK_REGION, Value: !Ref AWS::Region }
+            - { Name: MILK_BUCKET, Value: !Ref DataBucket }
+            - { Name: MILK_TABLE, Value: !Ref CapturesTable }
+            - { Name: MILK_COOKIE_SECURE, Value: "false" }
+          Secrets:
+            - { Name: MILK_WEB_PASSWORD, ValueFrom: !Sub "${AppSecret}:web_password::" }
+            - { Name: MILK_WEB_SECRET, ValueFrom: !Sub "${AppSecret}:web_secret::" }
+            - { Name: MILK_INTERNAL_TOKEN, ValueFrom: !Sub "${AppSecret}:internal_token::" }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+
+  # One-off tasks from the same image; the container name makes log streams job/job/<task-id>.
+  JobTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub milk-${EnvName}-job
+      Cpu: "256"
+      Memory: "1024"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: job
+          Image: !Sub
+            - "${Repo}:${ImageTag}"
+            - Repo:
+                Fn::ImportValue: !Sub ${PlatformStack}-RepositoryUri
+          Essential: true
+          Command: [python, -m, milk.selfcheck]
+          Environment:
+            - { Name: MILK_ENVIRONMENT, Value: !Ref EnvName }
+            - { Name: MILK_VERSION, Value: !Ref ImageTag }
+            - { Name: MILK_REGION, Value: !Ref AWS::Region }
+            - { Name: MILK_BUCKET, Value: !Ref DataBucket }
+            - { Name: MILK_TABLE, Value: !Ref CapturesTable }
+            - Name: MILK_HUB_URL
+              Value: !Sub
+                - "http://${AlbDns}:${Port}"
+                - AlbDns:
+                    Fn::ImportValue: !Sub ${PlatformStack}-AlbDns
+          Secrets:
+            - { Name: MILK_WEB_PASSWORD, ValueFrom: !Sub "${AppSecret}:web_password::" }
+            - { Name: MILK_WEB_SECRET, ValueFrom: !Sub "${AppSecret}:web_secret::" }
+            - { Name: MILK_INTERNAL_TOKEN, ValueFrom: !Sub "${AppSecret}:internal_token::" }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: job
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: ListenerRule
+    Properties:
+      ServiceName: !Sub milk-${EnvName}
+      Cluster:
+        Fn::ImportValue: !Sub ${PlatformStack}-cluster-${ClusterKind}
+      TaskDefinition: !Ref AppTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref CapacityProvider
+          Weight: 1
+      # Rolling update: the new task must be healthy before the old one stops; if it never
+      # gets healthy, the circuit breaker rolls the service back and the stack update fails.
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      HealthCheckGracePeriodSeconds: 30
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: 8000
+          TargetGroupArn: !Ref TargetGroup
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Split
+            - ","
+            - Fn::ImportValue: !Sub ${PlatformStack}-Subnets
+          SecurityGroups:
+            - Fn::ImportValue: !Sub ${PlatformStack}-TaskSecurityGroup
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+      Tags:
+        - Key: project
+          Value: milk
+        - Key: environment
+          Value: !Ref EnvName
+
+  # --- monitoring ----------------------------------------------------------------------------------
+  CpuHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProd
+    Properties:
+      AlarmName: !Sub milk-${EnvName}-cpu-high
+      AlarmDescription: Hub CPU above 80% for 3 minutes
+      Namespace: AWS/ECS
+      MetricName: CPUUtilization
+      Dimensions:
+        - { Name: ClusterName, Value: !Sub "milk-${ClusterKind}" }
+        - { Name: ServiceName, Value: !GetAtt Service.Name }
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub ${PlatformStack}-AlertTopic
+      OKActions:
+        - Fn::ImportValue: !Sub ${PlatformStack}-AlertTopic
+
+  MemoryHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProd
+    Properties:
+      AlarmName: !Sub milk-${EnvName}-memory-high
+      AlarmDescription: Hub memory above 80% for 3 minutes
+      Namespace: AWS/ECS
+      MetricName: MemoryUtilization
+      Dimensions:
+        - { Name: ClusterName, Value: !Sub "milk-${ClusterKind}" }
+        - { Name: ServiceName, Value: !GetAtt Service.Name }
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub ${PlatformStack}-AlertTopic
+      OKActions:
+        - Fn::ImportValue: !Sub ${PlatformStack}-AlertTopic
+
+  Target5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProd
+    Properties:
+      AlarmName: !Sub milk-${EnvName}-5xx
+      AlarmDescription: More than 5 server errors from the hub in 5 minutes
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::ImportValue: !Sub ${PlatformStack}-AlbFullName
+        - { Name: TargetGroup, Value: !GetAtt TargetGroup.TargetGroupFullName }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub ${PlatformStack}-AlertTopic
+      OKActions:
+        - Fn::ImportValue: !Sub ${PlatformStack}-AlertTopic
+
+  LatencyHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProd
+    Properties:
+      AlarmName: !Sub milk-${EnvName}-latency-p95
+      AlarmDescription: 95th percentile response time above 2 s for 3 minutes (long-polls excluded by the hub's 20 s cap)
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::ImportValue: !Sub ${PlatformStack}-AlbFullName
+        - { Name: TargetGroup, Value: !GetAtt TargetGroup.TargetGroupFullName }
+      ExtendedStatistic: p95
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 2
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub ${PlatformStack}-AlertTopic
+      OKActions:
+        - Fn::ImportValue: !Sub ${PlatformStack}-AlertTopic
+
+  NoHealthyTaskAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProd
+    Properties:
+      AlarmName: !Sub milk-${EnvName}-no-healthy-task
+      AlarmDescription: No healthy hub task behind the load balancer for 2 minutes
+      Namespace: AWS/ApplicationELB
+      MetricName: HealthyHostCount
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::ImportValue: !Sub ${PlatformStack}-AlbFullName
+        - { Name: TargetGroup, Value: !GetAtt TargetGroup.TargetGroupFullName }
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub ${PlatformStack}-AlertTopic
+      OKActions:
+        - Fn::ImportValue: !Sub ${PlatformStack}-AlertTopic
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub milk-${EnvName}
+      DashboardBody: !Sub
+        - |
+          {
+            "widgets": [
+              {"type": "metric", "x": 0, "y": 0, "width": 8, "height": 6, "properties": {
+                "title": "CPU and memory (%)", "region": "${AWS::Region}", "stat": "Average", "period": 60,
+                "metrics": [
+                  ["AWS/ECS", "CPUUtilization", "ClusterName", "${Cluster}", "ServiceName", "${ServiceName}"],
+                  [".", "MemoryUtilization", ".", ".", ".", "."]
+                ], "yAxis": {"left": {"min": 0, "max": 100}}}},
+              {"type": "metric", "x": 8, "y": 0, "width": 8, "height": 6, "properties": {
+                "title": "Requests per minute", "region": "${AWS::Region}", "stat": "Sum", "period": 60,
+                "metrics": [["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${Alb}", "TargetGroup", "${TargetGroupName}"]]}},
+              {"type": "metric", "x": 16, "y": 0, "width": 8, "height": 6, "properties": {
+                "title": "Response time (s)", "region": "${AWS::Region}", "period": 60,
+                "metrics": [
+                  ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${Alb}", "TargetGroup", "${TargetGroupName}", {"stat": "p50"}],
+                  ["...", {"stat": "p95"}]
+                ]}},
+              {"type": "metric", "x": 0, "y": 6, "width": 8, "height": 6, "properties": {
+                "title": "Errors", "region": "${AWS::Region}", "stat": "Sum", "period": 60,
+                "metrics": [
+                  ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "${Alb}", "TargetGroup", "${TargetGroupName}"],
+                  [".", "HTTPCode_Target_4XX_Count", ".", ".", ".", "."],
+                  [".", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "${Alb}"]
+                ]}},
+              {"type": "metric", "x": 8, "y": 6, "width": 8, "height": 6, "properties": {
+                "title": "Healthy tasks", "region": "${AWS::Region}", "stat": "Minimum", "period": 60,
+                "metrics": [["AWS/ApplicationELB", "HealthyHostCount", "LoadBalancer", "${Alb}", "TargetGroup", "${TargetGroupName}"],
+                            [".", "UnHealthyHostCount", ".", ".", ".", "."]]}},
+              {"type": "metric", "x": 16, "y": 6, "width": 8, "height": 6, "properties": {
+                "title": "Network bytes (Container Insights, production)", "region": "${AWS::Region}", "stat": "Sum", "period": 60,
+                "metrics": [
+                  ["ECS/ContainerInsights", "NetworkRxBytes", "ClusterName", "${Cluster}", "ServiceName", "${ServiceName}"],
+                  [".", "NetworkTxBytes", ".", ".", ".", "."]
+                ]}},
+              {"type": "metric", "x": 0, "y": 12, "width": 12, "height": 6, "properties": {
+                "title": "DynamoDB captures table", "region": "${AWS::Region}", "stat": "Sum", "period": 60,
+                "metrics": [
+                  ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", "${Table}"],
+                  [".", "ConsumedReadCapacityUnits", ".", "."],
+                  [".", "ThrottledRequests", ".", ".", "Operation", "PutItem"]
+                ]}},
+              {"type": "log", "x": 12, "y": 12, "width": 12, "height": 6, "properties": {
+                "title": "Hub warnings and errors", "region": "${AWS::Region}",
+                "query": "SOURCE '${LogGroupName}' | fields @timestamp, @logStream, @message | filter @message like /WARNING|ERROR|Traceback/ | sort @timestamp desc | limit 50"}}
+            ]
+          }
+        - Cluster: !Sub milk-${ClusterKind}
+          ServiceName: !GetAtt Service.Name
+          Alb:
+            Fn::ImportValue: !Sub ${PlatformStack}-AlbFullName
+          TargetGroupName: !GetAtt TargetGroup.TargetGroupFullName
+          Table: !Ref CapturesTable
+          LogGroupName: !Ref LogGroup
+
+Outputs:
+  Cluster:
+    Value: !Sub milk-${ClusterKind}
+  ServiceName:
+    Value: !GetAtt Service.Name
+  JobTaskFamily:
+    Value: !Sub milk-${EnvName}-job
+  BucketName:
+    Value: !Ref DataBucket
+  TableName:
+    Value: !Ref CapturesTable
+  SecretArn:
+    Value: !Ref AppSecret
+  LogGroup:
+    Value: !Ref LogGroup
