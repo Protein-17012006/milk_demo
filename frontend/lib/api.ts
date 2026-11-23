@@ -467,29 +467,3 @@ export function createApiClient(getIdToken: TokenGetter) {
       requestWithAuth(`/model/health?days=${days}`, getIdToken) as Promise<{ items: ApiModelHealthItem[] }>,
   };
 }
-
-/** Map live SKU packaging name / brand to local crisp product thumbnail. */
-export function resolveProductThumbnail(
-  skuName: string,
-  brand?: string | null
-): string {
-  const text = `${skuName} ${brand ?? ""}`.toLowerCase();
-  if (text.includes("th true")) return "/images/products/thtruemilk.png";
-  if (text.includes("milo")) return "/images/products/milo.png";
-  if (text.includes("dalat")) return "/images/products/dalatmilk.png";
-  if (text.includes("probi") || text.includes("yakult"))
-    return "/images/products/probi.png";
-  if (text.includes("óc chó") || text.includes("oc cho") || text.includes("hạt"))
-    return "/images/products/occho.png";
-  if (text.includes("vinamilk") || text.includes("dutch") || text.includes("fami"))
-    return "/images/products/vinamilk.png";
-  if (text.includes("hảo hảo") || text.includes("hao hao"))
-    return "/images/products/haohao.png";
-  if (text.includes("omachi")) return "/images/products/omachi.png";
-  if (text.includes("3 miền") || text.includes("3 mien"))
-    return "/images/products/3mien.png";
-  if (text.includes("cung đình") || text.includes("cung dinh"))
-    return "/images/products/cungdinh.png";
-  // No photo for this SKU yet (e.g. the Slide snacks): a neutral box, never another product's photo.
-  return "/images/products/placeholder.svg";
-}

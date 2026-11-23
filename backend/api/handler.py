@@ -736,7 +736,7 @@ def _handle_seed_initial_data(event: dict[str, Any], ddb) -> dict[str, Any]:
                     "pack_type": meta["pack_type"],
                     "pack_size": meta["pack_size"],
                     "barcode": None,
-                    "image_url": None,
+                    "image_url": meta.get("image_url"),
                     "is_active": True,
                     "updated_at": now_iso,
                 }

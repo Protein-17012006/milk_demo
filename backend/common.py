@@ -61,6 +61,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Fresh Milk",
         "pack_type": "Box",
         "pack_size": "180 ml",
+        "image_url": "/images/products/th-true-milk-fresh-milk-sweetened-180ml.png",
     },
     "TMP-MLK-TH-02": {
         "sku_id": "TH true MILK Sữa Tươi Tiệt Trùng Ít Đường 180ml",
@@ -72,6 +73,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Fresh Milk",
         "pack_type": "Box",
         "pack_size": "180 ml",
+        "image_url": "/images/products/th-true-milk-fresh-milk-low-sugar-180ml.png",
     },
     "TMP-MLK-VNM-01": {
         "sku_id": "Vinamilk 100% Sữa Tươi Tiệt Trùng Không Đường 180ml",
@@ -83,6 +85,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Fresh Milk",
         "pack_type": "Box",
         "pack_size": "180 ml",
+        "image_url": "/images/products/vinamilk-100-fresh-milk-unsweetened-180ml.png",
     },
     "TMP-MLK-VNM-02": {
         "sku_id": "Vinamilk 100% Sữa Tươi Tiệt Trùng Ít Đường 180ml",
@@ -94,6 +97,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Fresh Milk",
         "pack_type": "Box",
         "pack_size": "180 ml",
+        "image_url": "/images/products/vinamilk-100-fresh-milk-low-sugar-180ml.png",
     },
     "TMP-MLK-VNM-03": {
         "sku_id": "Vinamilk 100% Sữa Tươi Tiệt Trùng Có Đường 180ml",
@@ -105,6 +109,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Fresh Milk",
         "pack_type": "Box",
         "pack_size": "180 ml",
+        "image_url": "/images/products/vinamilk-100-fresh-milk-sweetened-180ml.png",
     },
     "TMP-MLK-VNM-04": {
         "sku_id": "Vinamilk 100% Sữa Tươi Tách Béo Tiệt Trùng Sôcôla Đậm Đặc 180ml",
@@ -116,6 +121,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Flavored Milk",
         "pack_type": "Box",
         "pack_size": "180 ml",
+        "image_url": "/images/products/vinamilk-100-skimmed-chocolate-milk-180ml.png",
     },
     "TMP-MLK-VNM-05": {
         "sku_id": "Vinamilk 100% Sữa Tươi Tiệt Trùng Giảm Béo Chuối 180ml",
@@ -127,6 +133,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Flavored Milk",
         "pack_type": "Box",
         "pack_size": "180 ml",
+        "image_url": "/images/products/vinamilk-100-low-fat-banana-milk-180ml.png",
     },
     "TMP-MLK-VNM-06": {
         "sku_id": "Vinamilk 100% Sữa Tươi Tách Béo Tiệt Trùng Dưa Lưới 180ml",
@@ -138,6 +145,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Flavored Milk",
         "pack_type": "Box",
         "pack_size": "180 ml",
+        "image_url": "/images/products/vinamilk-100-skimmed-melon-milk-180ml.png",
     },
     "TMP-MLK-VNM-07": {
         "sku_id": "Vinamilk Sữa Đậu Nành Cao Canxi Ít Đường 180ml",
@@ -149,6 +157,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Plant Milk",
         "pack_type": "Box",
         "pack_size": "180 ml",
+        "image_url": "/images/products/vinamilk-high-calcium-soy-milk-low-sugar-180ml.png",
     },
     "TMP-MLK-VNM-08": {
         "sku_id": "Vinamilk Sữa Hạt Đậu Nành Hạnh Nhân Ít Đường 180ml",
@@ -160,6 +169,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Plant Milk",
         "pack_type": "Box",
         "pack_size": "180 ml",
+        "image_url": "/images/products/vinamilk-almond-soy-milk-low-sugar-180ml.png",
     },
     "TMP-MLK-VNM-09": {
         "sku_id": "Vinamilk Sữa Hạt Đậu Nành Mè Đen Ít Đường 180ml",
@@ -171,6 +181,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Plant Milk",
         "pack_type": "Box",
         "pack_size": "180 ml",
+        "image_url": "/images/products/vinamilk-black-sesame-soy-milk-low-sugar-180ml.png",
     },
     "TMP-MLK-VNM-10": {
         "sku_id": "Vinamilk Sữa Hạt 9 Loại Hạt Ít Đường 180ml",
@@ -182,6 +193,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Plant Milk",
         "pack_type": "Box",
         "pack_size": "180 ml",
+        "image_url": "/images/products/vinamilk-9-nuts-milk-low-sugar-180ml.png",
     },
     # 4 Slide snack SKUs trained on 20/11 (HOANG-P09)
     "original145": {
@@ -194,6 +206,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Potato Crisps",
         "pack_type": "Can",
         "pack_size": "145 g",
+        "image_url": "/images/products/slide-original-145g.png",
     },
     "sourcream150": {
         "sku_id": "Slide Sour Cream & Onion 150g",
@@ -205,6 +218,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Potato Crisps",
         "pack_type": "Can",
         "pack_size": "150 g",
+        "image_url": "/images/products/slide-sour-cream-onion-150g.png",
     },
     "cheese145": {
         "sku_id": "Slide Cheese 145g",
@@ -216,6 +230,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Potato Crisps",
         "pack_type": "Can",
         "pack_size": "145 g",
+        "image_url": "/images/products/slide-cheese-145g.png",
     },
     "hot160": {
         "sku_id": "Slide Hot & Spicy 160g",
@@ -227,6 +242,7 @@ DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
         "subcategory": "Potato Crisps",
         "pack_type": "Can",
         "pack_size": "160 g",
+        "image_url": "/images/products/slide-hot-spicy-160g.png",
     },
 }
 

@@ -304,6 +304,17 @@ def test_a_sku_missing_from_the_next_capture_drops_to_zero(monkeypatch: pytest.M
 
 
 @mock_aws
+def test_seeded_skus_reach_the_website_with_their_own_photo(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    resp = api.lambda_handler(_auth_event("GET", "/v1/products"))
+    images = {p["sku_id"]: p["image_url"] for p in json.loads(resp["body"])["items"]}
+
+    assert images[TH_SWEET] == "/images/products/th-true-milk-fresh-milk-sweetened-180ml.png"
+    assert images[TH_LOW] == "/images/products/th-true-milk-fresh-milk-low-sugar-180ml.png"
+    assert images["Slide Cheese 145g"] == "/images/products/slide-cheese-145g.png"
+
+
+@mock_aws
 def test_a_capture_from_another_camera_leaves_the_first_cameras_skus(monkeypatch: pytest.MonkeyPatch):
     api, ingest = _backend(monkeypatch)
     _ingest(ingest, "CAM-S01-A", "140700", [("TMP-MLK-TH-01", 2)])
