@@ -38,7 +38,7 @@ export function kpisFromApi(kpi: ApiKpiResponse | null): KpiMetrics {
     avgInferenceTime:
       kpi && kpi.avg_processing_time_ms > 0 ? `${kpi.avg_processing_time_ms} ms` : null,
     osaPercent: null, // the backend does not compute OSA yet
-    top50SkuAccuracy: kpi ? kpi.top_50_sku_accuracy : null, // null until the first Human Audit cycle
+    top50SkuAccuracy: kpi?.top_50_sku_accuracy?.value ?? null, // null until frames are labelled
     restockRateDelta: null, // the backend does not compute restock rate yet
     accuracySparkline: [],
     restockSparkline: [],
