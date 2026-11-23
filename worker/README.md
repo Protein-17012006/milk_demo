@@ -66,6 +66,9 @@ Không đặt thì worker tự ghép `MILK_PIPELINE` với tên thư mục chứ
   - Log ở `logs\worker-YYYY-MM-DD.log`, giữ 14 ngày.
 - **Bật và tắt**: `Start-ScheduledTask milk-worker` và `Stop-ScheduledTask milk-worker`. Trước khi bật, phải tắt
   worker ở máy khác đang đếm cùng camera.
+- **Nạp torch trước**: trên Windows, gói `milk` nạp torch trước mọi thư viện native khác. Nếu ssl và cv2 nạp trước
+  torch thì pyarrow (lancedb dùng) làm tiến trình chết với lỗi 0xC0000005. Chi tiết ở `server/milk/torch_first.py`.
+  Sau mỗi lần nâng torch hoặc pyarrow, chạy `python -m pytest tests/test_torch_first.py` trên máy đó.
 
 ## Chạy nền
 
