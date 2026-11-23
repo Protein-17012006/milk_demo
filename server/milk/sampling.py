@@ -29,6 +29,8 @@ class Sampler:
         self._open = open_reader
         self._reader: Reader | None = None
         self._window: int | None = None
+        self._frames = 0  # frames counted in the open window
+        self._last_frames: int | None = None  # frames counted in the last window that ended
 
     @property
     def continuous(self) -> bool:
@@ -49,17 +51,34 @@ class Sampler:
         if self._reader is not None and self._window == window:
             return self._reader, False
         self.close()
-        self._reader, self._window = self._open(), window
+        self._reader, self._window, self._frames = self._open(), window, 0
         self._reader.start()
         return self._reader, True
 
+    def note_frame(self) -> None:
+        """Counts a frame of the open window (the worker calls it for every frame it processes)."""
+        self._frames += 1
+
+    @property
+    def frames_in_window(self) -> int:
+        return self._frames
+
     def describe(self, now: float) -> dict | None:
-        """For the hub's status: how often the worker reads the stream and when it opens next."""
+        """For the hub's status: how often the worker reads the stream, when it opens next, whether a window is
+        open now, and how many frames the last window got. A window that ended with 0 frames, or an open window
+        with no stream, is an outage; a closed window is not."""
         if self.continuous:
             return None
-        return {"every_s": self.every_s, "for_s": self.for_s, "next_at": self.next_start(now)}
+        return {
+            "every_s": self.every_s,
+            "for_s": self.for_s,
+            "next_at": self.next_start(now),
+            "open": self._reader is not None,
+            "last_window_frames": self._last_frames,
+        }
 
     def close(self) -> None:
         if self._reader is not None:
             self._reader.stop()
+            self._last_frames = self._frames
         self._reader, self._window = None, None

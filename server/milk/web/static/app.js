@@ -179,28 +179,44 @@ function renderStatus(status) {
     setChip("chip-model", `Model: ${model}${where ? ` (${where})` : ""}`, worker.pipeline === "null" ? "warn" : "ok");
   }
   // The worker may read the stream in windows (MILK_SAMPLE_EVERY_S): between windows it is closed on purpose.
-  const waiting = betweenWindows(status);
-  if (waiting) {
-    setChip("chip-rate", `${Math.round(worker.sampling.every_s / 60)} phút/lượt`, "ok");
+  const sampling = samplingState(status);
+  if (sampling && sampling !== "live") {
+    const every = worker.sampling.every_s;
+    setChip("chip-rate", every >= 60 ? `${Math.round(every / 60)} phút/lượt` : `${every} giây/lượt`, "ok");
   } else if (worker.frames_last_minute !== undefined) {
     setChip("chip-rate", `${worker.frames_last_minute} khung/phút`, worker.frames_last_minute ? "ok" : "warn");
   }
+  const next = worker.sampling
+    ? new Date(worker.sampling.next_at * 1000).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
+    : "";
   if (!status.worker_ok) {
     setChip("chip-stream", "Bộ đếm không phản hồi", "bad");
   } else if (worker.connected) {
     const st = worker.stream || {};
     setChip("chip-stream", `Đang nhận luồng ${st.codec ? `(${st.codec.toUpperCase()} ${st.width}×${st.height})` : ""}`, "ok");
-  } else if (waiting) {
-    const next = new Date(worker.sampling.next_at * 1000).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+  } else if (sampling === "connecting") {
+    setChip("chip-stream", "Đang mở lượt đếm…", "ok");
+  } else if (sampling === "failing") {
+    setChip("chip-stream", "Lượt đếm đang mở nhưng không nhận được luồng", "bad");
+  } else if (sampling === "missed") {
+    setChip("chip-stream", `Lượt trước không nhận được khung nào · lượt kế tiếp ${next}`, "bad");
+  } else if (sampling === "waiting") {
     setChip("chip-stream", `Đếm theo nhịp · lượt kế tiếp ${next}`, "ok");
   } else {
     setChip("chip-stream", "Chưa có luồng từ camera", "bad");
   }
 }
 
-function betweenWindows(status) {
+// null when the worker counts continuously; otherwise where it is in its sampling cycle:
+// live (stream open), connecting (window just opened), failing (window open, stream error),
+// waiting (between windows, last window got frames) or missed (last window got no frame: an outage).
+function samplingState(status) {
   const worker = status.worker || {};
-  return Boolean(status.worker_ok && worker.sampling && !worker.connected);
+  const sampling = worker.sampling;
+  if (!status.worker_ok || !sampling) return null;
+  if (worker.connected) return "live";
+  if (sampling.open) return worker.last_error ? "failing" : "connecting";
+  return sampling.last_window_frames === 0 ? "missed" : "waiting";
 }
 
 async function liveLoop() {
@@ -224,8 +240,9 @@ async function statusLoop() {
       const s = await (await api("/api/status")).json();
       $("where").textContent = `${s.store_id} · ${s.camera_id}`;
       renderStatus(s);
-      // between sampling windows nobody reads the stream, so MediaMTX is not pulling the camera: that is expected
-      if (s.ingest && !s.ingest.ready && s.worker_ok && !betweenWindows(s)) setChip("chip-stream", "Chưa có luồng từ camera", "bad");
+      // With sampled counting MediaMTX pulls the camera only during a window; renderStatus already judged the
+      // stream from the worker's report, so this check is for continuous counting only.
+      if (s.ingest && !s.ingest.ready && s.worker_ok && !samplingState(s)) setChip("chip-stream", "Chưa có luồng từ camera", "bad");
     } catch (err) {
       console.warn(err);
     }
