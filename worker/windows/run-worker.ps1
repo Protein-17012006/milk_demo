@@ -51,7 +51,9 @@ Set-Location $server
 while ($true) {
     Write-WorkerLog ("{0:yyyy-MM-dd HH:mm:ss} [supervisor] starting the worker; ffmpeg from {1}" -f (Get-Date), $(if ($FfmpegDir) { $FfmpegDir } else { "PATH" }))
     # start /belownormal /wait keeps the priority low and waits; 2>&1 inside cmd keeps stderr out of PowerShell's error stream
+    # LanceDB warns once per look-up; milk-worker.service drops the same line with grep -v
     cmd /c "start `"`" /belownormal /b /wait `"$python`" -m milk.counter --env `"$envFile`" 2>&1" |
+        Where-Object { "$_" -notmatch "lance::dataset::scanner" } |
         ForEach-Object { Write-WorkerLog "$_" }
     Write-WorkerLog ("{0:yyyy-MM-dd HH:mm:ss} [supervisor] worker exited with code {1}; restarting in {2} s" -f (Get-Date), $LASTEXITCODE, $RestartSeconds)
     Start-Sleep -Seconds $RestartSeconds
