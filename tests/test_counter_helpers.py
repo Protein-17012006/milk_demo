@@ -1,6 +1,6 @@
 import numpy as np
 
-from milk.counter import encode_jpeg, normalise, roi_pixels
+from milk.counter import encode_jpeg, normalise, roi_pixels, status_payload
 from milk.cvoutput import Detection
 
 
@@ -26,3 +26,39 @@ def test_encode_jpeg_caps_the_width():
     jpeg, width, height = encode_jpeg(image, 80, max_width=1920)
     assert jpeg[:2] == b"\xff\xd8"
     assert (width, height) == (1920, 1080)
+
+
+class OpenStream:
+    connected = True
+    last_error = None
+    stream_info = {"codec": "h264", "width": 2560, "height": 1440}
+
+
+SAMPLING = {"every_s": 300.0, "for_s": 30.0, "next_at": 900.0}
+
+
+def test_status_between_windows_says_when_the_stream_opens_again():
+    p = status_payload("CAM-S01-A", None, "long+slide", "cuda", "huyhoang-gpu", True, 0, SAMPLING)
+    assert (p["connected"], p["stream"], p["last_error"]) == (False, {}, None)
+    assert p["sampling"] == SAMPLING
+    assert p["worker"] == "huyhoang-gpu" and p["frames_last_minute"] == 0
+
+
+def test_status_in_a_window_comes_from_the_reader():
+    p = status_payload("CAM-S01-A", OpenStream(), "long+slide", "cuda", "huyhoang-gpu", True, 42, SAMPLING)
+    assert p["connected"] is True and p["stream"]["codec"] == "h264" and p["frames_last_minute"] == 42
+
+
+def test_continuous_status_keeps_its_old_keys():
+    p = status_payload("CAM-S01-A", OpenStream(), "long", "cuda", "huyhoang-gpu", False, 10, None)
+    assert set(p) == {
+        "camera_id",
+        "connected",
+        "last_error",
+        "stream",
+        "pipeline",
+        "device",
+        "worker",
+        "blur",
+        "frames_last_minute",
+    }

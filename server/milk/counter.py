@@ -26,6 +26,7 @@ from . import config
 from .cvoutput import CaptureIdAllocator, Detection, build_capture, counts_of, persist_record
 from .pipeline import load_pipeline
 from .privacy import load_blurrer
+from .sampling import Sampler
 from .smoothing import CountSmoother
 from .stream import LatestFrameReader
 
@@ -60,6 +61,34 @@ def encode_jpeg(image: np.ndarray, quality: int, max_width: int | None = None) -
     if not ok:
         raise RuntimeError("JPEG encoding failed")
     return buf.tobytes(), image.shape[1], image.shape[0]
+
+
+def status_payload(
+    camera_id: str,
+    reader,
+    pipeline_name: str,
+    device: str,
+    worker: str,
+    blur: bool,
+    frames_last_minute: int,
+    sampling: dict | None,
+) -> dict:
+    """What the worker posts to /internal/status every 2 s. Between sampling windows there is no reader: the
+    stream is closed on purpose, and `sampling` tells the hub when it opens again."""
+    payload = {
+        "camera_id": camera_id,
+        "connected": bool(reader is not None and reader.connected),
+        "last_error": reader.last_error if reader is not None else None,
+        "stream": reader.stream_info if reader is not None else {},
+        "pipeline": pipeline_name,
+        "device": device,
+        "worker": worker,
+        "blur": blur,
+        "frames_last_minute": frames_last_minute,
+    }
+    if sampling is not None:
+        payload["sampling"] = sampling
+    return payload
 
 
 class HubClient:
@@ -103,10 +132,13 @@ def main(argv: list[str] | None = None) -> None:
     tz = timezone(timedelta(hours=s.utc_offset_hours))
     pipeline = load_pipeline(s.pipeline, s.models_dir)
     blurrer = load_blurrer(s.yunet_path, s.person_model, s.device, s.person_blur)
-    reader = LatestFrameReader(
-        s.stream_url, keyframes_only=(s.decode != "all"), ca_file=s.stream_ca_file, tls_name=s.stream_tls_name
+    sampler = Sampler(
+        s.sample_every_s,
+        s.sample_for_s,
+        lambda: LatestFrameReader(
+            s.stream_url, keyframes_only=(s.decode != "all"), ca_file=s.stream_ca_file, tls_name=s.stream_tls_name
+        ),
     )
-    reader.start()
     hub = HubClient(s.hub_url, s.internal_token)
     smoother = CountSmoother(s.smooth_window)
     ids = CaptureIdAllocator()
@@ -115,45 +147,61 @@ def main(argv: list[str] | None = None) -> None:
     min_gap = 1.0 / s.max_fps if s.max_fps > 0 else 0.0
     publish_gap = 1.0 / s.publish_fps if s.publish_fps > 0 else 0.0
     log.info(
-        "camera %s, pipeline %s on %s, blur %s, hub %s",
+        "camera %s, pipeline %s on %s, blur %s, hub %s, %s",
         s.camera_id,
         pipeline.name,
         device,
         "on" if blurrer else "OFF",
         s.hub_url,
+        "stream read continuously"
+        if sampler.continuous
+        else f"stream read for {s.sample_for_s:g} s every {s.sample_every_s:g} s",
     )
 
-    last_seq = 0
+    last_seq = window_frames = 0
     last_start = last_status = last_publish = last_persist = 0.0
     last_smoothed: dict | None = None
     done_at: deque[float] = deque(maxlen=1200)
 
+    def post_status(reader, now: float) -> None:
+        nonlocal last_status
+        if now - last_status < 2.0:
+            return
+        hub.post(
+            "/internal/status",
+            status_payload(
+                s.camera_id,
+                reader,
+                pipeline.name,
+                device,
+                worker_name,
+                blurrer is not None,
+                sum(1 for t in done_at if now - t <= 60),
+                sampler.describe(now),
+            ),
+        )
+        last_status = now
+
     while True:
+        now = time.time()
+        reader, opened = sampler.reader_at(now)
+        if opened:  # a new window: counts from the last one must not leak into this one
+            smoother.reset()
+            last_seq, window_frames, last_smoothed = 0, 0, None
+        if reader is None:  # between windows: the stream stays closed
+            post_status(None, now)
+            time.sleep(max(0.05, min(1.0, sampler.next_start(now) - now)))
+            continue
         if min_gap:
             wait = last_start + min_gap - time.time()
             if wait > 0:
                 time.sleep(wait)
         frame = reader.newer_than(last_seq, timeout=2.0)
-        now = time.time()
-        if now - last_status >= 2.0:
-            hub.post(
-                "/internal/status",
-                {
-                    "camera_id": s.camera_id,
-                    "connected": reader.connected,
-                    "last_error": reader.last_error,
-                    "stream": reader.stream_info,
-                    "pipeline": pipeline.name,
-                    "device": device,
-                    "worker": worker_name,
-                    "blur": blurrer is not None,
-                    "frames_last_minute": sum(1 for t in done_at if now - t <= 60),
-                },
-            )
-            last_status = now
+        post_status(reader, time.time())
         if frame is None:
             continue
         last_seq, last_start = frame.seq, time.time()
+        window_frames += 1
         try:
             image = frame.image
             height, width = image.shape[:2]
@@ -185,6 +233,8 @@ def main(argv: list[str] | None = None) -> None:
             since_persist = time.time() - last_persist
             publish = changed or since_publish >= publish_gap
             persist = since_persist >= s.persist_every_s or (changed and since_persist >= 2.0)
+            if not sampler.continuous and window_frames < s.smooth_window:
+                persist = False  # the first frames of a window are not smoothed yet
             if not (publish or persist):
                 continue
 

@@ -90,6 +90,28 @@ systemd của user, có giới hạn RAM và nice 10 như các job P05, P06. Fil
 
 ## Tiết kiệm băng thông
 
-Luồng từ hub về máy chạy worker tính phí ra internet của AWS (100 GB/tháng đầu miễn phí, khoảng
-2 GB mỗi giờ với luồng 4K 4–6 Mbps). Tắt worker khi không dùng; `MILK_MAX_FPS` và
-`MILK_PUBLISH_FPS` giới hạn số khung đếm và số lần gửi về dashboard mỗi giây.
+Hai chiều dữ liệu tốn tiền:
+- **Video từ hub về máy chạy worker:** AWS tính phí ra internet. 100 GB đầu mỗi tháng miễn phí, sau đó $0,12/GB.
+  Luồng 2560×1440 khoảng 2,5–3,2 GB mỗi giờ.
+- **Ảnh kết quả gửi lên hub qua CloudFront:** $0,06/GB, khoảng 1,6–3,8 GB mỗi giờ.
+
+`MILK_MAX_FPS` và `MILK_PUBLISH_FPS` giới hạn số khung đếm và số lần gửi về dashboard mỗi giây.
+
+### Đếm theo nhịp
+
+Website chỉ cần một lần đếm chính thức mỗi giờ, nên không cần đọc luồng liên tục:
+
+```
+MILK_SAMPLE_EVERY_S=300   # cứ 300 giây mở một lượt, ở các mốc 12:00, 12:05, ...
+MILK_SAMPLE_FOR_S=30      # mỗi lượt đọc luồng 30 giây rồi ngắt
+```
+
+- **Ngoài lượt:**
+  - Worker không mở luồng, nên MediaMTX trên hub cũng thôi kéo camera.
+  - Hai chiều dữ liệu trên giảm khoảng 90%.
+  - Worker vẫn gửi trạng thái mỗi 2 giây. Dashboard hub hiện "Đếm theo nhịp · lượt kế tiếp HH:MM".
+- **Trong lượt:**
+  - Bộ làm mượt bắt đầu lại từ đầu.
+  - Chỉ lưu khi đã đủ `MILK_SMOOTH_WINDOW` khung, nên mỗi lượt lưu khoảng 3–4 lần.
+- **Cần dashboard live** (ví dụ ngày demo): đặt `MILK_SAMPLE_EVERY_S=0` rồi khởi động lại worker. Bỏ trống thì cũng
+  là đếm liên tục.
