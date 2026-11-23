@@ -17,12 +17,12 @@ import { useSidebarSearch } from "@/components/layout/SidebarContext";
 import { useAuth } from "@/lib/auth";
 import {
   createApiClient,
-  resolveProductThumbnail,
   type ApiProduct,
   type ApiReviewQueueItem,
   type ApiStore,
 } from "@/lib/api";
 import { LIVE_REFRESH_MS } from "@/lib/config";
+import { productThumbnail } from "@/lib/product-thumbnail";
 import {
   ALL_STORES_LABEL,
   MILK_FLAG_THRESHOLD,
@@ -147,7 +147,7 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
     id: p.sku_id,
     name: p.sku_name,
     modelAlias: p.model_alias || p.sku_id,
-    thumbnail: resolveProductThumbnail(p.sku_name, p.brand),
+    thumbnail: productThumbnail(p.image_url),
     categories: [p.category || "Milk", p.subcategory || p.brand || "SKU"].filter(
       Boolean
     ),
