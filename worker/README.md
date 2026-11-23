@@ -1,12 +1,12 @@
-# Worker đếm trên GPU (máy long)
+# Worker đếm trên GPU
 
-Kiến trúc hybrid: AWS là hub (nhận luồng từ tiệm, dashboard, lưu trữ), còn việc đếm chạy
-trên GPU của máy long. Worker kéo luồng từ hub qua RTSPS, đếm, rồi gửi kết quả về hub qua
-HTTPS kèm token. Máy long **không mở cổng nào, không giữ key AWS, không lưu ảnh**: ảnh đã
-che mặt do hub lưu lên S3.
+Kiến trúc hybrid: AWS là hub (nhận luồng từ tiệm, dashboard, lưu trữ), còn việc đếm chạy trên GPU của một máy
+trong team. Từ 23/11/2026 đó là máy HUYHOANG (Windows, xem mục "Chạy trên Windows"); trước đó là máy long
+(Linux, systemd). Worker kéo luồng từ hub qua RTSPS, đếm, rồi gửi kết quả về hub qua HTTPS kèm token. Máy chạy
+worker **không mở cổng nào, không giữ key AWS, không lưu ảnh**: ảnh đã che mặt do hub lưu lên S3.
 
 ```
-camera -> relay tại tiệm -> hub AWS (MediaMTX) --RTSPS--> worker máy long (GPU)
+camera -> relay tại tiệm -> hub AWS (MediaMTX) --RTSPS--> worker trên máy GPU
                                    ^                            |
                                    +------ HTTPS + token -------+  (kết quả, ảnh đã che mặt)
 ```
@@ -58,6 +58,18 @@ Không đặt thì worker tự ghép `MILK_PIPELINE` với tên thư mục chứ
   được đọc file (đặt bằng `icacls`).
 - **ffmpeg**: cài bằng `winget install --id Gyan.FFmpeg -e`. Script chạy nền tự tìm ffmpeg, vì PATH của
   `SYSTEM` không có thư mục của winget.
+- **Chứng chỉ của hub**: hub dùng chứng chỉ TLS tự ký (`CN=milk-demo-ingest`), và ffmpeg 9 trên Windows từ chối
+  chứng chỉ đó (log báo `Peer certificate failed verification`). Lấy chứng chỉ ngay trên hub bằng
+  `.\infra\remote-run.ps1 "cat /etc/mediamtx/server.crt"`, lưu thành `C:\Users\huyho\Datagent\hub-ingest.crt`, rồi
+  thêm hai dòng vào `worker.env`:
+
+  ```
+  MILK_STREAM_CA_FILE=C:/Users/huyho/Datagent/hub-ingest.crt
+  MILK_STREAM_TLS_NAME=milk-demo-ingest
+  ```
+
+  Worker vẫn kiểm chứng chỉ, nhưng chỉ tin đúng chứng chỉ của hub. Dựng lại hub là sinh chứng chỉ mới, nên phải
+  chép lại file này.
 - **Đăng ký chạy nền** (một lần, PowerShell quyền admin):
   `powershell -ExecutionPolicy Bypass -File worker\windows\register-task.ps1 -Root C:\Users\huyho\Datagent`.
   Lệnh này tạo task `milk-worker`:
@@ -66,6 +78,9 @@ Không đặt thì worker tự ghép `MILK_PIPELINE` với tên thư mục chứ
   - Log ở `logs\worker-YYYY-MM-DD.log`, giữ 14 ngày.
 - **Bật và tắt**: `Start-ScheduledTask milk-worker` và `Stop-ScheduledTask milk-worker`. Trước khi bật, phải tắt
   worker ở máy khác đang đếm cùng camera.
+- **Nạp torch trước**: trên Windows, gói `milk` nạp torch trước mọi thư viện native khác. Nếu ssl và cv2 nạp trước
+  torch thì pyarrow (lancedb dùng) làm tiến trình chết với lỗi 0xC0000005. Chi tiết ở `server/milk/torch_first.py`.
+  Sau mỗi lần nâng torch hoặc pyarrow, chạy `python -m pytest tests/test_torch_first.py` trên máy đó.
 
 ## Chạy nền
 
@@ -75,6 +90,6 @@ systemd của user, có giới hạn RAM và nice 10 như các job P05, P06. Fil
 
 ## Tiết kiệm băng thông
 
-Luồng từ hub về máy long tính phí ra internet của AWS (100 GB/tháng đầu miễn phí, khoảng
+Luồng từ hub về máy chạy worker tính phí ra internet của AWS (100 GB/tháng đầu miễn phí, khoảng
 2 GB mỗi giờ với luồng 4K 4–6 Mbps). Tắt worker khi không dùng; `MILK_MAX_FPS` và
 `MILK_PUBLISH_FPS` giới hạn số khung đếm và số lần gửi về dashboard mỗi giây.

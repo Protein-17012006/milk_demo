@@ -70,3 +70,14 @@ def test_environment_and_version_come_from_the_pipeline(monkeypatch):
     monkeypatch.setenv("MILK_VERSION", "1d58130")
     s = config.load()
     assert (s.environment, s.version) == ("staging", "1d58130")
+
+
+def test_stream_certificate_settings(monkeypatch):
+    monkeypatch.delenv("MILK_STREAM_CA_FILE", raising=False)
+    monkeypatch.delenv("MILK_STREAM_TLS_NAME", raising=False)
+    s = config.load()
+    assert (s.stream_ca_file, s.stream_tls_name) == (None, None)
+    monkeypatch.setenv("MILK_STREAM_CA_FILE", "C:/Users/huyho/Datagent/hub-ingest.crt")
+    monkeypatch.setenv("MILK_STREAM_TLS_NAME", "milk-demo-ingest")
+    s = config.load()
+    assert (s.stream_ca_file, s.stream_tls_name) == ("C:/Users/huyho/Datagent/hub-ingest.crt", "milk-demo-ingest")
