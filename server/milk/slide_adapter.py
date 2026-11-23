@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from .cvoutput import Detection
+from .pipeline import dedupe
 
 DEFAULT_WEIGHTS = "~/Desktop/Datagent/slide_pilot/runs_v3/best.pt"
 SKUS = Path(__file__).with_name("skus.json")
@@ -33,13 +34,14 @@ def product_names() -> dict[str, str]:
 
 
 def to_detections(classes, scores, boxes_xyxy, names: dict[int, str], product: dict[str, str]) -> list[Detection]:
-    """YOLO output (class index, score, x0 y0 x1 y1) as Detections with x, y, width, height boxes."""
+    """YOLO output (class index, score, x0 y0 x1 y1) as Detections with x, y, width, height boxes, one per can:
+    the model's repeated boxes for one can are dropped (pipeline.dedupe)."""
     out = []
     for c, s, b in zip(classes, scores, boxes_xyxy):
         label = names[int(c)]
         x0, y0, x1, y1 = (float(v) for v in b)
         out.append(Detection(label, product.get(label, label), float(s), (x0, y0, x1 - x0, y1 - y0)))
-    return out
+    return dedupe(out)
 
 
 class SlidePipeline:

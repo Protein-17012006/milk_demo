@@ -14,6 +14,8 @@ import numpy as np
 from .cvoutput import Detection
 
 OVERLAP = 0.5  # a box of an earlier model that covers this much of a later model's box is the same object
+DUPLICATE = 0.5  # two boxes of one model with this IoU or more are one object: on the store frames of 23/11
+#                  repeated boxes had IoU 0.6-1.0 and neighbouring cans 0.25 or less
 
 
 class Pipeline(Protocol):
@@ -35,6 +37,25 @@ def _shared(a: tuple, b: tuple) -> float:
     iy = max(0.0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
     smaller = min(a[2] * a[3], b[2] * b[3])
     return ix * iy / smaller if smaller > 0 else 0.0
+
+
+def _iou(a: tuple, b: tuple) -> float:
+    """Intersection over union of two x, y, w, h boxes."""
+    ix = max(0.0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = a[2] * a[3] + b[2] * b[3] - inter
+    return inter / union if union > 0 else 0.0
+
+
+def dedupe(dets: list[Detection]) -> list[Detection]:
+    """One detection per object from one model: where boxes overlap by DUPLICATE or more, the most confident
+    one stays, whatever its class. The Slide model can return one can twice, as one flavour or as two."""
+    kept: list[Detection] = []
+    for d in sorted(dets, key=lambda d: d.confidence, reverse=True):
+        if all(_iou(d.box, k.box) < DUPLICATE for k in kept):
+            kept.append(d)
+    return [d for d in dets if any(d is k for k in kept)]
 
 
 def merge(first: list[Detection], later: list[Detection]) -> list[Detection]:

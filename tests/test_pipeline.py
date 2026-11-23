@@ -61,6 +61,27 @@ def test_to_detections_turns_corners_into_width_and_height():
     assert out == [Detection("hot160", "Slide Hot & Spicy 160g", 0.87, (10.0, 20.0, 60.0, 160.0))]
 
 
+def test_to_detections_keeps_one_box_for_a_can_found_as_two_flavours():
+    # store frame 23/11 12:57:45: one can came back as hot160 and as original145 on the same box
+    names = {0: "original145", 3: "hot160"}
+    out = to_detections([3.0, 0.0], [0.61, 0.87], [[947, 326, 1021, 492], [947, 326, 1021, 491]], names, {})
+    assert out == [Detection("original145", "original145", 0.87, (947.0, 326.0, 74.0, 165.0))]
+
+
+def test_to_detections_keeps_one_box_for_a_can_found_twice():
+    # store frame 23/11 12:56:54: one lid came back twice as cheese145, one pixel apart
+    names = {2: "cheese145"}
+    out = to_detections([2.0, 2.0], [0.80, 0.85], [[957, 210, 1026, 256], [957, 210, 1026, 257]], names, {})
+    assert out == [Detection("cheese145", "cheese145", 0.85, (957.0, 210.0, 69.0, 47.0))]
+
+
+def test_to_detections_keeps_neighbouring_cans():
+    # two cans side by side: 20 of 60 px wide shared, IoU 0.2, as close as neighbours got on 23/11
+    names = {1: "sourcream150"}
+    out = to_detections([1.0, 1.0], [0.9, 0.8], [[100, 100, 160, 250], [140, 100, 200, 250]], names, {})
+    assert [d.box for d in out] == [(100.0, 100.0, 60.0, 150.0), (140.0, 100.0, 60.0, 150.0)]
+
+
 def test_every_slide_class_has_a_product_name():
     product = product_names()
     for label in ("original145", "sourcream150", "cheese145", "hot160"):
