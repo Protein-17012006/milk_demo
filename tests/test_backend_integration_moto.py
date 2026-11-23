@@ -824,3 +824,141 @@ def test_shelf_plan_of_an_unknown_store_is_not_found(monkeypatch: pytest.MonkeyP
     api, _ = _backend(monkeypatch)
     status, body = _call(api, "GET", "/v1/stores/NOPE/shelf-plan")
     assert (status, body["error"]) == (404, "STORE_NOT_FOUND")
+
+
+NOW = "2026-11-28T12:00:00+07:00"
+
+
+def _put_shelf(key: str, **fields) -> None:
+    _table("test-shelf").put_item(Item={"store_id": "DEMO-S01", "key": key, **fields})
+
+
+def _rollup_item(checks: int, available: int, restock_units: int, units_sum: int = 0, max_total: int = 0) -> dict:
+    """An hour# or day# rollup in which only Slide Cheese was expected."""
+    sku = {
+        "checks": checks,
+        "available": available,
+        "units_sum": units_sum,
+        "oos_started": 0,
+        "restock_units": restock_units,
+        "restock_events": 1 if restock_units else 0,
+    }
+    return {"checks": checks, "max_total": max_total, "confident_skus": [CHEESE], "skus": {CHEESE: sku}}
+
+
+def _kpi(api, **query) -> dict:
+    status, body = _call(api, "GET", "/v1/kpi", groups="datagent", query=query)
+    assert status == 200
+    return body
+
+
+@mock_aws
+def test_kpi_osa_and_restock_rate_against_the_previous_period(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, NOW)
+    _shelf_plan()
+    _put_shelf("day#20261127", **_rollup_item(100, 64, 201))  # inside the last 14 days (15/11-28/11)
+    _put_shelf("day#20261110", **_rollup_item(100, 60, 150))  # inside the 14 days before (01/11-14/11)
+    kpi = _kpi(api, days="14")
+    assert (kpi["osa"]["value"], kpi["osa"]["previous"], kpi["osa"]["blocked_reason"]) == (0.64, 0.6, None)
+    r = kpi["restock_rate"]
+    assert (r["units_per_day"], r["previous_units_per_day"], r["change_pct"], r["blocked_reason"]) == (
+        14.4,
+        10.7,
+        34.0,
+        None,
+    )
+
+
+@mock_aws
+def test_a_store_without_hours_is_blocked_not_zero(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, NOW)
+    _put_shelf("day#20261127", **_rollup_item(100, 64, 201))
+    kpi = _kpi(api)
+    assert (kpi["osa"]["value"], kpi["osa"]["blocked_reason"]) == (None, "no_hours")
+    assert kpi["restock_rate"]["blocked_reason"] == "no_hours" and kpi["oos_now"]["blocked_reason"] == "no_hours"
+    assert "total_on_shelf_units" in kpi and "captures_count" in kpi
+
+
+@mock_aws
+def test_oos_now_counts_expected_skus_out_of_stock(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, NOW)
+    _shelf_plan(expected=(CHEESE, HOT))
+    skus = {CHEESE: {"status": "OOS"}, HOT: {"status": "IN_STOCK"}, TH_SWEET: {"status": "OOS"}}  # TH not expected
+    _put_shelf("state", last_bucket="20261128-1150", skus=skus)
+    oos = _kpi(api)["oos_now"]
+    assert (oos["count"], oos["as_of"], oos["blocked_reason"]) == (1, "20261128-1150", None)
+
+
+@mock_aws
+def test_top_50_accuracy_needs_labelled_frames(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _at(api, monkeypatch, NOW)
+    top = _kpi(api)["top_50_sku_accuracy"]
+    assert (top["value"], top["n_frames"], top["blocked_reason"]) == (None, 0, "no_labels")
+    _one_pending_audit(ingest)
+    verdicts = [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}]
+    assert _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body={"verdicts": verdicts, "missed": []})[0] == 200
+    top = _kpi(api)["top_50_sku_accuracy"]
+    assert (top["value"], top["n_frames"], top["blocked_reason"]) == (1.0, 1, None)
+    assert top["scope_note"] == "All SKUs: Datagent has not sent a top-50 list yet"
+
+
+@mock_aws
+def test_trends_per_day_and_per_hour(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, NOW)
+    _shelf_plan()
+    _put_shelf("day#20261127", **_rollup_item(10, 8, 6, units_sum=40))
+    _put_shelf("hour#20261128-09", **_rollup_item(4, 4, 2, units_sum=12))
+    status, body = _call(
+        api, "GET", "/v1/reports/trends", groups="datagent", query={"metric": "restock_volume", "days": "7"}
+    )
+    assert status == 200 and [p["t"] for p in body["points"]] == [f"2026-11-{d}" for d in range(22, 29)]
+    assert {p["t"]: p["value"] for p in body["points"]} == {
+        **{f"2026-11-{d}": None for d in range(22, 29)},
+        "2026-11-27": 6,
+    }
+    body = _call(api, "GET", "/v1/reports/trends", groups="datagent", query={"metric": "total_stock", "days": "1"})[1]
+    assert [p["t"] for p in body["points"]] == [f"20261128-{h:02d}" for h in range(13)]
+    assert {p["t"]: p["value"] for p in body["points"]}["20261128-09"] == 3.0
+
+
+@mock_aws
+def test_shelf_events_filter_by_kind_and_category(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, NOW)
+    for at, sku, kind, delta in [
+        ("20261128-1000", CHEESE, "OOS", -5),
+        ("20261128-1100", CHEESE, "RESTOCKED", 6),
+        ("20261128-1105", TH_SWEET, "LOW_STOCK", -3),
+    ]:
+        item = {"type": kind, "sku_id": sku, "at": at, "delta": delta, "level_before": 5, "level_after": 5 + delta}
+        _table("test-shelf-events").put_item(Item={"store_id": "DEMO-S01", "event_key": f"{at}#{sku}#{kind}", **item})
+
+    def kinds(**query):
+        return [
+            (i["sku_id"], i["type"]) for i in _call(api, "GET", "/v1/shelf-events", "datagent", query=query)[1]["items"]
+        ]
+
+    assert kinds() == [(TH_SWEET, "LOW_STOCK"), (CHEESE, "RESTOCKED"), (CHEESE, "OOS")]
+    assert kinds(kind="alerts") == [(TH_SWEET, "LOW_STOCK"), (CHEESE, "OOS")]
+    assert kinds(kind="restocked") == [(CHEESE, "RESTOCKED")]
+    assert kinds(category="Milk") == [(TH_SWEET, "LOW_STOCK")]
+    first = _call(api, "GET", "/v1/shelf-events", "datagent", query={"limit": "2"})[1]
+    assert len(first["items"]) == 2 and first["next_cursor"]
+    assert (first["items"][0]["store_name"], first["items"][0]["sku_name"]) == ("Demo Store S01", TH_SWEET)
+    rest = _call(api, "GET", "/v1/shelf-events", "datagent", query={"limit": "2", "cursor": first["next_cursor"]})[1]
+    assert [i["type"] for i in rest["items"]] == ["OOS"] and rest["next_cursor"] is None
+
+
+@mock_aws
+def test_series_reads_day_rollups(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, NOW)
+    _put_shelf("day#20261127", **_rollup_item(2, 2, 0, units_sum=8, max_total=7))
+    status, body = _call(api, "GET", "/v1/reports/series", groups="datagent")
+    assert status == 200
+    assert body["series"] == [{"date": "2026-11-27", "avg_units": 4.0, "max_units": 7, "checks": 2}]
