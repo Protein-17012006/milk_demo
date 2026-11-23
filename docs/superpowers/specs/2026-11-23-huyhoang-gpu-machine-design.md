@@ -63,13 +63,19 @@ Ngày 2026-11-23 · hoang chọn phạm vi và cách dựng trong chat · nối 
 | `worker.env` | chép từ máy long, đổi 4 đường dẫn, `MILK_WORKER_NAME=huyhoang-gpu`. Chỉ `SYSTEM` và `huyho` được đọc | — |
 | `.venv\`, `logs\` | dựng mới | — |
 
-### 2. Chép từ máy long
+### 2. Chép từ máy long (hoang duyệt 23/11: chép thẳng, không qua laptop)
 
-- Laptop nối thẳng được tới máy long, còn HUYHOANG thì phải đi qua relay của Tailscale. Laptop và HUYHOANG cùng
-  mạng LAN. Vì vậy dữ liệu đi theo đường: máy long → `tar` qua ssh → laptop (scratchpad) → `scp` qua LAN →
-  HUYHOANG → giải nén.
-- Máy long tính `sha256` cho từng file trước khi gửi. HUYHOANG kiểm lại sau khi giải nén. Sai một file thì
-  chép lại file đó.
+- **Đóng gói:** trên máy long, mỗi nhóm ở bảng trên thành một file `.tar` trong `~/transfer-huyhoang/`, kèm file
+  `SHA256SUMS`. Không đưa `worker.env` vào các gói này.
+- **Máy chủ tạm:** máy long chạy `python3 -m http.server`, chỉ nghe trên IP Tailscale của nó; đường Tailscale đã
+  được mã hoá.
+- **Tải về:** HUYHOANG tải bằng `curl -C -` (tải tiếp được khi đứt), kiểm `sha256`, rồi giải nén bằng `tar`.
+- **Không thêm khoá SSH:** cách này không cần thêm khoá SSH vào máy nào.
+- **Đã thử 23/11:** 4 MB tải về với HTTP 200, khoảng 0,6 MB/s, sha256 khớp. Tốc độ bằng khi đi qua laptop, nên
+  chỗ nghẽn là đường upload ở chỗ máy long.
+- **`worker.env`** (khoảng 1 KB, có mật khẩu luồng và token hub) không đi qua máy chủ HTTP. Nó được ghi sang
+  HUYHOANG qua ống ssh, không chạm đĩa và không hiện ra màn hình.
+- **Dọn dẹp:** chép xong thì tắt máy chủ và xoá `~/transfer-huyhoang/`.
 
 ### 3. Môi trường
 
