@@ -11,7 +11,9 @@ import {
   type ApiModelSummary,
 } from "@/lib/api";
 import { KPI_ORDER, kpiDisplay, pct, type Tone } from "@/lib/model-ui";
+import type { HealthMetric } from "@/lib/health-ui";
 import { AuditLabeler } from "./AuditLabeler";
+import { LiveHealth } from "./LiveHealth";
 
 const RANGES: { days: number; label: string }[] = [
   { days: 7, label: "Last 7 days" },
@@ -20,17 +22,6 @@ const RANGES: { days: number; label: string }[] = [
 ];
 const TONE: Record<Tone, string> = { met: "#15803D", missed: "#B91C1C", none: "#6B7280" };
 const CARD = "rounded-[18px] border border-[#EFF0F6] bg-white";
-
-type HealthMetric = "conf_median" | "flagged_row_pct" | "jitter" | "processing_ms_median" | "captures";
-const HEALTH_METRICS: { key: HealthMetric; label: string; percent?: boolean }[] = [
-  { key: "conf_median", label: "Median confidence" },
-  { key: "flagged_row_pct", label: "Flagged rows", percent: true },
-  { key: "jitter", label: "Count jumps" },
-  { key: "processing_ms_median", label: "ms per frame" },
-  { key: "captures", label: "Captures per hour" },
-];
-
-const hourLabel = (hour: string) => `${hour.slice(6, 8)}/${hour.slice(4, 6)} ${hour.slice(9, 11)}h`;
 
 /**
  * The Model page: Datagent's 12 KPIs from frames the team labelled, errors per SKU, the confusion matrix, the
@@ -283,53 +274,7 @@ export function ModelQualityView() {
         )}
       </section>
 
-      <section className={`${CARD} mt-4 p-4`}>
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-[15px] font-semibold text-black">Live health (7 days, no labels needed)</h2>
-          <div className="flex flex-wrap gap-1">
-            {HEALTH_METRICS.map((m) => (
-              <button
-                key={m.key}
-                type="button"
-                onClick={() => setHealthMetric(m.key)}
-                className={`rounded-[6px] px-2 py-1 text-[12px] cursor-pointer ${healthMetric === m.key ? "bg-[#111827] text-white" : "text-black/70 hover:bg-black/5"}`}
-              >
-                {m.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        {!health || health.length === 0 ? (
-          <p className="text-[13px] text-[#6B7280]">—</p>
-        ) : (
-          <>
-            <p data-health-totals className="mb-2 text-[12px] text-[#6B7280]">
-              {health.reduce((s, h) => s + h.captures, 0)} captures in {health.length} camera-hours · duplicate boxes
-              in the latest hour ({hourLabel(health[health.length - 1].hour)}):{" "}
-              {health[health.length - 1].duplicate_pairs ?? 0} (should be 0) · versions{" "}
-              {[...new Set(health.flatMap((h) => h.model_versions ?? []))].join(", ")}
-            </p>
-            <div className="h-[220px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart
-                  data={health.map((h) => {
-                    const raw = h[healthMetric];
-                    const percent = HEALTH_METRICS.find((m) => m.key === healthMetric)?.percent;
-                    return { hour: hourLabel(h.hour), value: raw === undefined ? null : percent ? raw * 100 : raw };
-                  })}
-                  margin={{ top: 8, right: 16, left: 0, bottom: 0 }}
-                >
-                  <CartesianGrid stroke="#EFF0F6" />
-                  <XAxis dataKey="hour" tick={{ fontSize: 11 }} minTickGap={24} />
-                  <YAxis tick={{ fontSize: 11 }} />
-                  <Tooltip formatter={(v) => (typeof v === "number" ? v.toFixed(2) : String(v))} />
-                  <Line type="monotone" dataKey="value" stroke="#EE730A" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </>
-        )}
-      </section>
+      <LiveHealth health={health} metric={healthMetric} onMetricChange={setHealthMetric} />
 
       {labelling && (
         <AuditLabeler auditIds={labelling} onClose={() => setLabelling(null)} onChanged={() => setReloadKey((k) => k + 1)} />
