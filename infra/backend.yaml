@@ -263,6 +263,53 @@ Resources:
         - AttributeName: user_sub
           KeyType: HASH
 
+  # Model page (spec 2026-11-23): frames the team labels, kept with no expiry
+  AuditsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain  # human labels cannot be recreated
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "milk-backend-${Env}-audits"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: store_id
+          AttributeType: S
+        - AttributeName: audit_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: store_id
+          KeyType: HASH
+        - AttributeName: audit_id
+          KeyType: RANGE
+
+  # Model page: one health item per camera-hour, kept 90 days
+  ModelHealthTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "milk-backend-${Env}-model-health"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: camera_id
+          AttributeType: S
+        - AttributeName: hour
+          AttributeType: S
+      KeySchema:
+        - AttributeName: camera_id
+          KeyType: HASH
+        - AttributeName: hour
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
   # =========================================================================
   # 3. PRIVATE S3 ANALYTICS BUCKET + GLUE CATALOG + ATHENA WORKGROUP
   # =========================================================================
@@ -510,6 +557,8 @@ Resources:
                   - !GetAtt StoreListTable.Arn
                   - !GetAtt CorrectionsTable.Arn
                   - !GetAtt UserPrefsTable.Arn
+                  - !GetAtt AuditsTable.Arn
+                  - !GetAtt ModelHealthTable.Arn
               - Effect: Allow
                 Action:
                   - dynamodb:Scan
@@ -561,6 +610,8 @@ Resources:
           STORE_LIST_TABLE: !Ref StoreListTable
           CORRECTIONS_TABLE: !Ref CorrectionsTable
           USER_PREFS_TABLE: !Ref UserPrefsTable
+          AUDITS_TABLE: !Ref AuditsTable
+          MODEL_HEALTH_TABLE: !Ref ModelHealthTable
           ANALYTICS_BUCKET: !Ref AnalyticsBucket
           HUB_BUCKET: !Ref HubDataBucket
           ALLOWED_ORIGINS: !Ref AllowedOrigins
@@ -582,6 +633,8 @@ Resources:
           CAPTURES_TABLE: !Ref CapturesTable
           LATEST_STOCK_TABLE: !Ref LatestStockTable
           REVIEW_QUEUE_TABLE: !Ref ReviewQueueTable
+          AUDITS_TABLE: !Ref AuditsTable
+          MODEL_HEALTH_TABLE: !Ref ModelHealthTable
           ANALYTICS_BUCKET: !Ref AnalyticsBucket
           CAPTURE_TTL_DAYS: "7"
 

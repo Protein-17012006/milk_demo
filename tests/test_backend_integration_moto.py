@@ -54,6 +54,8 @@ def _create_mock_infra(region: str = "ap-southeast-1"):
         ("test-store-list", "store_id", None),
         ("test-corrections", "store_id", "correction_id"),
         ("test-user-prefs", "user_sub", None),
+        ("test-audits", "store_id", "audit_id"),
+        ("test-model-health", "camera_id", "hour"),
     ]
     for name, pk, sk in tables:
         key_schema = [{"AttributeName": pk, "KeyType": "HASH"}]
@@ -69,10 +71,8 @@ def _create_mock_infra(region: str = "ap-southeast-1"):
         )
 
     s3 = boto3.client("s3", region_name=region)
-    s3.create_bucket(
-        Bucket="test-analytics-bucket",
-        CreateBucketConfiguration={"LocationConstraint": region},
-    )
+    for bucket in ("test-analytics-bucket", "test-hub-bucket"):
+        s3.create_bucket(Bucket=bucket, CreateBucketConfiguration={"LocationConstraint": region})
 
 
 TH_SWEET = "TH true MILK Sữa Tươi Tiệt Trùng Có Đường 180ml"  # official name of TMP-MLK-TH-01
@@ -92,8 +92,10 @@ def _backend(monkeypatch: pytest.MonkeyPatch):
         "STORE_LIST_TABLE": "test-store-list",
         "CORRECTIONS_TABLE": "test-corrections",
         "USER_PREFS_TABLE": "test-user-prefs",
+        "AUDITS_TABLE": "test-audits",
+        "MODEL_HEALTH_TABLE": "test-model-health",
         "ANALYTICS_BUCKET": "test-analytics-bucket",
-        "HUB_BUCKET": "test-analytics-bucket",
+        "HUB_BUCKET": "test-hub-bucket",
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)
