@@ -209,12 +209,12 @@ export interface ApiShelfPlan {
   updated_at: string | null;
 }
 
-/** One day of GET /reports/series: units found per capture, from the backend captures table. */
+/** One day of GET /reports/series: units of the expected SKUs per counted check, from the day rollups. */
 export interface ApiReportsSeriesPoint {
   date: string; // YYYY-MM-DD (UTC+7)
   avg_units: number;
   max_units: number;
-  captures: number;
+  checks: number;
 }
 
 export interface ApiReportsSeriesResponse {
