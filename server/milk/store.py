@@ -3,6 +3,7 @@
 The counting loop never waits on AWS: if the queue is full, the capture is dropped and
 logged, and the dashboard keeps running.
 """
+
 from __future__ import annotations
 
 import json
@@ -60,18 +61,24 @@ class Persistence(threading.Thread):
             Body=body,
             ContentType="application/json",
         )
-        self._table.put_item(Item={
-            "camera_id": record["camera_id"],
-            "capture_id": record["capture_id"],
-            "capture_timestamp": record["capture_timestamp"],
-            "store_id": record["store_id"],
-            "image_key": image_key,
-            "processing_time_ms": int(record["processing_time_ms"]),
-            "latency_ms": int(record["latency_ms"]),
-            "units_found": int(record["units_found"]),
-            "flagged_rows": int(record["flagged_rows"]),
-            "counts": {k: int(v) for k, v in record["counts"].items()},
-            "rows_json": json.dumps(record["rows"], ensure_ascii=False),
-            "log_json": json.dumps(record["log"], ensure_ascii=False),
-            "expires_at": int(time.time()) + RETENTION_DAYS * 86400,
-        })
+        self._table.put_item(Item=table_item(record, image_key, int(time.time()) + RETENTION_DAYS * 86400))
+
+
+def table_item(record: dict, image_key: str, expires_at: int) -> dict:
+    """The DynamoDB row of one capture. The S3 result file holds the same record, so
+    milk.reindex can rebuild the table from the bucket."""
+    return {
+        "camera_id": record["camera_id"],
+        "capture_id": record["capture_id"],
+        "capture_timestamp": record["capture_timestamp"],
+        "store_id": record["store_id"],
+        "image_key": image_key,
+        "processing_time_ms": int(record["processing_time_ms"]),
+        "latency_ms": int(record["latency_ms"]),
+        "units_found": int(record["units_found"]),
+        "flagged_rows": int(record["flagged_rows"]),
+        "counts": {k: int(v) for k, v in record["counts"].items()},
+        "rows_json": json.dumps(record["rows"], ensure_ascii=False),
+        "log_json": json.dumps(record["log"], ensure_ascii=False),
+        "expires_at": expires_at,
+    }

@@ -1,4 +1,5 @@
 """Hourly model health computed from the captures the backend keeps (spec section 6)."""
+
 from __future__ import annotations
 
 import sys
@@ -8,13 +9,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from model_health import capture_boxes, hour_stats  # noqa: E402
 
-NEW = {"capture_timestamp": "2026-11-23T13:30:00+07:00", "units_found": 3, "processing_time_ms": 20,
-       "latency_ms": 100, "model_version": "v3", "flagged_rows": 1,
-       "rows_json": '[{"sku_id": "Slide Cheese 145g", "model_alias": "cheese145", "unit_count": 2, "confidence_score": 0.8, "bounding_box": [[0,0,10,10],[0,0,10,10]], "is_flagged": false}, {"sku_id": null, "model_alias": "", "unit_count": 1, "confidence_score": 0.3, "bounding_box": [[50,0,10,10]], "is_flagged": true}]',
-       "detections_json": '[{"sku_id": "cheese145", "conf": 0.9, "box": [0,0,10,10]}, {"sku_id": "cheese145", "conf": 0.7, "box": [0,0,10,10]}, {"sku_id": null, "conf": 0.3, "box": [50,0,10,10]}]'}
-OLD = {"capture_timestamp": "2026-11-23T13:30:10+07:00", "units_found": 1, "processing_time_ms": 40,
-       "latency_ms": 200, "flagged_rows": 0,
-       "rows_json": '[{"sku_id": "Slide Cheese 145g", "model_alias": "cheese145", "unit_count": 1, "confidence_score": 0.6, "bounding_box": [[0,0,10,10]], "is_flagged": false}]'}
+NEW = {
+    "capture_timestamp": "2026-11-23T13:30:00+07:00",
+    "units_found": 3,
+    "processing_time_ms": 20,
+    "latency_ms": 100,
+    "model_version": "v3",
+    "flagged_rows": 1,
+    "rows_json": '[{"sku_id": "Slide Cheese 145g", "model_alias": "cheese145", "unit_count": 2, "confidence_score": 0.8, "bounding_box": [[0,0,10,10],[0,0,10,10]], "is_flagged": false}, {"sku_id": null, "model_alias": "", "unit_count": 1, "confidence_score": 0.3, "bounding_box": [[50,0,10,10]], "is_flagged": true}]',
+    "detections_json": '[{"sku_id": "cheese145", "conf": 0.9, "box": [0,0,10,10]}, {"sku_id": "cheese145", "conf": 0.7, "box": [0,0,10,10]}, {"sku_id": null, "conf": 0.3, "box": [50,0,10,10]}]',
+}
+OLD = {
+    "capture_timestamp": "2026-11-23T13:30:10+07:00",
+    "units_found": 1,
+    "processing_time_ms": 40,
+    "latency_ms": 200,
+    "flagged_rows": 0,
+    "rows_json": '[{"sku_id": "Slide Cheese 145g", "model_alias": "cheese145", "unit_count": 1, "confidence_score": 0.6, "bounding_box": [[0,0,10,10]], "is_flagged": false}]',
+}
 
 
 def test_old_record_boxes_come_from_rows():

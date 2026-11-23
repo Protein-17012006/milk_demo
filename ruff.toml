@@ -1,0 +1,17 @@
+# Lint and format rules for CI (the `lint` check runs `ruff check` and `ruff format --check`).
+line-length = 120
+target-version = "py312"
+extend-exclude = [".venv", "venv"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+  "E501",  # the formatter wraps code; what is left is long strings and comments
+  "B008",  # FastAPI-style defaults
+]
+
+[lint.isort]
+known-first-party = ["milk"]
+
+[lint.per-file-ignores]
+"tests/*" = ["E402"]  # test_web sets the environment before importing the app

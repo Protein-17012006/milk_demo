@@ -1,0 +1,247 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Identity",
+      "Effect": "Allow",
+      "Action": [
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PipelineStacksOnly",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:*"
+      ],
+      "Resource": [
+        "arn:aws:cloudformation:ap-southeast-1:*:stack/milk-platform/*",
+        "arn:aws:cloudformation:ap-southeast-1:*:stack/milk-development/*",
+        "arn:aws:cloudformation:ap-southeast-1:*:stack/milk-test/*",
+        "arn:aws:cloudformation:ap-southeast-1:*:stack/milk-staging/*",
+        "arn:aws:cloudformation:ap-southeast-1:*:stack/milk-production/*",
+        "arn:aws:cloudformation:ap-southeast-1:*:changeSet/*/*"
+      ]
+    },
+    {
+      "Sid": "CloudFormationReadAndValidate",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:ValidateTemplate",
+        "cloudformation:GetTemplateSummary",
+        "cloudformation:ListStacks",
+        "cloudformation:ListExports"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ImageRepository",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:*"
+      ],
+      "Resource": "arn:aws:ecr:ap-southeast-1:*:repository/milk"
+    },
+    {
+      "Sid": "EcrLogin",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EcsTasksServicesClusters",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NetworkAndLoadBalancer",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "ec2:GetSecurityGroupsForVpc",
+        "ec2:CreateVpc",
+        "ec2:DeleteVpc",
+        "ec2:ModifyVpcAttribute",
+        "ec2:CreateSubnet",
+        "ec2:DeleteSubnet",
+        "ec2:ModifySubnetAttribute",
+        "ec2:CreateInternetGateway",
+        "ec2:DeleteInternetGateway",
+        "ec2:AttachInternetGateway",
+        "ec2:DetachInternetGateway",
+        "ec2:CreateRouteTable",
+        "ec2:DeleteRouteTable",
+        "ec2:CreateRoute",
+        "ec2:DeleteRoute",
+        "ec2:ReplaceRoute",
+        "ec2:AssociateRouteTable",
+        "ec2:DisassociateRouteTable",
+        "ec2:CreateSecurityGroup",
+        "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:CreateTags",
+        "ec2:DeleteTags",
+        "elasticloadbalancing:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RolesCreatedByThePipelineStacks",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:UpdateRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/milk-development-*",
+        "arn:aws:iam::*:role/milk-test-*",
+        "arn:aws:iam::*:role/milk-staging-*",
+        "arn:aws:iam::*:role/milk-production-*"
+      ]
+    },
+    {
+      "Sid": "PassRolesOnlyToEcsTasks",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/milk-development-*",
+        "arn:aws:iam::*:role/milk-test-*",
+        "arn:aws:iam::*:role/milk-staging-*",
+        "arn:aws:iam::*:role/milk-production-*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "ServiceLinkedRolesOnFirstUse",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateServiceLinkedRole"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": [
+            "ecs.amazonaws.com",
+            "elasticloadbalancing.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DataBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:*"
+      ],
+      "Resource": [
+        "arn:aws:s3:::milk-development-*",
+        "arn:aws:s3:::milk-development-*/*",
+        "arn:aws:s3:::milk-test-*",
+        "arn:aws:s3:::milk-test-*/*",
+        "arn:aws:s3:::milk-staging-*",
+        "arn:aws:s3:::milk-staging-*/*",
+        "arn:aws:s3:::milk-production-*",
+        "arn:aws:s3:::milk-production-*/*"
+      ]
+    },
+    {
+      "Sid": "CaptureTables",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:*"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:ap-southeast-1:*:table/milk-development-captures",
+        "arn:aws:dynamodb:ap-southeast-1:*:table/milk-test-captures",
+        "arn:aws:dynamodb:ap-southeast-1:*:table/milk-staging-captures",
+        "arn:aws:dynamodb:ap-southeast-1:*:table/milk-production-captures"
+      ]
+    },
+    {
+      "Sid": "AppSecrets",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:*"
+      ],
+      "Resource": "arn:aws:secretsmanager:ap-southeast-1:*:secret:milk/*"
+    },
+    {
+      "Sid": "GeneratedPasswords",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetRandomPassword"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "LogGroupsAndTaskLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:*"
+      ],
+      "Resource": [
+        "arn:aws:logs:ap-southeast-1:*:log-group:/milk/*",
+        "arn:aws:logs:ap-southeast-1:*:log-group:/milk/*:*"
+      ]
+    },
+    {
+      "Sid": "LogGroupListing",
+      "Effect": "Allow",
+      "Action": [
+        "logs:DescribeLogGroups"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AlarmsAndDashboards",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DeleteAlarms",
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:PutDashboard",
+        "cloudwatch:DeleteDashboards",
+        "cloudwatch:GetDashboard",
+        "cloudwatch:TagResource",
+        "cloudwatch:UntagResource",
+        "cloudwatch:ListTagsForResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AlarmTopic",
+      "Effect": "Allow",
+      "Action": [
+        "sns:*"
+      ],
+      "Resource": "arn:aws:sns:ap-southeast-1:*:milk-alerts"
+    }
+  ]
+}

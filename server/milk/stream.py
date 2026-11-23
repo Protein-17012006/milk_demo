@@ -6,6 +6,7 @@ dropped instead of queued: the counter always works on the newest picture. By de
 key frames are decoded, which saves most of the CPU spent on 4K video; with the camera's
 I-frame interval set to one second this still gives one new picture per second.
 """
+
 from __future__ import annotations
 
 import json
@@ -61,8 +62,14 @@ def _read_exact(stream, size: int) -> bytearray | None:
 
 
 class LatestFrameReader(threading.Thread):
-    def __init__(self, url: str, keyframes_only: bool = True, reconnect_s: float = 2.0,
-                 ffmpeg: str = "ffmpeg", ffprobe: str = "ffprobe") -> None:
+    def __init__(
+        self,
+        url: str,
+        keyframes_only: bool = True,
+        reconnect_s: float = 2.0,
+        ffmpeg: str = "ffmpeg",
+        ffprobe: str = "ffprobe",
+    ) -> None:
         super().__init__(daemon=True, name="stream-reader")
         self.url = url
         self.keyframes_only = keyframes_only
@@ -81,8 +88,19 @@ class LatestFrameReader(threading.Thread):
         self._stop.set()
 
     def _probe(self) -> tuple[int, int, str]:
-        cmd = [self.ffprobe, "-v", "error", *_input_options(self.url), "-select_streams", "v:0",
-               "-show_entries", "stream=codec_name,width,height", "-of", "json", self.url]
+        cmd = [
+            self.ffprobe,
+            "-v",
+            "error",
+            *_input_options(self.url),
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,width,height",
+            "-of",
+            "json",
+            self.url,
+        ]
         result = subprocess.run(cmd, capture_output=True, timeout=30)
         if result.returncode != 0:
             raise RuntimeError((result.stderr.decode(errors="replace").strip().splitlines() or ["ffprobe failed"])[-1])
@@ -104,12 +122,29 @@ class LatestFrameReader(threading.Thread):
                 cmd = [self.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", *_input_options(self.url)]
                 if self.keyframes_only:
                     cmd += ["-skip_frame", "nokey"]
-                cmd += ["-i", self.url, "-map", "0:v:0", "-an", "-sn", "-fps_mode", "passthrough",
-                        "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
+                cmd += [
+                    "-i",
+                    self.url,
+                    "-map",
+                    "0:v:0",
+                    "-an",
+                    "-sn",
+                    "-fps_mode",
+                    "passthrough",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "bgr24",
+                    "pipe:1",
+                ]
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
                 threading.Thread(target=self._drain, args=(proc.stderr,), daemon=True).start()
-                self.stream_info = {"codec": codec, "width": width, "height": height,
-                                    "keyframes_only": self.keyframes_only}
+                self.stream_info = {
+                    "codec": codec,
+                    "width": width,
+                    "height": height,
+                    "keyframes_only": self.keyframes_only,
+                }
                 if self.last_error:
                     log.info("stream connected again: %s", self.stream_info)
                 self.connected, self.last_error = True, None

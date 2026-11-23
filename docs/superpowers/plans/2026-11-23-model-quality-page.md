@@ -95,10 +95,15 @@ def test_model_version_comes_from_the_env(monkeypatch):
     monkeypatch.setenv("MILK_MODEL_VERSION", "long-2026-10-13+slide-v3")
     assert config.load().model_version == "long-2026-10-13+slide-v3"
 
+
 def test_model_version_defaults_to_pipeline_and_slide_run(monkeypatch):
     monkeypatch.delenv("MILK_MODEL_VERSION", raising=False)
-    assert config.default_model_version("long+slide", "~/Desktop/Datagent/slide_pilot/runs_v3/best.pt") == "long+slide:runs_v3"
+    assert (
+        config.default_model_version("long+slide", "~/Desktop/Datagent/slide_pilot/runs_v3/best.pt")
+        == "long+slide:runs_v3"
+    )
     assert config.default_model_version("long", "") == "long"
+
 
 # tests/test_cvoutput.py
 def test_persist_record_keeps_every_box_with_its_own_score():
@@ -153,12 +158,17 @@ AUDIT_2311 = {  # 2 Original read as Hot, 1 Original right, cheese: 1 right + 1 
     "verdicts": [
         {"box_id": 1, "verdict": "wrong_sku", "true_sku_id": "original145"},
         {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "original145"},
-        {"box_id": 3, "verdict": "correct"}, {"box_id": 4, "verdict": "correct"},
+        {"box_id": 3, "verdict": "correct"},
+        {"box_id": 4, "verdict": "correct"},
         {"box_id": 5, "verdict": "not_product"},
     ],
-    "missed": [{"sku_id": "hot160", "x": 940, "y": 400}, {"sku_id": "hot160", "x": 1030, "y": 330},
-               {"sku_id": "cheese145", "x": 1010, "y": 290}],
+    "missed": [
+        {"sku_id": "hot160", "x": 940, "y": 400},
+        {"sku_id": "hot160", "x": 1030, "y": 330},
+        {"sku_id": "cheese145", "x": 1010, "y": 290},
+    ],
 }
+
 
 def test_rows_of_the_2311_frame():
     rows = {r["sku_id"]: r for r in comparison_rows(AUDIT_2311)}
@@ -166,12 +176,13 @@ def test_rows_of_the_2311_frame():
     assert rows["original145"]["discrepancy_category"] == "Minor"
     assert round(rows["original145"]["count_accuracy_pct"], 4) == 0.3333
     assert (rows["hot160"]["ai_unit_count"], rows["hot160"]["human_unit_count"]) == (2, 2)
-    assert rows["hot160"]["discrepancy_category"] == "Wrong SKU"          # counts match, cans are wrong
+    assert rows["hot160"]["discrepancy_category"] == "Wrong SKU"  # counts match, cans are wrong
     assert rows["cheese145"]["discrepancy_category"] == "Exact Match"
+
 
 def test_kpis_of_the_2311_frame():
     k = summarize([AUDIT_2311], [20, 30])["kpis"]
-    assert k["overall_identification_accuracy"]["value"] == 0.5          # 2 of 4 catalog boxes named right
+    assert k["overall_identification_accuracy"]["value"] == 0.5  # 2 of 4 catalog boxes named right
     assert k["overall_identification_accuracy"]["met"] is False
     assert round(k["unit_count_mae"]["value"], 4) == 0.6667
     assert round(k["unit_count_accuracy_avg"]["value"], 4) == 0.7778
@@ -183,6 +194,7 @@ def test_kpis_of_the_2311_frame():
     assert k["avg_processing_time_ms"]["value"] == 25
     assert k["unrecognized_product_rate"]["value"] == 0.0
 
+
 def test_per_sku_and_confusion_of_the_2311_frame():
     s = summarize([AUDIT_2311], [])
     hot = next(r for r in s["per_sku"] if r["sku_id"] == "hot160")
@@ -192,30 +204,51 @@ def test_per_sku_and_confusion_of_the_2311_frame():
     assert s["confusion"]["cells"]["cheese145|NOT_PRODUCT"] == 1
     assert s["confusion"]["cells"]["MISSED|hot160"] == 2
 
+
 def test_unrecognized_box_on_other_goods_counts_for_no_sku():
-    audit = {"capture_timestamp": "2026-11-23T13:00:00+07:00",
-             "ai_boxes": [{"box_id": 1, "sku_id": None, "conf": 0.45, "box": [0, 0, 10, 10]},
-                          {"box_id": 2, "sku_id": None, "conf": 0.30, "box": [20, 0, 10, 10]}],
-             "verdicts": [{"box_id": 1, "verdict": "correct"},
-                          {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "cheese145"}],
-             "missed": []}
-    assert comparison_rows(audit) == [{"sku_id": "cheese145", "ai_unit_count": 0, "human_unit_count": 1,
-                                       "count_difference": -1, "count_accuracy_pct": 0.0,
-                                       "discrepancy_category": "Missed SKU"}]
+    audit = {
+        "capture_timestamp": "2026-11-23T13:00:00+07:00",
+        "ai_boxes": [
+            {"box_id": 1, "sku_id": None, "conf": 0.45, "box": [0, 0, 10, 10]},
+            {"box_id": 2, "sku_id": None, "conf": 0.30, "box": [20, 0, 10, 10]},
+        ],
+        "verdicts": [
+            {"box_id": 1, "verdict": "correct"},
+            {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "cheese145"},
+        ],
+        "missed": [],
+    }
+    assert comparison_rows(audit) == [
+        {
+            "sku_id": "cheese145",
+            "ai_unit_count": 0,
+            "human_unit_count": 1,
+            "count_difference": -1,
+            "count_accuracy_pct": 0.0,
+            "discrepancy_category": "Missed SKU",
+        }
+    ]
     k = summarize([audit], [])["kpis"]
-    assert k["overall_identification_accuracy"]["value"] == 0.0           # box 2: catalog can, not named
+    assert k["overall_identification_accuracy"]["value"] == 0.0  # box 2: catalog can, not named
     assert k["unrecognized_product_rate"]["value"] == 1.0
 
+
 def test_a_frame_with_no_boxes_scores_only_its_misses():
-    audit = {"capture_timestamp": "2026-11-23T14:00:00+07:00", "ai_boxes": [], "verdicts": [],
-             "missed": [{"sku_id": "hot160", "x": 1, "y": 1}]}
+    audit = {
+        "capture_timestamp": "2026-11-23T14:00:00+07:00",
+        "ai_boxes": [],
+        "verdicts": [],
+        "missed": [{"sku_id": "hot160", "x": 1, "y": 1}],
+    }
     k = summarize([audit], [])["kpis"]
     assert k["missed_sku_rate"]["value"] == 1.0
     assert k["overall_identification_accuracy"] == {"value": None, "target": [">=", 0.6], "met": None, "n": 0}
 
+
 def test_no_audits_means_no_numbers():
     k = summarize([], [])["kpis"]
     assert all(v["value"] is None and v["n"] == 0 for v in k.values())
+
 
 def test_validate_labels():
     boxes = AUDIT_2311["ai_boxes"]
@@ -261,26 +294,39 @@ cho Exact Match dù có một hộp `not_product`; spec chỉ coi là False Dete
 - [ ] **Step 1: Viết test hỏng**
 
 ```python
-NEW = {"capture_timestamp": "2026-11-23T13:30:00+07:00", "units_found": 3, "processing_time_ms": 20,
-       "latency_ms": 100, "model_version": "v3", "flagged_rows": 1,
-       "rows_json": '[{"sku_id": "Slide Cheese 145g", "model_alias": "cheese145", "unit_count": 2, "confidence_score": 0.8, "bounding_box": [[0,0,10,10],[0,0,10,10]], "is_flagged": false}, {"sku_id": null, "model_alias": "", "unit_count": 1, "confidence_score": 0.3, "bounding_box": [[50,0,10,10]], "is_flagged": true}]',
-       "detections_json": '[{"sku_id": "cheese145", "conf": 0.9, "box": [0,0,10,10]}, {"sku_id": "cheese145", "conf": 0.7, "box": [0,0,10,10]}, {"sku_id": null, "conf": 0.3, "box": [50,0,10,10]}]'}
-OLD = {"capture_timestamp": "2026-11-23T13:30:10+07:00", "units_found": 1, "processing_time_ms": 40,
-       "latency_ms": 200, "flagged_rows": 0,
-       "rows_json": '[{"sku_id": "Slide Cheese 145g", "model_alias": "cheese145", "unit_count": 1, "confidence_score": 0.6, "bounding_box": [[0,0,10,10]], "is_flagged": false}]'}
+NEW = {
+    "capture_timestamp": "2026-11-23T13:30:00+07:00",
+    "units_found": 3,
+    "processing_time_ms": 20,
+    "latency_ms": 100,
+    "model_version": "v3",
+    "flagged_rows": 1,
+    "rows_json": '[{"sku_id": "Slide Cheese 145g", "model_alias": "cheese145", "unit_count": 2, "confidence_score": 0.8, "bounding_box": [[0,0,10,10],[0,0,10,10]], "is_flagged": false}, {"sku_id": null, "model_alias": "", "unit_count": 1, "confidence_score": 0.3, "bounding_box": [[50,0,10,10]], "is_flagged": true}]',
+    "detections_json": '[{"sku_id": "cheese145", "conf": 0.9, "box": [0,0,10,10]}, {"sku_id": "cheese145", "conf": 0.7, "box": [0,0,10,10]}, {"sku_id": null, "conf": 0.3, "box": [50,0,10,10]}]',
+}
+OLD = {
+    "capture_timestamp": "2026-11-23T13:30:10+07:00",
+    "units_found": 1,
+    "processing_time_ms": 40,
+    "latency_ms": 200,
+    "flagged_rows": 0,
+    "rows_json": '[{"sku_id": "Slide Cheese 145g", "model_alias": "cheese145", "unit_count": 1, "confidence_score": 0.6, "bounding_box": [[0,0,10,10]], "is_flagged": false}]',
+}
+
 
 def test_old_record_boxes_come_from_rows():
     assert capture_boxes(OLD) == [{"box_id": 1, "sku_id": "cheese145", "conf": 0.6, "box": [0, 0, 10, 10]}]
 
+
 def test_hour_stats():
-    s = hour_stats([OLD, NEW])                       # out of order on purpose
+    s = hour_stats([OLD, NEW])  # out of order on purpose
     assert s["captures"] == 2 and s["model_versions"] == ["unknown", "v3"]
-    assert s["duplicate_pairs"] == 1                 # the two cheese boxes of NEW
-    assert s["unrecognized_box_pct"] == 0.25         # 1 of 4 boxes
-    assert s["flagged_row_pct"] == 1 / 3             # 1 of 3 rows
-    assert s["jitter"] == 2                          # cheese 2 -> 1 (|1|) + unrecognized 1 -> 0 (|1|)
+    assert s["duplicate_pairs"] == 1  # the two cheese boxes of NEW
+    assert s["unrecognized_box_pct"] == 0.25  # 1 of 4 boxes
+    assert s["flagged_row_pct"] == 1 / 3  # 1 of 3 rows
+    assert s["jitter"] == 2  # cheese 2 -> 1 (|1|) + unrecognized 1 -> 0 (|1|)
     assert (s["units_min"], s["units_max"]) == (1, 3)
-    assert round(s["conf_median"], 4) == 0.65        # boxes 0.9, 0.7, 0.3, 0.6
+    assert round(s["conf_median"], 4) == 0.65  # boxes 0.9, 0.7, 0.3, 0.6
     assert s["processing_ms_median"] == 30
 ```
 

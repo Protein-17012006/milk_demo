@@ -1,0 +1,123 @@
+# Build once, then promote the same image: development -> test -> staging -> production.
+# Every merge to main runs the whole chain; production waits for the required reviewer.
+# A manual run from another branch builds that branch and deploys it to development only.
+# A failed job stops the chain; earlier environments keep the new version.
+name: CD
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "frontend/**" # the Next.js frontend is not in the hub image
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REPOSITORY: milk
+
+jobs:
+  build:
+    name: build once
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image tag = first 7 characters of the commit
+        id: tag
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-southeast-1
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Tags are immutable: a re-run for the same commit reuses the image already pushed.
+      - name: Is this commit already built?
+        id: exists
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if ! aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::ECR repository $ECR_REPOSITORY does not exist: the platform is not deployed. Run Actions -> Infrastructure first, then re-run this workflow."
+            exit 1
+          fi
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids "imageTag=$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Image $ECR_REPOSITORY:$TAG is already in ECR; skipping the build." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.exists.outputs.exists != 'true'
+
+      - name: Build and push
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          pull: true
+          provenance: false
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          {
+            echo "### Build \`$TAG\`"
+            echo ""
+            echo "- Branch: \`$BRANCH\`"
+            echo "- Image: \`$ECR_REPOSITORY:$TAG\`"
+            if [ "$BRANCH" != "main" ]; then echo "- Not main: deploys to development only."; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  development:
+    needs: build
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: development
+      image_tag: ${{ needs.build.outputs.tag }}
+    secrets: inherit
+
+  test:
+    needs: [build, development]
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: test
+      image_tag: ${{ needs.build.outputs.tag }}
+    secrets: inherit
+
+  staging:
+    needs: [build, test]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: staging
+      image_tag: ${{ needs.build.outputs.tag }}
+    secrets: inherit
+
+  production:
+    needs: [build, staging]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: production
+      image_tag: ${{ needs.build.outputs.tag }}
+    secrets: inherit

@@ -5,6 +5,7 @@
 `slide` is the Slide snack-can detector of HOANG-P09. Several can run on the same frame, joined with "+":
 `long+slide` counts the milk cartons and the Slide cans in one picture.
 """
+
 from __future__ import annotations
 
 from typing import Protocol

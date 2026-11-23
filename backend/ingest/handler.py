@@ -7,6 +7,7 @@ Receives captures from:
    - {"action": "backfill_from_table", "source_table": "...", "source_bucket": "...", "limit": 50}
    - {"action": "select_hourly_official", "hour_prefix": "YYYY-MM-DDTHH"} (EventBridge hourly)
 """
+
 from __future__ import annotations
 
 import json
@@ -14,15 +15,13 @@ import os
 import random
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
-
 from common import (
-    DEFAULT_ALIAS_MAP,
     UNRECOGNIZED,
     floor_two_decimals,
     from_dynamodb,
@@ -61,7 +60,9 @@ def _normalize_record(raw: dict[str, Any], source_bucket: str = "") -> dict[str,
         log = json.loads(raw["log_json"]) if isinstance(raw["log_json"], str) else raw["log_json"]
     detections = raw.get("detections")
     if detections is None and raw.get("detections_json"):
-        detections = json.loads(raw["detections_json"]) if isinstance(raw["detections_json"], str) else raw["detections_json"]
+        detections = (
+            json.loads(raw["detections_json"]) if isinstance(raw["detections_json"], str) else raw["detections_json"]
+        )
 
     record = {
         "capture_id": raw.get("capture_id") or (log or {}).get("capture_id", ""),
@@ -87,7 +88,9 @@ def _normalize_record(raw: dict[str, Any], source_bucket: str = "") -> dict[str,
     return record
 
 
-def ingest_capture(record: dict[str, Any], s3_client=None, ddb_resource=None, write_analytics: bool = False) -> dict[str, Any]:
+def ingest_capture(
+    record: dict[str, Any], s3_client=None, ddb_resource=None, write_analytics: bool = False
+) -> dict[str, Any]:
     """Validate, deduplicate, map alias, write captures/latest_stock/review_queue."""
     errors = validate_capture_payload(record)
     if errors:
@@ -124,29 +127,34 @@ def ingest_capture(record: dict[str, Any], s3_client=None, ddb_resource=None, wr
 
     # Step 2: Deduplicate by (camera_id, capture_id)
     now_epoch = int(time.time())
-    capture_item = to_dynamodb_safe({
-        "camera_id": camera_id,
-        "capture_id": capture_id,
-        "store_id": store_id,
-        "capture_timestamp": capture_ts,
-        "capture_source": record["capture_source"],
-        "image_filename": record["image_filename"],
-        "image_key": record["image_key"],
-        "source_bucket": record.get("source_bucket", ""),
-        "processing_time_ms": record["processing_time_ms"],
-        "latency_ms": record["latency_ms"],
-        "units_found": record["units_found"],
-        "flagged_rows": record["flagged_rows"],
-        "unrecognized_units": unrecognized_units,
-        "faces_blurred": record["faces_blurred"],
-        "pipeline": record["pipeline"],
-        "model_version": record.get("model_version") or "unknown",
-        "detections_json": (json.dumps(record["detections"], separators=(",", ":"))
-                            if record.get("detections") is not None else None),
-        "rows_json": json.dumps(mapped_rows, ensure_ascii=False),
-        "log_json": json.dumps(record["log"], ensure_ascii=False),
-        "expires_at": now_epoch + CAPTURE_TTL_DAYS * 86400,
-    })
+    capture_item = to_dynamodb_safe(
+        {
+            "camera_id": camera_id,
+            "capture_id": capture_id,
+            "store_id": store_id,
+            "capture_timestamp": capture_ts,
+            "capture_source": record["capture_source"],
+            "image_filename": record["image_filename"],
+            "image_key": record["image_key"],
+            "source_bucket": record.get("source_bucket", ""),
+            "processing_time_ms": record["processing_time_ms"],
+            "latency_ms": record["latency_ms"],
+            "units_found": record["units_found"],
+            "flagged_rows": record["flagged_rows"],
+            "unrecognized_units": unrecognized_units,
+            "faces_blurred": record["faces_blurred"],
+            "pipeline": record["pipeline"],
+            "model_version": record.get("model_version") or "unknown",
+            "detections_json": (
+                json.dumps(record["detections"], separators=(",", ":"))
+                if record.get("detections") is not None
+                else None
+            ),
+            "rows_json": json.dumps(mapped_rows, ensure_ascii=False),
+            "log_json": json.dumps(record["log"], ensure_ascii=False),
+            "expires_at": now_epoch + CAPTURE_TTL_DAYS * 86400,
+        }
+    )
 
     try:
         captures_tbl.put_item(
@@ -170,31 +178,33 @@ def ingest_capture(record: dict[str, Any], s3_client=None, ddb_resource=None, wr
         smoothed = lower_median(recent_counts)
 
         stock_tbl.put_item(
-            Item=to_dynamodb_safe({
-                "store_id": store_id,
-                "sku_id": sku_key,
-                "sku_name": row["sku_name"] or "Unrecognized",
-                "model_alias": row.get("model_alias", ""),
-                "camera_id": camera_id,
-                "reading_id": row["reading_id"],
-                "capture_id": capture_id,
-                "capture_timestamp": capture_ts,
-                "capture_source": row["capture_source"],
-                "image_filename": row["image_filename"],
-                "image_key": record["image_key"],
-                "source_bucket": record.get("source_bucket", ""),
-                "unit_count": row["unit_count"],
-                "smoothed_count": smoothed,
-                "recent_counts": recent_counts,
-                "confidence_score": row["confidence_score"],
-                "detection_method": row["detection_method"],
-                "bounding_box_json": json.dumps(row["bounding_box"], separators=(",", ":")),
-                "is_flagged": row["is_flagged"],
-                "flag_reason": row.get("flag_reason", ""),
-                "processing_time_ms": row["processing_time_ms"],
-                "faces_blurred": record["faces_blurred"],
-                "pipeline": record["pipeline"],
-            })
+            Item=to_dynamodb_safe(
+                {
+                    "store_id": store_id,
+                    "sku_id": sku_key,
+                    "sku_name": row["sku_name"] or "Unrecognized",
+                    "model_alias": row.get("model_alias", ""),
+                    "camera_id": camera_id,
+                    "reading_id": row["reading_id"],
+                    "capture_id": capture_id,
+                    "capture_timestamp": capture_ts,
+                    "capture_source": row["capture_source"],
+                    "image_filename": row["image_filename"],
+                    "image_key": record["image_key"],
+                    "source_bucket": record.get("source_bucket", ""),
+                    "unit_count": row["unit_count"],
+                    "smoothed_count": smoothed,
+                    "recent_counts": recent_counts,
+                    "confidence_score": row["confidence_score"],
+                    "detection_method": row["detection_method"],
+                    "bounding_box_json": json.dumps(row["bounding_box"], separators=(",", ":")),
+                    "is_flagged": row["is_flagged"],
+                    "flag_reason": row.get("flag_reason", ""),
+                    "processing_time_ms": row["processing_time_ms"],
+                    "faces_blurred": record["faces_blurred"],
+                    "pipeline": record["pipeline"],
+                }
+            )
         )
 
         # Step 5: Deduplicated review_queue per (camera_id, sku_id, flag_reason)
@@ -202,25 +212,27 @@ def ingest_capture(record: dict[str, Any], s3_client=None, ddb_resource=None, wr
             flag_reason = row.get("flag_reason") or ("Unrecognized" if row["sku_id"] is None else "Low Confidence")
             queue_key = f"{camera_id}#{sku_key}#{flag_reason}"
             queue_tbl.put_item(
-                Item=to_dynamodb_safe({
-                    "store_id": store_id,
-                    "queue_key": queue_key,
-                    "camera_id": camera_id,
-                    "reading_id": row["reading_id"],
-                    "capture_id": capture_id,
-                    "capture_timestamp": capture_ts,
-                    "sku_id": sku_key,
-                    "sku_name": row["sku_name"] or "Unrecognized",
-                    "model_alias": row.get("model_alias", ""),
-                    "unit_count": row["unit_count"],
-                    "confidence_score": row["confidence_score"],
-                    "flag_reason": flag_reason,
-                    "bounding_box_json": json.dumps(row["bounding_box"], separators=(",", ":")),
-                    "image_key": record["image_key"],
-                    "source_bucket": record.get("source_bucket", ""),
-                    "status": "Chờ duyệt",
-                    "updated_at": capture_ts,
-                })
+                Item=to_dynamodb_safe(
+                    {
+                        "store_id": store_id,
+                        "queue_key": queue_key,
+                        "camera_id": camera_id,
+                        "reading_id": row["reading_id"],
+                        "capture_id": capture_id,
+                        "capture_timestamp": capture_ts,
+                        "sku_id": sku_key,
+                        "sku_name": row["sku_name"] or "Unrecognized",
+                        "model_alias": row.get("model_alias", ""),
+                        "unit_count": row["unit_count"],
+                        "confidence_score": row["confidence_score"],
+                        "flag_reason": flag_reason,
+                        "bounding_box_json": json.dumps(row["bounding_box"], separators=(",", ":")),
+                        "image_key": record["image_key"],
+                        "source_bucket": record.get("source_bucket", ""),
+                        "status": "Chờ duyệt",
+                        "updated_at": capture_ts,
+                    }
+                )
             )
 
     _count_down_missing(stock_tbl, store_id, camera_id, capture_ts, seen_skus)
@@ -246,8 +258,9 @@ def _count_down_missing(stock_tbl, store_id: str, camera_id: str, capture_ts: st
     resp = stock_tbl.query(KeyConditionExpression=Key("store_id").eq(store_id))
     items = resp.get("Items", [])
     while "LastEvaluatedKey" in resp:
-        resp = stock_tbl.query(KeyConditionExpression=Key("store_id").eq(store_id),
-                               ExclusiveStartKey=resp["LastEvaluatedKey"])
+        resp = stock_tbl.query(
+            KeyConditionExpression=Key("store_id").eq(store_id), ExclusiveStartKey=resp["LastEvaluatedKey"]
+        )
         items.extend(resp.get("Items", []))
 
     for item in from_dynamodb(items):
@@ -380,6 +393,7 @@ def _handle_hourly_official(s3_client, ddb_resource) -> dict[str, Any]:
 
 # --- Model page: one random frame per camera-hour to label, and hourly health (spec 2026-11-23) ---------------
 
+
 def previous_hour(now_utc: datetime) -> str:
     """The last full clock hour in ICT before `now_utc`, as YYYYMMDD-HH (the schedule is not on the hour)."""
     return (now_utc.astimezone(ICT) - timedelta(hours=1)).strftime("%Y%m%d-%H")
@@ -416,8 +430,9 @@ def captures_in_hour(ddb_resource, camera_id: str, store_code: str, hour: str) -
     return from_dynamodb(items)
 
 
-def sample_audit(s3_client, ddb_resource, camera_id: str, items: list[dict[str, Any]], hour: str,
-                 rng: random.Random) -> str | None:
+def sample_audit(
+    s3_client, ddb_resource, camera_id: str, items: list[dict[str, Any]], hour: str, rng: random.Random
+) -> str | None:
     """Picks one capture with a frame at random, copies the frame to the analytics bucket and writes a
     pending audit. Returns the audit id, or None when the hour has no frame or already has its audit."""
     with_frame = sorted((it for it in items if it.get("image_key")), key=lambda it: it["capture_id"])
@@ -431,25 +446,28 @@ def sample_audit(s3_client, ddb_resource, camera_id: str, items: list[dict[str, 
     pick = rng.choice(with_frame)
     filename = pick.get("image_filename") or pick["image_key"].rsplit("/", 1)[-1]
     image_key = f"audits/frames/{camera_id}/{pick['capture_timestamp'][:10]}/{filename}"
-    s3_client.copy_object(Bucket=ANALYTICS_BUCKET, Key=image_key,
-                          CopySource={"Bucket": pick["source_bucket"], "Key": pick["image_key"]})
+    s3_client.copy_object(
+        Bucket=ANALYTICS_BUCKET, Key=image_key, CopySource={"Bucket": pick["source_bucket"], "Key": pick["image_key"]}
+    )
     try:
         table.put_item(
-            Item=to_dynamodb_safe({
-                "store_id": store_id,
-                "audit_id": audit_id,
-                "camera_id": camera_id,
-                "capture_id": pick["capture_id"],
-                "capture_timestamp": pick["capture_timestamp"],
-                "image_key": image_key,
-                "model_version": pick.get("model_version") or "unknown",
-                "pipeline": pick.get("pipeline", ""),
-                "status": "pending",
-                "sampled_at": datetime.now(ICT).isoformat(timespec="seconds"),
-                "ai_boxes_json": json.dumps(capture_boxes(pick), separators=(",", ":")),
-                "verdicts_json": "[]",
-                "missed_json": "[]",
-            }),
+            Item=to_dynamodb_safe(
+                {
+                    "store_id": store_id,
+                    "audit_id": audit_id,
+                    "camera_id": camera_id,
+                    "capture_id": pick["capture_id"],
+                    "capture_timestamp": pick["capture_timestamp"],
+                    "image_key": image_key,
+                    "model_version": pick.get("model_version") or "unknown",
+                    "pipeline": pick.get("pipeline", ""),
+                    "status": "pending",
+                    "sampled_at": datetime.now(ICT).isoformat(timespec="seconds"),
+                    "ai_boxes_json": json.dumps(capture_boxes(pick), separators=(",", ":")),
+                    "verdicts_json": "[]",
+                    "missed_json": "[]",
+                }
+            ),
             ConditionExpression="attribute_not_exists(audit_id)",
         )
     except ClientError as exc:
@@ -463,12 +481,16 @@ def record_health(ddb_resource, camera_id: str, hour: str, items: list[dict[str,
     stats = hour_stats(items)
     if not stats["captures"]:
         return
-    ddb_resource.Table(MODEL_HEALTH_TABLE).put_item(Item=to_dynamodb_safe({
-        "camera_id": camera_id,
-        "hour": hour,
-        **stats,
-        "expires_at": int(time.time()) + HEALTH_TTL_DAYS * 86400,
-    }))
+    ddb_resource.Table(MODEL_HEALTH_TABLE).put_item(
+        Item=to_dynamodb_safe(
+            {
+                "camera_id": camera_id,
+                "hour": hour,
+                **stats,
+                "expires_at": int(time.time()) + HEALTH_TTL_DAYS * 86400,
+            }
+        )
+    )
 
 
 def _run_hour(s3_client, ddb_resource, hour: str, rng: random.Random, sample: bool = True) -> dict[str, Any]:
@@ -491,7 +513,7 @@ def _run_hour(s3_client, ddb_resource, hour: str, rng: random.Random, sample: bo
 
 def _handle_backfill_health(event: dict[str, Any], s3_client, ddb_resource) -> dict[str, Any]:
     """Health for the `days` x 24 hours ending at `until` (default: the previous hour); no sampling."""
-    until = event.get("until") or previous_hour(datetime.now(timezone.utc))
+    until = event.get("until") or previous_hour(datetime.now(UTC))
     end = datetime.strptime(until, "%Y%m%d-%H")
     hours = [(end - timedelta(hours=h)).strftime("%Y%m%d-%H") for h in range(int(event.get("days", 7)) * 24)]
     written = sum(_run_hour(s3_client, ddb_resource, h, random.Random(), sample=False)["health_items"] for h in hours)
@@ -504,11 +526,11 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
     # 1. EventBridge hourly run: first the Model page's frame to label and hourly health (light queries), then
     #    the official capture of the hour, which scans the whole captures table and may fail as it grows
     if event.get("source") == "aws.events" or event.get("action") == "select_hourly_official":
-        model_page = _run_hour(s3_client, ddb_resource, previous_hour(datetime.now(timezone.utc)), random.Random())
+        model_page = _run_hour(s3_client, ddb_resource, previous_hour(datetime.now(UTC)), random.Random())
         return {**_handle_hourly_official(s3_client, ddb_resource), "model_page": model_page}
 
     if event.get("action") == "sample_audits":
-        hour = event.get("hour") or previous_hour(datetime.now(timezone.utc))
+        hour = event.get("hour") or previous_hour(datetime.now(UTC))
         return {"action": "sample_audits", **_run_hour(s3_client, ddb_resource, hour, random.Random())}
 
     if event.get("action") == "backfill_model_health":
@@ -521,7 +543,9 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
     # 3. Direct single record invocation
     if event.get("action") == "ingest_record":
         rec = _normalize_record(event["record"], source_bucket=event.get("source_bucket", ""))
-        return ingest_capture(rec, s3_client=s3_client, ddb_resource=ddb_resource, write_analytics=bool(event.get("official")))
+        return ingest_capture(
+            rec, s3_client=s3_client, ddb_resource=ddb_resource, write_analytics=bool(event.get("official"))
+        )
 
     # 4. SQS batch wrapping S3 Event notifications
     processed = []

@@ -1,0 +1,6 @@
+# Only server/ goes into the image.
+*
+!server/requirements.txt
+!server/milk/
+**/__pycache__
+**/*.pyc

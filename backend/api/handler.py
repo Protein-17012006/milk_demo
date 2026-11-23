@@ -7,6 +7,7 @@ Enforces Cognito group RBAC:
   - team_admin: all permissions + import SKU Master / Store List + admin seed
   - no group:   403 PENDING_ROLE_ASSIGNMENT (for self-registered /register users)
 """
+
 from __future__ import annotations
 
 import json
@@ -19,8 +20,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import boto3
-from boto3.dynamodb.conditions import Key
-
 from audit_scoring import SKIP_REASONS, summarize, validate_labels
 from common import (
     CAPTURE_LOG_COLUMNS,
@@ -95,11 +94,7 @@ def _json_response(
 
 
 def _extract_user(event: dict[str, Any]) -> dict[str, Any]:
-    claims = (
-        event.get("requestContext", {})
-        .get("authorizer", {})
-        .get("claims", {})
-    )
+    claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
     raw_groups = claims.get("cognito:groups", "")
     if isinstance(raw_groups, list):
         groups = [g for g in raw_groups if g]
@@ -200,7 +195,9 @@ def _load_products_catalog(ddb) -> tuple[list[dict[str, Any]], int, int]:
         # Unit-weighted average confidence across stores (per doc p.11)
         weight_sum = sum(int(r.get("unit_count", 0)) for r in rows)
         if weight_sum > 0:
-            weighted_conf = sum(float(r.get("confidence_score", 0.0)) * int(r.get("unit_count", 0)) for r in rows) / weight_sum
+            weighted_conf = (
+                sum(float(r.get("confidence_score", 0.0)) * int(r.get("unit_count", 0)) for r in rows) / weight_sum
+            )
         elif rows:
             weighted_conf = sum(float(r.get("confidence_score", 0.0)) for r in rows) / len(rows)
         else:
@@ -209,30 +206,32 @@ def _load_products_catalog(ddb) -> tuple[list[dict[str, Any]], int, int]:
         latest_row = max(rows, key=lambda r: str(r.get("capture_timestamp", ""))) if rows else None
         is_flagged = bool(latest_row.get("is_flagged")) if latest_row else False
 
-        products.append({
-            "sku_id": sku_id,
-            "sku_name": (master or {}).get("sku_name_vi") or (latest_row or {}).get("sku_name") or sku_id,
-            "sku_name_en": (master or {}).get("sku_name_en"),
-            "model_alias": (master or {}).get("model_alias") or (latest_row or {}).get("model_alias") or "",
-            "brand": (master or {}).get("brand"),
-            "manufacturer": (master or {}).get("manufacturer"),
-            "category": (master or {}).get("category"),
-            "subcategory": (master or {}).get("subcategory"),
-            "pack_type": (master or {}).get("pack_type"),
-            "pack_size": (master or {}).get("pack_size"),
-            "barcode": (master or {}).get("barcode"),
-            "image_url": (master or {}).get("image_url"),
-            "in_sku_master": master is not None,
-            "unit_count": total_units,
-            "confidence_score": round(weighted_conf, 2),
-            "is_flagged": is_flagged,
-            "flag_reason": (latest_row or {}).get("flag_reason", ""),
-            "stores_available": stores_avail,
-            "stores_total": total_stores,
-            "capture_id": (latest_row or {}).get("capture_id"),
-            "capture_timestamp": (latest_row or {}).get("capture_timestamp"),
-            "processing_time_ms": (latest_row or {}).get("processing_time_ms", 0),
-        })
+        products.append(
+            {
+                "sku_id": sku_id,
+                "sku_name": (master or {}).get("sku_name_vi") or (latest_row or {}).get("sku_name") or sku_id,
+                "sku_name_en": (master or {}).get("sku_name_en"),
+                "model_alias": (master or {}).get("model_alias") or (latest_row or {}).get("model_alias") or "",
+                "brand": (master or {}).get("brand"),
+                "manufacturer": (master or {}).get("manufacturer"),
+                "category": (master or {}).get("category"),
+                "subcategory": (master or {}).get("subcategory"),
+                "pack_type": (master or {}).get("pack_type"),
+                "pack_size": (master or {}).get("pack_size"),
+                "barcode": (master or {}).get("barcode"),
+                "image_url": (master or {}).get("image_url"),
+                "in_sku_master": master is not None,
+                "unit_count": total_units,
+                "confidence_score": round(weighted_conf, 2),
+                "is_flagged": is_flagged,
+                "flag_reason": (latest_row or {}).get("flag_reason", ""),
+                "stores_available": stores_avail,
+                "stores_total": total_stores,
+                "capture_id": (latest_row or {}).get("capture_id"),
+                "capture_timestamp": (latest_row or {}).get("capture_timestamp"),
+                "processing_time_ms": (latest_row or {}).get("processing_time_ms", 0),
+            }
+        )
 
     return products, unrecognized_max, total_stores
 
@@ -289,15 +288,9 @@ def _handle_get_product_detail(sku_id_raw: str, event: dict[str, Any], s3, ddb) 
     # Decision 21/11: sku_id can contain spaces & Vietnamese accents -> URL decode
     sku_id = urllib.parse.unquote(sku_id_raw)
     master = from_dynamodb(ddb.Table(SKU_MASTER_TABLE).get_item(Key={"sku_id": sku_id}).get("Item"))
-    stock_items = [
-        item for item in _scan_all(ddb.Table(LATEST_STOCK_TABLE)) if item.get("sku_id") == sku_id
-    ]
-    corrections = [
-        c for c in _scan_all(ddb.Table(CORRECTIONS_TABLE)) if c.get("sku_id") == sku_id
-    ]
-    queue_items = [
-        q for q in _scan_all(ddb.Table(REVIEW_QUEUE_TABLE)) if q.get("sku_id") == sku_id
-    ]
+    stock_items = [item for item in _scan_all(ddb.Table(LATEST_STOCK_TABLE)) if item.get("sku_id") == sku_id]
+    corrections = [c for c in _scan_all(ddb.Table(CORRECTIONS_TABLE)) if c.get("sku_id") == sku_id]
+    queue_items = [q for q in _scan_all(ddb.Table(REVIEW_QUEUE_TABLE)) if q.get("sku_id") == sku_id]
 
     if not master and not stock_items:
         return _json_response(404, {"error": "NOT_FOUND", "sku_id": sku_id}, event)
@@ -332,7 +325,8 @@ def _handle_get_product_detail(sku_id_raw: str, event: dict[str, Any], s3, ddb) 
         {
             "sku_id": sku_id,
             "in_sku_master": master is not None,
-            "product_information": master or {
+            "product_information": master
+            or {
                 "sku_id": sku_id,
                 "sku_name_vi": (latest or {}).get("sku_name", sku_id),
                 "brand": None,
@@ -390,11 +384,13 @@ def _handle_get_stores(event: dict[str, Any], ddb) -> dict[str, Any]:
     enriched = []
     for st in stores:
         sid = st["store_id"]
-        enriched.append({
-            **st,
-            "last_capture_timestamp": last_by_store.get(sid),
-            "has_recent_capture": sid in last_by_store,
-        })
+        enriched.append(
+            {
+                **st,
+                "last_capture_timestamp": last_by_store.get(sid),
+                "has_recent_capture": sid in last_by_store,
+            }
+        )
 
     return _json_response(
         200,
@@ -412,8 +408,10 @@ def _handle_search(event: dict[str, Any], ddb) -> dict[str, Any]:
     products, _, _ = _load_products_catalog(ddb)
     if q:
         products = [
-            p for p in products
-            if q in f"{p['sku_id']} {p['sku_name']} {p.get('model_alias','')} {p.get('barcode','')} {p.get('brand','')}".lower()
+            p
+            for p in products
+            if q
+            in f"{p['sku_id']} {p['sku_name']} {p.get('model_alias', '')} {p.get('barcode', '')} {p.get('brand', '')}".lower()
         ]
     products.sort(key=lambda x: x["unit_count"], reverse=True)
     return _json_response(200, {"products": products[:10], "total": len(products)}, event)
@@ -428,9 +426,7 @@ def _handle_review_queue(event: dict[str, Any], s3, ddb) -> dict[str, Any]:
 
     for item in items:
         item["bounding_box"] = json.loads(item.get("bounding_box_json") or "[]")
-        item["frame_presigned_url"] = _presign_frame(
-            s3, item.get("image_key", ""), item.get("source_bucket", "")
-        )
+        item["frame_presigned_url"] = _presign_frame(s3, item.get("image_key", ""), item.get("source_bucket", ""))
 
     return _json_response(200, {"items": items, "total": len(items)}, event)
 
@@ -454,21 +450,23 @@ def _handle_post_correction(event: dict[str, Any], user: dict[str, Any], ddb) ->
         return _json_response(200, {"status": "Đã xác nhận", "reviewed_at": now_iso}, event)
 
     correction_id = f"COR-{datetime.now(ICT).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
-    corr_item = to_dynamodb_safe({
-        "store_id": store_id,
-        "correction_id": correction_id,
-        "reading_id": body.get("reading_id", ""),
-        "capture_id": body.get("capture_id", ""),
-        "sku_id": sku_id,
-        "corrected_sku_id": body.get("corrected_sku_id") or sku_id,
-        "corrected_unit_count": body.get("corrected_unit_count"),
-        "discrepancy_category": body.get("discrepancy_category") or "Wrong SKU",
-        "sku_match_correct": bool(body.get("sku_match_correct", False)),
-        "notes": body.get("notes", ""),
-        "reviewer_email": user["email"],
-        "correction_date": now_iso,
-        "fed_back_to_model": False,
-    })
+    corr_item = to_dynamodb_safe(
+        {
+            "store_id": store_id,
+            "correction_id": correction_id,
+            "reading_id": body.get("reading_id", ""),
+            "capture_id": body.get("capture_id", ""),
+            "sku_id": sku_id,
+            "corrected_sku_id": body.get("corrected_sku_id") or sku_id,
+            "corrected_unit_count": body.get("corrected_unit_count"),
+            "discrepancy_category": body.get("discrepancy_category") or "Wrong SKU",
+            "sku_match_correct": bool(body.get("sku_match_correct", False)),
+            "notes": body.get("notes", ""),
+            "reviewer_email": user["email"],
+            "correction_date": now_iso,
+            "fed_back_to_model": False,
+        }
+    )
     ddb.Table(CORRECTIONS_TABLE).put_item(Item=corr_item)
 
     if queue_key:
@@ -500,22 +498,24 @@ def _handle_import_sku_master(event: dict[str, Any], ddb) -> dict[str, Any]:
         if not sku_id:
             continue
         tbl.put_item(
-            Item=to_dynamodb_safe({
-                "sku_id": sku_id,
-                "sku_name_vi": row.get("sku_name_vi") or sku_id,
-                "sku_name_en": row.get("sku_name_en"),
-                "model_alias": row.get("model_alias", ""),
-                "brand": row.get("brand"),
-                "manufacturer": row.get("manufacturer"),
-                "category": row.get("category"),
-                "subcategory": row.get("subcategory"),
-                "pack_type": row.get("pack_type"),
-                "pack_size": row.get("pack_size"),
-                "barcode": row.get("barcode"),
-                "image_url": row.get("image_url"),
-                "is_active": bool(row.get("is_active", True)),
-                "updated_at": datetime.now(ICT).isoformat(timespec="seconds"),
-            })
+            Item=to_dynamodb_safe(
+                {
+                    "sku_id": sku_id,
+                    "sku_name_vi": row.get("sku_name_vi") or sku_id,
+                    "sku_name_en": row.get("sku_name_en"),
+                    "model_alias": row.get("model_alias", ""),
+                    "brand": row.get("brand"),
+                    "manufacturer": row.get("manufacturer"),
+                    "category": row.get("category"),
+                    "subcategory": row.get("subcategory"),
+                    "pack_type": row.get("pack_type"),
+                    "pack_size": row.get("pack_size"),
+                    "barcode": row.get("barcode"),
+                    "image_url": row.get("image_url"),
+                    "is_active": bool(row.get("is_active", True)),
+                    "updated_at": datetime.now(ICT).isoformat(timespec="seconds"),
+                }
+            )
         )
         written += 1
 
@@ -535,16 +535,18 @@ def _handle_import_store_list(event: dict[str, Any], ddb) -> dict[str, Any]:
         if not store_id:
             continue
         tbl.put_item(
-            Item=to_dynamodb_safe({
-                "store_id": store_id,
-                "store_name": row.get("store_name") or store_id,
-                "district": row.get("district", ""),
-                "camera_id": row.get("camera_id", ""),
-                "categories_in_view": row.get("categories_in_view", ["Milk"]),
-                "wifi_available": bool(row.get("wifi_available", True)),
-                "status": row.get("status", "active"),
-                "updated_at": datetime.now(ICT).isoformat(timespec="seconds"),
-            })
+            Item=to_dynamodb_safe(
+                {
+                    "store_id": store_id,
+                    "store_name": row.get("store_name") or store_id,
+                    "district": row.get("district", ""),
+                    "camera_id": row.get("camera_id", ""),
+                    "categories_in_view": row.get("categories_in_view", ["Milk"]),
+                    "wifi_available": bool(row.get("wifi_available", True)),
+                    "status": row.get("status", "active"),
+                    "updated_at": datetime.now(ICT).isoformat(timespec="seconds"),
+                }
+            )
         )
         written += 1
 
@@ -657,9 +659,7 @@ def _handle_reports_series(event: dict[str, Any], ddb) -> dict[str, Any]:
 
 def _handle_get_settings(event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
     """Phase-1 Settings (5 approved sections per NHAT-P01 / doc p.14-15)."""
-    prefs = from_dynamodb(
-        ddb.Table(USER_PREFS_TABLE).get_item(Key={"user_sub": user["sub"]}).get("Item") or {}
-    )
+    prefs = from_dynamodb(ddb.Table(USER_PREFS_TABLE).get_item(Key={"user_sub": user["sub"]}).get("Item") or {})
     stores = _scan_all(ddb.Table(STORE_LIST_TABLE))
     return _json_response(
         200,
@@ -707,41 +707,46 @@ def _handle_seed_initial_data(event: dict[str, Any], ddb) -> dict[str, Any]:
     """Seed initial DEMO-S01 store and 16 SKUs (12 milk + 4 Slide snacks per doc p.8)."""
     now_iso = datetime.now(ICT).isoformat(timespec="seconds")
     ddb.Table(STORE_LIST_TABLE).put_item(
-        Item=to_dynamodb_safe({
-            "store_id": "DEMO-S01",
-            "store_name": "Demo Store S01",
-            "district": "Ho Chi Minh City",
-            "camera_id": "CAM-S01-A",
-            "categories_in_view": ["Milk", "Snacks"],
-            "wifi_available": True,
-            "status": "active",
-            "updated_at": now_iso,
-        })
+        Item=to_dynamodb_safe(
+            {
+                "store_id": "DEMO-S01",
+                "store_name": "Demo Store S01",
+                "district": "Ho Chi Minh City",
+                "camera_id": "CAM-S01-A",
+                "categories_in_view": ["Milk", "Snacks"],
+                "wifi_available": True,
+                "status": "active",
+                "updated_at": now_iso,
+            }
+        )
     )
     sku_tbl = ddb.Table(SKU_MASTER_TABLE)
     for alias, meta in DEFAULT_ALIAS_MAP.items():
         sku_tbl.put_item(
-            Item=to_dynamodb_safe({
-                "sku_id": meta["sku_id"],
-                "sku_name_vi": meta["sku_name_vi"],
-                "sku_name_en": meta["sku_name_en"],
-                "model_alias": alias,
-                "brand": meta["brand"],
-                "manufacturer": meta["manufacturer"],
-                "category": meta["category"],
-                "subcategory": meta["subcategory"],
-                "pack_type": meta["pack_type"],
-                "pack_size": meta["pack_size"],
-                "barcode": None,
-                "image_url": None,
-                "is_active": True,
-                "updated_at": now_iso,
-            })
+            Item=to_dynamodb_safe(
+                {
+                    "sku_id": meta["sku_id"],
+                    "sku_name_vi": meta["sku_name_vi"],
+                    "sku_name_en": meta["sku_name_en"],
+                    "model_alias": alias,
+                    "brand": meta["brand"],
+                    "manufacturer": meta["manufacturer"],
+                    "category": meta["category"],
+                    "subcategory": meta["subcategory"],
+                    "pack_type": meta["pack_type"],
+                    "pack_size": meta["pack_size"],
+                    "barcode": None,
+                    "image_url": None,
+                    "is_active": True,
+                    "updated_at": now_iso,
+                }
+            )
         )
     return _json_response(200, {"seeded_stores": 1, "seeded_skus": len(DEFAULT_ALIAS_MAP)}, event)
 
 
 # --- Model page (spec docs/superpowers/specs/2026-11-23-model-quality-page-design.md) -------------------------
+
 
 def _audit_view(item: dict[str, Any]) -> dict[str, Any]:
     out = {k: v for k, v in item.items() if not k.endswith("_json")}
@@ -779,18 +784,24 @@ def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:
     days = int(params.get("days") or 7)
     audits = [a for a in _scan_all(ddb.Table(AUDITS_TABLE)) if _within_days(str(a.get("capture_timestamp", "")), days)]
     counts = {s: sum(1 for a in audits if a.get("status") == s) for s in ("pending", "done", "skipped")}
-    chosen = sorted((a for a in audits if not status or a.get("status") == status),
-                    key=lambda a: str(a.get("capture_timestamp", "")), reverse=True)
-    items = [{
-        "audit_id": a["audit_id"],
-        "camera_id": a.get("camera_id"),
-        "capture_id": a.get("capture_id"),
-        "capture_timestamp": a.get("capture_timestamp"),
-        "model_version": a.get("model_version"),
-        "status": a.get("status"),
-        "n_boxes": len(json.loads(a.get("ai_boxes_json") or "[]")),
-        "labeled_by": a.get("labeled_by"),
-    } for a in chosen]
+    chosen = sorted(
+        (a for a in audits if not status or a.get("status") == status),
+        key=lambda a: str(a.get("capture_timestamp", "")),
+        reverse=True,
+    )
+    items = [
+        {
+            "audit_id": a["audit_id"],
+            "camera_id": a.get("camera_id"),
+            "capture_id": a.get("capture_id"),
+            "capture_timestamp": a.get("capture_timestamp"),
+            "model_version": a.get("model_version"),
+            "status": a.get("status"),
+            "n_boxes": len(json.loads(a.get("ai_boxes_json") or "[]")),
+            "labeled_by": a.get("labeled_by"),
+        }
+        for a in chosen
+    ]
     return _json_response(200, {"items": items, "counts": counts}, event)
 
 
@@ -800,8 +811,9 @@ def _handle_model_audit_get(audit_id: str, event: dict[str, Any], s3, ddb) -> di
         return _json_response(404, {"error": "NOT_FOUND", "audit_id": audit_id}, event)
     view = _audit_view(audit)
     view["frame_url"] = _presign_frame(s3, audit.get("image_key", ""), ANALYTICS_BUCKET)
-    view["sku_choices"] = sorted(({"label": label, "name": name} for label, name in _sku_choices(ddb).items()),
-                                 key=lambda c: c["name"])
+    view["sku_choices"] = sorted(
+        ({"label": label, "name": name} for label, name in _sku_choices(ddb).items()), key=lambda c: c["name"]
+    )
     return _json_response(200, view, event)
 
 
@@ -812,8 +824,12 @@ def _set_audit(ddb, audit: dict[str, Any], values: dict[str, Any], remove: tuple
         expr += " REMOVE " + ", ".join(remove)
     table = ddb.Table(AUDITS_TABLE)
     key = {"store_id": audit["store_id"], "audit_id": audit["audit_id"]}
-    table.update_item(Key=key, UpdateExpression=expr, ExpressionAttributeNames=names,
-                      ExpressionAttributeValues={f":{k}": v for k, v in values.items()})
+    table.update_item(
+        Key=key,
+        UpdateExpression=expr,
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues={f":{k}": v for k, v in values.items()},
+    )
     return from_dynamodb(table.get_item(Key=key)["Item"])
 
 
@@ -831,18 +847,26 @@ def _handle_model_audit_put(audit_id: str, event: dict[str, Any], user: dict[str
     if errors:
         return _json_response(400, {"error": "INVALID_LABELS", "message": "; ".join(errors)}, event)
     clean_verdicts = [
-        {"box_id": v["box_id"], "verdict": v["verdict"],
-         **({"true_sku_id": v["true_sku_id"]} if v["verdict"] == "wrong_sku" else {})}
+        {
+            "box_id": v["box_id"],
+            "verdict": v["verdict"],
+            **({"true_sku_id": v["true_sku_id"]} if v["verdict"] == "wrong_sku" else {}),
+        }
         for v in verdicts
     ]
     clean_missed = [{"sku_id": m["sku_id"], "x": m["x"], "y": m["y"]} for m in missed]
-    saved = _set_audit(ddb, audit, {
-        "verdicts_json": json.dumps(clean_verdicts, separators=(",", ":")),
-        "missed_json": json.dumps(clean_missed, separators=(",", ":")),
-        "status": "done",
-        "labeled_by": user["email"],
-        "labeled_at": datetime.now(ICT).isoformat(timespec="seconds"),
-    }, remove=("skip_reason", "skip_note"))
+    saved = _set_audit(
+        ddb,
+        audit,
+        {
+            "verdicts_json": json.dumps(clean_verdicts, separators=(",", ":")),
+            "missed_json": json.dumps(clean_missed, separators=(",", ":")),
+            "status": "done",
+            "labeled_by": user["email"],
+            "labeled_at": datetime.now(ICT).isoformat(timespec="seconds"),
+        },
+        remove=("skip_reason", "skip_note"),
+    )
     return _json_response(200, _audit_view(saved), event)
 
 
@@ -852,15 +876,20 @@ def _handle_model_audit_skip(audit_id: str, event: dict[str, Any], user: dict[st
         return _json_response(404, {"error": "NOT_FOUND", "audit_id": audit_id}, event)
     body = _parse_body(event)
     if body.get("reason") not in SKIP_REASONS:
-        return _json_response(400, {"error": "INVALID_REASON", "message": f"reason must be one of {list(SKIP_REASONS)}"},
-                              event)
-    saved = _set_audit(ddb, audit, {
-        "status": "skipped",
-        "skip_reason": body["reason"],
-        "skip_note": str(body.get("note") or "")[:500],
-        "labeled_by": user["email"],
-        "labeled_at": datetime.now(ICT).isoformat(timespec="seconds"),
-    })
+        return _json_response(
+            400, {"error": "INVALID_REASON", "message": f"reason must be one of {list(SKIP_REASONS)}"}, event
+        )
+    saved = _set_audit(
+        ddb,
+        audit,
+        {
+            "status": "skipped",
+            "skip_reason": body["reason"],
+            "skip_note": str(body.get("note") or "")[:500],
+            "labeled_by": user["email"],
+            "labeled_at": datetime.now(ICT).isoformat(timespec="seconds"),
+        },
+    )
     return _json_response(200, _audit_view(saved), event)
 
 
@@ -878,28 +907,41 @@ def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
     params = event.get("queryStringParameters") or {}
     days = int(params.get("days") or 7)
     version = params.get("model_version") or "all"
-    done = [a for a in _scan_all(ddb.Table(AUDITS_TABLE))
-            if a.get("status") == "done" and _within_days(str(a.get("capture_timestamp", "")), days)]
+    done = [
+        a
+        for a in _scan_all(ddb.Table(AUDITS_TABLE))
+        if a.get("status") == "done" and _within_days(str(a.get("capture_timestamp", "")), days)
+    ]
     latest: dict[str, str] = {}
     for a in done:
         v = a.get("model_version") or "unknown"
         latest[v] = max(latest.get(v, ""), str(a.get("capture_timestamp", "")))
     chosen = [a for a in done if version == "all" or (a.get("model_version") or "unknown") == version]
     health = [h for h in _scan_all(ddb.Table(MODEL_HEALTH_TABLE)) if _hour_within_days(str(h.get("hour", "")), days)]
-    processing = [float(h["processing_ms_median"]) for h in health if "processing_ms_median" in h
-                  for _ in range(int(h.get("captures", 0)))]
-    return _json_response(200, {
-        **summarize([_audit_view(a) for a in chosen], processing),
-        "model_versions": sorted(latest, key=lambda v: latest[v], reverse=True),
-        "range": {"days": days, "model_version": version},
-    }, event)
+    processing = [
+        float(h["processing_ms_median"])
+        for h in health
+        if "processing_ms_median" in h
+        for _ in range(int(h.get("captures", 0)))
+    ]
+    return _json_response(
+        200,
+        {
+            **summarize([_audit_view(a) for a in chosen], processing),
+            "model_versions": sorted(latest, key=lambda v: latest[v], reverse=True),
+            "range": {"days": days, "model_version": version},
+        },
+        event,
+    )
 
 
 def _handle_model_health(event: dict[str, Any], ddb) -> dict[str, Any]:
     params = event.get("queryStringParameters") or {}
     days = int(params.get("days") or 7)
-    items = sorted((h for h in _scan_all(ddb.Table(MODEL_HEALTH_TABLE)) if _hour_within_days(str(h.get("hour", "")), days)),
-                   key=lambda h: (str(h.get("hour", "")), str(h.get("camera_id", ""))))
+    items = sorted(
+        (h for h in _scan_all(ddb.Table(MODEL_HEALTH_TABLE)) if _hour_within_days(str(h.get("hour", "")), days)),
+        key=lambda h: (str(h.get("hour", "")), str(h.get("camera_id", ""))),
+    )
     return _json_response(200, {"items": items}, event)
 
 
@@ -981,7 +1023,7 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
             return _handle_get_products(event, ddb)
 
         if method == "GET" and route_path.startswith("/products/"):
-            sku_param = route_path[len("/products/"):]
+            sku_param = route_path[len("/products/") :]
             return _handle_get_product_detail(sku_param, event, s3, ddb)
 
         if method == "GET" and route_path == "/stores":

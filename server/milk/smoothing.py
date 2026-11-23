@@ -3,6 +3,7 @@
 A hand reaching for a carton hides others for a frame or two; the median keeps the
 number on screen from jumping. Raw per-frame counts are still stored unchanged.
 """
+
 from __future__ import annotations
 
 from collections import deque

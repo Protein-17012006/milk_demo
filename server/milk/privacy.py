@@ -11,6 +11,7 @@ chained:
 
 Both can still miss someone; stored frames are reviewed with that limit in mind.
 """
+
 from __future__ import annotations
 
 import logging
@@ -49,7 +50,11 @@ class FaceBlurrer:
         cv2 = self._cv2
         h, w = image.shape[:2]
         scale = min(1.0, self._max_side / max(h, w))
-        small = cv2.resize(image, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA) if scale < 1 else image
+        small = (
+            cv2.resize(image, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
+            if scale < 1
+            else image
+        )
         self._detector.setInputSize((small.shape[1], small.shape[0]))
         _, faces = self._detector.detect(small)
         if faces is None:
@@ -81,8 +86,9 @@ def person_regions(boxes, image_height: int, mode: str = "head") -> list[tuple[i
 
 
 class PersonBlurrer:
-    def __init__(self, model_path: str, conf: float = 0.25, imgsz: int = 1280, device: str | None = None,
-                 mode: str = "head") -> None:
+    def __init__(
+        self, model_path: str, conf: float = 0.25, imgsz: int = 1280, device: str | None = None, mode: str = "head"
+    ) -> None:
         from ultralytics import YOLO  # only on machines that run the model
 
         if not Path(model_path).is_file():
@@ -93,8 +99,9 @@ class PersonBlurrer:
         self._conf, self._imgsz, self._device, self._mode = conf, imgsz, device or None, mode
 
     def blur(self, image: np.ndarray) -> tuple[np.ndarray, int]:
-        result = self._model.predict(image, classes=[0], conf=self._conf, imgsz=self._imgsz,
-                                     device=self._device, verbose=False)[0]
+        result = self._model.predict(
+            image, classes=[0], conf=self._conf, imgsz=self._imgsz, device=self._device, verbose=False
+        )[0]
         boxes = [] if result.boxes is None else result.boxes.xyxy.cpu().numpy()
         if len(boxes) == 0:
             return image, 0
@@ -120,8 +127,9 @@ class ChainBlurrer:
         return image, total
 
 
-def load_blurrer(face_model: str, person_model: str | None = None, device: str | None = None,
-                 person_mode: str = "head") -> ChainBlurrer | None:
+def load_blurrer(
+    face_model: str, person_model: str | None = None, device: str | None = None, person_mode: str = "head"
+) -> ChainBlurrer | None:
     """Every blurrer that can load. None only if none can: then nothing is stored."""
     blurrers = []
     if person_model:

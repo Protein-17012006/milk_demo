@@ -1,4 +1,5 @@
 """Integration tests with mocked AWS (moto) matching KHANG-T001 CI conventions."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -13,6 +14,8 @@ from moto import mock_aws
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
+
+from datetime import UTC
 
 import common  # noqa: E402
 
@@ -106,8 +109,16 @@ def _backend(monkeypatch: pytest.MonkeyPatch):
     return api, ingest
 
 
-def _ingest(ingest, camera_id: str, hhmmss: str, counts: list[tuple[str, int]], *, detections=None,
-            model_version=None, with_frame: bool = False) -> None:
+def _ingest(
+    ingest,
+    camera_id: str,
+    hhmmss: str,
+    counts: list[tuple[str, int]],
+    *,
+    detections=None,
+    model_version=None,
+    with_frame: bool = False,
+) -> None:
     """Ingest one hub result of store DEMO-S01 taken on 21/11 at hhmmss (may carry a -2 suffix); counts are
     (model label, units). with_frame puts a fake frame in the hub bucket, as the hub does."""
     capture_id = f"CAP-S01-20261121-{hhmmss}"
@@ -116,21 +127,42 @@ def _ingest(ingest, camera_id: str, hhmmss: str, counts: list[tuple[str, int]], 
     image_key = f"frames/{camera_id}/2026-11-21/{image}" if with_frame else ""
     if with_frame:
         boto3.client("s3", region_name="ap-southeast-1").put_object(
-            Bucket="test-hub-bucket", Key=image_key, Body=f"jpeg {hhmmss}".encode())
-    head = {"capture_id": capture_id, "store_id": "DEMO-S01", "camera_id": camera_id, "capture_timestamp": ts,
-            "capture_source": "CCTV", "image_filename": image}
+            Bucket="test-hub-bucket", Key=image_key, Body=f"jpeg {hhmmss}".encode()
+        )
+    head = {
+        "capture_id": capture_id,
+        "store_id": "DEMO-S01",
+        "camera_id": camera_id,
+        "capture_timestamp": ts,
+        "capture_source": "CCTV",
+        "image_filename": image,
+    }
     rows = [
-        {**head, "reading_id": f"RD-S01-20261121-{hhmmss}-{i:03d}", "sku_id": label, "sku_name": label,
-         "unit_count": units, "confidence_score": 0.9, "detection_method": "Visual",
-         "bounding_box": [[10 + 60 * k, 20, 50, 80] for k in range(units)], "is_flagged": False, "flag_reason": "",
-         "processing_time_ms": 20}
+        {
+            **head,
+            "reading_id": f"RD-S01-20261121-{hhmmss}-{i:03d}",
+            "sku_id": label,
+            "sku_name": label,
+            "unit_count": units,
+            "confidence_score": 0.9,
+            "detection_method": "Visual",
+            "bounding_box": [[10 + 60 * k, 20, 50, 80] for k in range(units)],
+            "is_flagged": False,
+            "flag_reason": "",
+            "processing_time_ms": 20,
+        }
         for i, (label, units) in enumerate(counts, start=1)
     ]
     total = sum(units for _, units in counts)
-    record = {**head, "image_key": image_key, "processing_time_ms": 20,
-              "units_found": total, "flagged_rows": 0, "rows": rows,
-              "log": {**head, "units_found": total, "rows_written": len(rows), "flagged_rows": 0,
-                      "processing_time_ms": 20}}
+    record = {
+        **head,
+        "image_key": image_key,
+        "processing_time_ms": 20,
+        "units_found": total,
+        "flagged_rows": 0,
+        "rows": rows,
+        "log": {**head, "units_found": total, "rows_written": len(rows), "flagged_rows": 0, "processing_time_ms": 20},
+    }
     if detections is not None:
         record["detections"] = detections
     if model_version is not None:
@@ -146,19 +178,26 @@ def _table(name: str):
 @mock_aws
 def test_previous_hour_is_in_ict(monkeypatch: pytest.MonkeyPatch):
     _, ingest = _backend(monkeypatch)
-    from datetime import datetime, timezone
-    assert ingest.previous_hour(datetime(2026, 11, 23, 6, 24, tzinfo=timezone.utc)) == "20261123-12"
+    from datetime import datetime
+
+    assert ingest.previous_hour(datetime(2026, 11, 23, 6, 24, tzinfo=UTC)) == "20261123-12"
 
 
 @mock_aws
 def test_capture_keeps_model_version_and_boxes(monkeypatch: pytest.MonkeyPatch):
     _, ingest = _backend(monkeypatch)
-    dets = [{"sku_id": "hot160", "conf": 0.87, "box": [948, 326, 72, 167]},
-            {"sku_id": "hot160", "conf": 0.94, "box": [1190, 288, 74, 150]}]
+    dets = [
+        {"sku_id": "hot160", "conf": 0.87, "box": [948, 326, 72, 167]},
+        {"sku_id": "hot160", "conf": 0.94, "box": [1190, 288, 74, 150]},
+    ]
     _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)], detections=dets, model_version="v3")
     _ingest(ingest, "CAM-S01-A", "140710", [("hot160", 2)])
-    new = _table("test-captures").get_item(Key={"camera_id": "CAM-S01-A", "capture_id": "CAP-S01-20261121-140700"})["Item"]
-    old = _table("test-captures").get_item(Key={"camera_id": "CAM-S01-A", "capture_id": "CAP-S01-20261121-140710"})["Item"]
+    new = _table("test-captures").get_item(Key={"camera_id": "CAM-S01-A", "capture_id": "CAP-S01-20261121-140700"})[
+        "Item"
+    ]
+    old = _table("test-captures").get_item(Key={"camera_id": "CAM-S01-A", "capture_id": "CAP-S01-20261121-140710"})[
+        "Item"
+    ]
     assert new["model_version"] == "v3" and json.loads(new["detections_json"]) == dets
     assert old["model_version"] == "unknown" and "detections_json" not in old
 
@@ -179,8 +218,11 @@ def test_hourly_sampling_picks_one_frame_and_copies_it(monkeypatch: pytest.Monke
     assert audit["capture_id"] in {"CAP-S01-20261121-140700", "CAP-S01-20261121-140710", "CAP-S01-20261121-140710-2"}
     assert [b["box"] for b in json.loads(audit["ai_boxes_json"])] == [[10, 20, 50, 80], [70, 20, 50, 80]]
     assert audit["image_key"].startswith("audits/frames/CAM-S01-A/2026-11-21/CAM-S01-A_20261121_14")
-    copied = boto3.client("s3", region_name="ap-southeast-1").get_object(
-        Bucket="test-analytics-bucket", Key=audit["image_key"])["Body"].read()
+    copied = (
+        boto3.client("s3", region_name="ap-southeast-1")
+        .get_object(Bucket="test-analytics-bucket", Key=audit["image_key"])["Body"]
+        .read()
+    )
     assert copied == f"jpeg {audit['capture_id'].rsplit('20261121-', 1)[1]}".encode()
 
 
@@ -215,7 +257,6 @@ def test_health_item_for_the_hour(monkeypatch: pytest.MonkeyPatch):
     assert item["captures"] == 3 and item["expires_at"] > 0
 
 
-
 @mock_aws
 def test_the_hourly_run_samples_before_the_official_pick(monkeypatch: pytest.MonkeyPatch):
     # the official pick scans the whole captures table; if it fails as the table grows, the hour must
@@ -231,6 +272,7 @@ def test_the_hourly_run_samples_before_the_official_pick(monkeypatch: pytest.Mon
     with pytest.raises(MemoryError):
         ingest.lambda_handler({"source": "aws.events"})
     assert [a["audit_id"] for a in _table("test-audits").scan()["Items"]] == ["AUD-CAM-S01-A-20261121-14"]
+
 
 @mock_aws
 def test_backfill_writes_health_for_past_hours(monkeypatch: pytest.MonkeyPatch):
@@ -281,7 +323,6 @@ def test_an_older_capture_arriving_late_leaves_a_newer_reading(monkeypatch: pyte
     assert _units(api)[TH_SWEET] == 2
 
 
-
 AUDIT_14 = "AUD-CAM-S01-A-20261121-14"
 
 
@@ -301,9 +342,14 @@ def _call(api, method: str, path: str, groups: str = "field_team", body=None, qu
 def test_datagent_cannot_open_model_routes(monkeypatch: pytest.MonkeyPatch):
     api, ingest = _backend(monkeypatch)
     _one_pending_audit(ingest)
-    for method, path in (("GET", "/v1/model/audits"), ("GET", f"/v1/model/audits/{AUDIT_14}"),
-                         ("PUT", f"/v1/model/audits/{AUDIT_14}"), ("POST", f"/v1/model/audits/{AUDIT_14}/skip"),
-                         ("GET", "/v1/model/summary"), ("GET", "/v1/model/health")):
+    for method, path in (
+        ("GET", "/v1/model/audits"),
+        ("GET", f"/v1/model/audits/{AUDIT_14}"),
+        ("PUT", f"/v1/model/audits/{AUDIT_14}"),
+        ("POST", f"/v1/model/audits/{AUDIT_14}/skip"),
+        ("GET", "/v1/model/summary"),
+        ("GET", "/v1/model/health"),
+    ):
         assert _call(api, method, path, groups="datagent", body={})[0] == 403
 
 
@@ -325,9 +371,13 @@ def test_list_and_detail_for_field_team(monkeypatch: pytest.MonkeyPatch):
 def test_saving_labels_marks_the_audit_done(monkeypatch: pytest.MonkeyPatch):
     api, ingest = _backend(monkeypatch)
     _one_pending_audit(ingest)
-    body = {"verdicts": [{"box_id": 1, "verdict": "correct"},
-                         {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "original145"}],
-            "missed": [{"sku_id": "hot160", "x": 5, "y": 5}]}
+    body = {
+        "verdicts": [
+            {"box_id": 1, "verdict": "correct"},
+            {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "original145"},
+        ],
+        "missed": [{"sku_id": "hot160", "x": 5, "y": 5}],
+    }
     status, saved = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body=body)
     assert status == 200
     assert saved["status"] == "done" and saved["labeled_by"] == "tester@datagent.io"
@@ -338,8 +388,12 @@ def test_saving_labels_marks_the_audit_done(monkeypatch: pytest.MonkeyPatch):
 def test_saving_without_a_verdict_for_every_box_is_refused(monkeypatch: pytest.MonkeyPatch):
     api, ingest = _backend(monkeypatch)
     _one_pending_audit(ingest)
-    status, err = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}",
-                        body={"verdicts": [{"box_id": 1, "verdict": "correct"}], "missed": []})
+    status, err = _call(
+        api,
+        "PUT",
+        f"/v1/model/audits/{AUDIT_14}",
+        body={"verdicts": [{"box_id": 1, "verdict": "correct"}], "missed": []},
+    )
     assert status == 400 and err["error"] == "INVALID_LABELS" and "box 2 has no verdict" in err["message"]
     assert _call(api, "GET", f"/v1/model/audits/{AUDIT_14}")[1]["status"] == "pending"
 
@@ -358,8 +412,12 @@ def test_a_frame_without_boxes_is_saved_with_misses_only(monkeypatch: pytest.Mon
     api, ingest = _backend(monkeypatch)
     _one_pending_audit(ingest, counts=())
     assert _call(api, "GET", f"/v1/model/audits/{AUDIT_14}")[1]["ai_boxes"] == []
-    status, saved = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}",
-                          body={"verdicts": [], "missed": [{"sku_id": "hot160", "x": 1, "y": 1}]})
+    status, saved = _call(
+        api,
+        "PUT",
+        f"/v1/model/audits/{AUDIT_14}",
+        body={"verdicts": [], "missed": [{"sku_id": "hot160", "x": 1, "y": 1}]},
+    )
     assert status == 200 and saved["status"] == "done"
 
 
@@ -375,8 +433,9 @@ def test_summary_without_labelled_frames_has_no_numbers(monkeypatch: pytest.Monk
     _one_pending_audit(ingest)
     status, summary = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
     assert status == 200 and summary["n_audits"] == 0
-    assert all(k["value"] is None and k["n"] == 0 for name, k in summary["kpis"].items()
-               if name != "avg_processing_time_ms")  # speed comes from hourly health, not from labels
+    assert all(
+        k["value"] is None and k["n"] == 0 for name, k in summary["kpis"].items() if name != "avg_processing_time_ms"
+    )  # speed comes from hourly health, not from labels
 
 
 @mock_aws
@@ -385,10 +444,18 @@ def test_summary_after_labelling_one_frame(monkeypatch: pytest.MonkeyPatch):
     _ingest(ingest, "CAM-S01-A", "130000", [("hot160", 1)])
     _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)], model_version="v3", with_frame=True)
     ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
-    _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body={
-        "verdicts": [{"box_id": 1, "verdict": "correct"},
-                     {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "original145"}],
-        "missed": []})
+    _call(
+        api,
+        "PUT",
+        f"/v1/model/audits/{AUDIT_14}",
+        body={
+            "verdicts": [
+                {"box_id": 1, "verdict": "correct"},
+                {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "original145"},
+            ],
+            "missed": [],
+        },
+    )
     status, summary = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
     assert status == 200 and summary["n_audits"] == 1
     assert summary["kpis"]["overall_identification_accuracy"]["value"] == 0.5
@@ -400,8 +467,12 @@ def test_summary_after_labelling_one_frame(monkeypatch: pytest.MonkeyPatch):
 def test_summary_for_a_version_without_frames(monkeypatch: pytest.MonkeyPatch):
     api, ingest = _backend(monkeypatch)
     _one_pending_audit(ingest)
-    _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body={
-        "verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}], "missed": []})
+    _call(
+        api,
+        "PUT",
+        f"/v1/model/audits/{AUDIT_14}",
+        body={"verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}], "missed": []},
+    )
     status, summary = _call(api, "GET", "/v1/model/summary", query={"days": "0", "model_version": "v9"})
     assert status == 200 and summary["n_audits"] == 0
     assert summary["kpis"]["overall_identification_accuracy"]["value"] is None
@@ -416,7 +487,10 @@ def test_health_lists_hours_in_order(monkeypatch: pytest.MonkeyPatch):
     status, health = _call(api, "GET", "/v1/model/health", query={"days": "0"})
     assert status == 200
     assert [(h["camera_id"], h["hour"], h["captures"]) for h in health["items"]] == [
-        ("CAM-S01-A", "20261121-14", 1), ("CAM-S01-A", "20261121-15", 1)]
+        ("CAM-S01-A", "20261121-14", 1),
+        ("CAM-S01-A", "20261121-15", 1),
+    ]
+
 
 @mock_aws
 def test_end_to_end_ingest_review_and_export_with_moto(monkeypatch: pytest.MonkeyPatch):

@@ -4,6 +4,7 @@ The column order and value formats follow the sample files sent with the CV Outp
 report v1.0 of 17/10/2026: one row per SKU per image, 16 columns, `is_flagged` as
 TRUE/FALSE, `bounding_box` as a JSON list of [x, y, width, height] in pixels.
 """
+
 from __future__ import annotations
 
 import csv
@@ -16,15 +17,35 @@ from datetime import datetime
 import numpy as np
 
 CV_OUTPUT_COLUMNS = [
-    "reading_id", "capture_id", "store_id", "camera_id", "capture_timestamp",
-    "capture_source", "image_filename", "sku_id", "sku_name", "unit_count",
-    "confidence_score", "detection_method", "bounding_box", "is_flagged",
-    "flag_reason", "processing_time_ms",
+    "reading_id",
+    "capture_id",
+    "store_id",
+    "camera_id",
+    "capture_timestamp",
+    "capture_source",
+    "image_filename",
+    "sku_id",
+    "sku_name",
+    "unit_count",
+    "confidence_score",
+    "detection_method",
+    "bounding_box",
+    "is_flagged",
+    "flag_reason",
+    "processing_time_ms",
 ]
 
 CAPTURE_LOG_COLUMNS = [
-    "capture_id", "store_id", "camera_id", "capture_timestamp", "capture_source",
-    "image_filename", "rows_written", "units_found", "flagged_rows", "processing_time_ms",
+    "capture_id",
+    "store_id",
+    "camera_id",
+    "capture_timestamp",
+    "capture_source",
+    "image_filename",
+    "rows_written",
+    "units_found",
+    "flagged_rows",
+    "processing_time_ms",
 ]
 
 UNRECOGNIZED = "UNRECOGNIZED"
@@ -118,24 +139,26 @@ def build_capture(
             reason = "Low Confidence" if flagged else ""
             name = dets[0].sku_name
         methods = sorted({d.method for d in dets})
-        rows.append({
-            "reading_id": f"RD-{stem.text}-{seq:03d}",
-            "capture_id": capture_id,
-            "store_id": store_id,
-            "camera_id": camera_id,
-            "capture_timestamp": timestamp,
-            "capture_source": capture_source,
-            "image_filename": image_filename,
-            "sku_id": sku_id,
-            "sku_name": name,
-            "unit_count": len(dets),
-            "confidence_score": confidence,
-            "detection_method": methods[0] if len(methods) == 1 else " + ".join(methods),
-            "bounding_box": [list(d.box) for d in dets],
-            "is_flagged": flagged,
-            "flag_reason": reason,
-            "processing_time_ms": processing_time_ms,
-        })
+        rows.append(
+            {
+                "reading_id": f"RD-{stem.text}-{seq:03d}",
+                "capture_id": capture_id,
+                "store_id": store_id,
+                "camera_id": camera_id,
+                "capture_timestamp": timestamp,
+                "capture_source": capture_source,
+                "image_filename": image_filename,
+                "sku_id": sku_id,
+                "sku_name": name,
+                "unit_count": len(dets),
+                "confidence_score": confidence,
+                "detection_method": methods[0] if len(methods) == 1 else " + ".join(methods),
+                "bounding_box": [list(d.box) for d in dets],
+                "is_flagged": flagged,
+                "flag_reason": reason,
+                "processing_time_ms": processing_time_ms,
+            }
+        )
 
     log = {
         "capture_id": capture_id,
@@ -157,8 +180,9 @@ def counts_of(rows: list[dict]) -> dict[str, int]:
     return {(r["sku_id"] or UNRECOGNIZED): r["unit_count"] for r in rows}
 
 
-def persist_record(log_line: dict, rows: list[dict], counts: dict, latency_ms: int,
-                   detections: list[Detection], model_version: str) -> dict:
+def persist_record(
+    log_line: dict, rows: list[dict], counts: dict, latency_ms: int, detections: list[Detection], model_version: str
+) -> dict:
     """The record the hub stores for one capture: the CV Output rows and Capture Log line, plus the model
     version and every box with its own score (rows only keep one score per SKU)."""
     return {
@@ -169,8 +193,7 @@ def persist_record(log_line: dict, rows: list[dict], counts: dict, latency_ms: i
         "latency_ms": latency_ms,
         "model_version": model_version,
         "detections": [
-            {"sku_id": d.sku_id, "conf": round(d.confidence, 3), "box": [round(v) for v in d.box]}
-            for d in detections
+            {"sku_id": d.sku_id, "conf": round(d.confidence, 3), "box": [round(v) for v in d.box]} for d in detections
         ],
     }
 

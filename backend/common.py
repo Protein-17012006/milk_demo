@@ -3,6 +3,7 @@
 Zero third-party dependencies so Lambda deployment zips stay minimal and OS-independent.
 CSV column order and formatting match server/milk/cvoutput.py byte-for-byte.
 """
+
 from __future__ import annotations
 
 import csv

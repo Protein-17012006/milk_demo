@@ -1,4 +1,5 @@
 """Unit tests for the Platform B Serverless Backend (NHAT-P01)."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -97,9 +98,7 @@ def test_rbac_blocks_unassigned_self_registered_user():
     event = {
         "httpMethod": "GET",
         "path": "/v1/products",
-        "requestContext": {
-            "authorizer": {"claims": {"sub": "u-1", "email": "new@datagent.io"}}
-        },
+        "requestContext": {"authorizer": {"claims": {"sub": "u-1", "email": "new@datagent.io"}}},
     }
     resp = api_handler.lambda_handler(event)
     assert resp["statusCode"] == 403

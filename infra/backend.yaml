@@ -832,7 +832,6 @@ Resources:
   ApiWafAssociation:
     Type: AWS::WAFv2::WebACLAssociation
     Condition: UseWaf
-    DependsOn: ApiStage
     Properties:
       ResourceArn: !Sub "arn:aws:apigateway:${AWS::Region}::/restapis/${RestApi}/stages/${ApiStage}"
       WebACLArn: !GetAtt ApiWebAcl.Arn

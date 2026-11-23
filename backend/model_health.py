@@ -4,6 +4,7 @@
 worker since 23/11) or, for older captures, from the CV Output rows (one score per SKU). `hour_stats` sums up
 one camera-hour for the Model page. Nothing here touches AWS.
 """
+
 from __future__ import annotations
 
 import json
@@ -41,15 +42,25 @@ def capture_boxes(item: dict) -> list[dict]:
     detections = _json_list(item.get("detections_json"))
     if detections:
         return [
-            {"box_id": i, "sku_id": d.get("sku_id"), "conf": float(d.get("conf", 0.0)),
-             "box": [int(v) for v in d["box"]]}
+            {
+                "box_id": i,
+                "sku_id": d.get("sku_id"),
+                "conf": float(d.get("conf", 0.0)),
+                "box": [int(v) for v in d["box"]],
+            }
             for i, d in enumerate(detections, start=1)
         ]
     boxes = []
     for row in _json_list(item.get("rows_json")):
         for box in row.get("bounding_box") or []:
-            boxes.append({"box_id": len(boxes) + 1, "sku_id": _label(row),
-                          "conf": float(row.get("confidence_score", 0.0)), "box": [int(v) for v in box]})
+            boxes.append(
+                {
+                    "box_id": len(boxes) + 1,
+                    "sku_id": _label(row),
+                    "conf": float(row.get("confidence_score", 0.0)),
+                    "box": [int(v) for v in box],
+                }
+            )
     return boxes
 
 
@@ -76,9 +87,14 @@ def hour_stats(items: list[dict]) -> dict:
     confs = [b["conf"] for b in all_boxes]
     units = [int(it.get("units_found", 0)) for it in items]
     counts = [_counts(it) for it in items]
-    jumps = [sum(abs(a[k] - b[k]) for k in set(a) | set(b)) for a, b in zip(counts, counts[1:])]
+    jumps = [
+        sum(abs(a[k] - b[k]) for k in set(a) | set(b)) for a, b in zip(counts, counts[1:], strict=False)
+    ]  # consecutive pairs
     duplicates = sum(
-        1 for bs in boxes for i in range(len(bs)) for j in range(i + 1, len(bs))
+        1
+        for bs in boxes
+        for i in range(len(bs))
+        for j in range(i + 1, len(bs))
         if iou(bs[i]["box"], bs[j]["box"]) >= DUPLICATE_IOU
     )
     processing = [float(it.get("processing_time_ms", 0)) for it in items]

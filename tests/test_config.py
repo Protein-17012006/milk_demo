@@ -8,11 +8,7 @@ from milk import config
 def test_env_file_fills_missing_settings_but_never_overrides(tmp_path, monkeypatch):
     env = tmp_path / "worker.env"
     env.write_text(
-        "# comment line\n"
-        "MILK_TEST_A=from-file\n"
-        "MILK_TEST_B = 'quoted value'\n"
-        "MILK_TEST_C=from-file\n"
-        "not a setting\n",
+        "# comment line\nMILK_TEST_A=from-file\nMILK_TEST_B = 'quoted value'\nMILK_TEST_C=from-file\nnot a setting\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("MILK_TEST_C", "from-environment")
@@ -48,8 +44,29 @@ def test_model_version_comes_from_the_env(monkeypatch):
 
 def test_model_version_defaults_to_pipeline_and_slide_run(monkeypatch):
     monkeypatch.delenv("MILK_MODEL_VERSION", raising=False)
-    assert config.default_model_version("long+slide", "~/Desktop/Datagent/slide_pilot/runs_v3/best.pt") == "long+slide:runs_v3"
+    assert (
+        config.default_model_version("long+slide", "~/Desktop/Datagent/slide_pilot/runs_v3/best.pt")
+        == "long+slide:runs_v3"
+    )
     assert config.default_model_version("long", "") == "long"
     monkeypatch.setenv("MILK_PIPELINE", "long+slide")
     monkeypatch.setenv("MILK_SLIDE_WEIGHTS", "/home/long/Desktop/Datagent/slide_pilot/runs_v3/best.pt")
     assert config.load().model_version == "long+slide:runs_v3"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [(None, True), ("true", True), ("false", False), ("0", False), ("OFF", False)]
+)
+def test_cookie_secure_flag(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv("MILK_COOKIE_SECURE", raising=False)
+    else:
+        monkeypatch.setenv("MILK_COOKIE_SECURE", raw)
+    assert config.load().cookie_secure is expected
+
+
+def test_environment_and_version_come_from_the_pipeline(monkeypatch):
+    monkeypatch.setenv("MILK_ENVIRONMENT", "staging")
+    monkeypatch.setenv("MILK_VERSION", "1d58130")
+    s = config.load()
+    assert (s.environment, s.version) == ("staging", "1d58130")

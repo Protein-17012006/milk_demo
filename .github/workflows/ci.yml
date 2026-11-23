@@ -1,0 +1,123 @@
+# Four required checks on every pull request to main (branch protection names them exactly):
+#   lint      ruff check, ruff format --check, actionlint, shellcheck
+#   test      pytest; at least 80% line coverage on the hub code that ships in the image
+#   cfn-lint  every CloudFormation template in infra/
+#   image     docker build, the container answers /healthz, Trivy finds no fixable CRITICAL/HIGH
+# No path filter: required checks must report on every pull request, even docs-only ones.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install linters
+        run: pip install -r <(grep -E '^(ruff|actionlint-py|shellcheck-py)==' requirements-dev.txt)
+      - name: ruff check
+        run: ruff check --output-format=github .
+      - name: ruff format --check
+        run: ruff format --check .
+      - name: actionlint (also shellchecks every run block)
+        run: actionlint
+      - name: shellcheck
+        run: shellcheck -x -P scripts/ci scripts/ci/*.sh infra/remote/*.sh
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            server/requirements.txt
+      - name: Install
+        run: pip install -r requirements-dev.txt
+      # S3 and DynamoDB are faked with moto inside the tests, so no service container is needed.
+      # Coverage is gated on the modules that run in the deployed image; the counting worker
+      # (counter, stream, privacy, long_adapter) runs on the GPU machine, not through this pipeline.
+      - name: pytest
+        run: >-
+          pytest
+          --cov=milk.web --cov=milk.store --cov=milk.reindex --cov=milk.cvoutput
+          --cov=milk.config --cov=milk.smoothing
+          --cov-report=term-missing --cov-report=xml:coverage.xml
+          --cov-fail-under=80
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  cfn-lint:
+    name: cfn-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install cfn-lint
+        run: pip install -r <(grep -E '^cfn-lint==' requirements-dev.txt)
+      - name: cfn-lint
+        run: cfn-lint --regions ap-southeast-1 -- infra/*.yml infra/*.yaml
+
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker build
+        run: docker build --pull -t milk:ci .
+      - name: The container starts and answers /healthz
+        run: |
+          docker run -d --name hub -p 8000:8000 -e MILK_VERSION=ci -e MILK_COOKIE_SECURE=false milk:ci
+          for _ in $(seq 1 20); do
+            if curl -fsS http://localhost:8000/healthz | grep -q '"version":"ci"'; then exit 0; fi
+            sleep 1
+          done
+          docker logs hub
+          exit 1
+      - name: Trivy scan (fails on fixable CRITICAL or HIGH)
+        run: |
+          mkdir -p "$HOME/.cache/trivy"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            aquasec/trivy:0.58.1 image \
+            --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed --no-progress \
+            milk:ci
+      - name: Where the vulnerable packages are (only when the scan failed)
+        if: failure()
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            aquasec/trivy:0.58.1 image --format json --severity CRITICAL,HIGH --ignore-unfixed --no-progress \
+            --skip-db-update milk:ci |
+            jq -r '.Results[] | .Target as $t | .Vulnerabilities[]? | "\(.PkgName) \(.InstalledVersion) \(.VulnerabilityID) in \($t) \(.PkgPath // "")"'
+          docker run --rm --entrypoint sh milk:ci -c 'find / -xdev \( -iname "setuptools*" -o -name "*.cdx.json" -o -name "*.spdx.json" \) 2>/dev/null | grep -v "/setuptools/" | head -20'

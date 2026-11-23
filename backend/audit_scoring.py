@@ -11,11 +11,11 @@ The formulas follow the column descriptions of "Validation - Accuracy Report" (t
 show #ERROR!), as written in docs/superpowers/specs/2026-11-23-model-quality-page-design.md, section 5.
 Nothing here touches AWS, so the API can call it on whatever audits it loaded.
 """
+
 from __future__ import annotations
 
 import statistics
 from collections import Counter, defaultdict
-from typing import Any
 
 VERDICTS = ("correct", "wrong_sku", "not_product")
 SKIP_REASONS = ("blurry", "blocked", "camera_moved", "other")
@@ -117,14 +117,16 @@ def comparison_rows(audit: dict) -> list[dict]:
             category = "Minor"
         else:
             category = "Major"
-        rows.append({
-            "sku_id": sku,
-            "ai_unit_count": a,
-            "human_unit_count": h,
-            "count_difference": diff,
-            "count_accuracy_pct": max(0.0, 1 - abs(diff) / h) if h > 0 else 0.0,
-            "discrepancy_category": category,
-        })
+        rows.append(
+            {
+                "sku_id": sku,
+                "ai_unit_count": a,
+                "human_unit_count": h,
+                "count_difference": diff,
+                "count_accuracy_pct": max(0.0, 1 - abs(diff) / h) if h > 0 else 0.0,
+                "discrepancy_category": category,
+            }
+        )
     return rows
 
 
@@ -178,25 +180,29 @@ def _kpis(audits: list[dict], processing_ms: list[int]) -> dict:
     minor["exact_or_minor"] = exact_or_minor
     return {
         "sku_identification_accuracy": _kpi(
-            "sku_identification_accuracy", _share(sum(ident_top), len(ident_top)), len(ident_top)),
+            "sku_identification_accuracy", _share(sum(ident_top), len(ident_top)), len(ident_top)
+        ),
         "overall_identification_accuracy": _kpi(
-            "overall_identification_accuracy", _share(sum(ok for _, ok in ident), len(ident)), len(ident)),
+            "overall_identification_accuracy", _share(sum(ok for _, ok in ident), len(ident)), len(ident)
+        ),
         "unit_count_mae": _kpi("unit_count_mae", _mean([abs(r["count_difference"]) for r in rows]), len(rows)),
         "unit_count_accuracy_avg": _kpi(
-            "unit_count_accuracy_avg", _mean([r["count_accuracy_pct"] for r in with_truth]), len(with_truth)),
+            "unit_count_accuracy_avg", _mean([r["count_accuracy_pct"] for r in with_truth]), len(with_truth)
+        ),
         "exact_match_rate": _kpi("exact_match_rate", _share(category["Exact Match"], len(rows)), len(rows)),
         "minor_error_rate": minor,
-        "missed_sku_rate": _kpi(
-            "missed_sku_rate", _share(category["Missed SKU"], len(with_truth)), len(with_truth)),
+        "missed_sku_rate": _kpi("missed_sku_rate", _share(category["Missed SKU"], len(with_truth)), len(with_truth)),
         "false_detection_rate": _kpi(
-            "false_detection_rate", _share(sum(v["verdict"] == "not_product" for _, v in judged), len(judged)),
-            len(judged)),
+            "false_detection_rate",
+            _share(sum(v["verdict"] == "not_product" for _, v in judged), len(judged)),
+            len(judged),
+        ),
         "avg_confidence_correct": _kpi("avg_confidence_correct", _mean(conf_right), len(conf_right)),
         "avg_confidence_incorrect": _kpi("avg_confidence_incorrect", _mean(conf_wrong), len(conf_wrong)),
         "avg_processing_time_ms": _kpi("avg_processing_time_ms", _mean(processing_ms), len(processing_ms)),
         "unrecognized_product_rate": _kpi(
-            "unrecognized_product_rate", _share(sum(b["sku_id"] is None for b, _ in judged), len(judged)),
-            len(judged)),
+            "unrecognized_product_rate", _share(sum(b["sku_id"] is None for b, _ in judged), len(judged)), len(judged)
+        ),
     }
 
 
@@ -224,15 +230,17 @@ def _per_sku(audits: list[dict]) -> list[dict]:
     out = []
     for sku in sorted(set(model_units) | set(true_units)):
         top = confused[sku].most_common(1)
-        out.append({
-            "sku_id": sku,
-            "model_units": model_units[sku],
-            "true_units": true_units[sku],
-            "id_accuracy": right[sku] / model_units[sku] if model_units[sku] else None,
-            "missed_units": missed[sku],
-            "confused_as": top[0][0] if top else None,
-            "confused_count": top[0][1] if top else 0,
-        })
+        out.append(
+            {
+                "sku_id": sku,
+                "model_units": model_units[sku],
+                "true_units": true_units[sku],
+                "id_accuracy": right[sku] / model_units[sku] if model_units[sku] else None,
+                "missed_units": missed[sku],
+                "confused_as": top[0][0] if top else None,
+                "confused_count": top[0][1] if top else 0,
+            }
+        )
     return out
 
 
@@ -269,13 +277,15 @@ def summarize(audits: list[dict], processing_ms: list[int]) -> dict:
     days = []
     for day in sorted(by_day):
         k = _kpis(by_day[day], [])
-        days.append({
-            "day": day,
-            "audits": len(by_day[day]),
-            "overall_identification_accuracy": k["overall_identification_accuracy"]["value"],
-            "unit_count_mae": k["unit_count_mae"]["value"],
-            "exact_or_minor_rate": k["minor_error_rate"]["exact_or_minor"],
-        })
+        days.append(
+            {
+                "day": day,
+                "audits": len(by_day[day]),
+                "overall_identification_accuracy": k["overall_identification_accuracy"]["value"],
+                "unit_count_mae": k["unit_count_mae"]["value"],
+                "exact_or_minor_rate": k["minor_error_rate"]["exact_or_minor"],
+            }
+        )
     return {
         "n_audits": len(audits),
         "kpis": _kpis(audits, processing_ms),
