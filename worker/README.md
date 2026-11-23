@@ -109,9 +109,18 @@ MILK_SAMPLE_FOR_S=30      # mỗi lượt đọc luồng 30 giây rồi ngắt
 - **Ngoài lượt:**
   - Worker không mở luồng, nên MediaMTX trên hub cũng thôi kéo camera.
   - Hai chiều dữ liệu trên giảm khoảng 90%.
-  - Worker vẫn gửi trạng thái mỗi 2 giây. Dashboard hub hiện "Đếm theo nhịp · lượt kế tiếp HH:MM".
+  - Worker vẫn gửi trạng thái mỗi 2 giây, kèm thông tin lượt đang mở hay không và lượt trước đếm được bao nhiêu
+    khung.
+- **Dashboard hub** dựa vào thông tin đó để hiện:
+  - Xanh "Đếm theo nhịp · lượt kế tiếp HH:MM": giữa hai lượt, lượt trước ổn.
+  - Xanh "Đang mở lượt đếm…": vài giây đầu lượt, lúc đang nối luồng.
+  - **Đỏ** "Lượt đếm đang mở nhưng không nhận được luồng": camera hoặc hub có lỗi.
+  - **Đỏ** "Lượt trước không nhận được khung nào": cả lượt trước không có khung nào.
 - **Trong lượt:**
   - Bộ làm mượt bắt đầu lại từ đầu.
-  - Chỉ lưu khi đã đủ `MILK_SMOOTH_WINDOW` khung, nên mỗi lượt lưu khoảng 3–4 lần.
+  - `MILK_SMOOTH_WINDOW − 1` khung đầu của lượt không được lưu. Từ khung đó trở đi lưu như bình thường, nên mỗi lượt
+    lưu khoảng 3–4 lần. Bản ghi luôn giữ số đếm thô của từng khung.
+- **Sinh lại `worker.env`:** dùng `infra/worker-env.ps1`. Script ghi đủ mọi khoá, kể cả hai biến đếm theo nhịp
+  (mặc định 300/30) và chứng chỉ hub. Trong script có sẵn ví dụ cho HUYHOANG.
 - **Cần dashboard live** (ví dụ ngày demo): đặt `MILK_SAMPLE_EVERY_S=0` rồi khởi động lại worker. Bỏ trống thì cũng
   là đếm liên tục.

@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> None:
         else f"stream read for {s.sample_for_s:g} s every {s.sample_every_s:g} s",
     )
 
-    last_seq = window_frames = 0
+    last_seq = 0
     last_start = last_status = last_publish = last_persist = 0.0
     last_smoothed: dict | None = None
     done_at: deque[float] = deque(maxlen=1200)
@@ -187,7 +187,7 @@ def main(argv: list[str] | None = None) -> None:
         reader, opened = sampler.reader_at(now)
         if opened:  # a new window: counts from the last one must not leak into this one
             smoother.reset()
-            last_seq, window_frames, last_smoothed = 0, 0, None
+            last_seq, last_smoothed = 0, None
         if reader is None:  # between windows: the stream stays closed
             post_status(None, now)
             time.sleep(max(0.05, min(1.0, sampler.next_start(now) - now)))
@@ -201,7 +201,7 @@ def main(argv: list[str] | None = None) -> None:
         if frame is None:
             continue
         last_seq, last_start = frame.seq, time.time()
-        window_frames += 1
+        sampler.note_frame()
         try:
             image = frame.image
             height, width = image.shape[:2]
@@ -233,8 +233,10 @@ def main(argv: list[str] | None = None) -> None:
             since_persist = time.time() - last_persist
             publish = changed or since_publish >= publish_gap
             persist = since_persist >= s.persist_every_s or (changed and since_persist >= 2.0)
-            if not sampler.continuous and window_frames < s.smooth_window:
-                persist = False  # the first frames of a window are not smoothed yet
+            if not sampler.continuous and sampler.frames_in_window < s.smooth_window:
+                # Sampled counting stores nothing from a window's first smooth_window - 1 frames: the dashboard's
+                # smoothed count is still filling. Records hold raw per-frame counts either way.
+                persist = False
             if not (publish or persist):
                 continue
 

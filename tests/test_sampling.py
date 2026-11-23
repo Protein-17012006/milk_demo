@@ -65,7 +65,32 @@ def test_continuous_keeps_one_reader_open():
 
 def test_describe_tells_when_the_next_window_opens():
     s, _ = make()
-    assert s.describe(630) == {"every_s": 300, "for_s": 30, "next_at": 900}
+    d = s.describe(630)
+    assert (d["every_s"], d["for_s"], d["next_at"]) == (300, 30, 900)
+
+
+def test_describe_says_whether_a_window_is_open():
+    # the hub must tell "between windows" (fine) from "in a window but no stream" (an outage)
+    s, _ = make()
+    s.reader_at(600)
+    assert s.describe(600)["open"] is True
+    s.reader_at(630)
+    assert s.describe(630)["open"] is False
+
+
+def test_frames_of_the_last_window_are_reported():
+    s, _ = make()
+    assert s.describe(100)["last_window_frames"] is None  # no window has ended yet
+    s.reader_at(600)
+    for _ in range(3):
+        s.note_frame()
+    assert s.frames_in_window == 3
+    s.reader_at(630)  # the window ends
+    assert s.describe(631)["last_window_frames"] == 3
+    s.reader_at(900)
+    assert s.frames_in_window == 0
+    s.reader_at(930)  # a window that got no frame: the camera or the hub is down
+    assert s.describe(931)["last_window_frames"] == 0
 
 
 def test_close_stops_the_open_reader_once():
