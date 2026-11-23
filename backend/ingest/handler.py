@@ -501,12 +501,11 @@ def _handle_backfill_health(event: dict[str, Any], s3_client, ddb_resource) -> d
 def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
     s3_client, ddb_resource = _aws_clients()
 
-    # 1. EventBridge scheduled hourly selection, then the Model page's frame to label and hourly health
+    # 1. EventBridge hourly run: first the Model page's frame to label and hourly health (light queries), then
+    #    the official capture of the hour, which scans the whole captures table and may fail as it grows
     if event.get("source") == "aws.events" or event.get("action") == "select_hourly_official":
-        result = _handle_hourly_official(s3_client, ddb_resource)
-        result["model_page"] = _run_hour(s3_client, ddb_resource, previous_hour(datetime.now(timezone.utc)),
-                                         random.Random())
-        return result
+        model_page = _run_hour(s3_client, ddb_resource, previous_hour(datetime.now(timezone.utc)), random.Random())
+        return {**_handle_hourly_official(s3_client, ddb_resource), "model_page": model_page}
 
     if event.get("action") == "sample_audits":
         hour = event.get("hour") or previous_hour(datetime.now(timezone.utc))

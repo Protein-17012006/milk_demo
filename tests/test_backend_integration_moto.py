@@ -215,6 +215,23 @@ def test_health_item_for_the_hour(monkeypatch: pytest.MonkeyPatch):
     assert item["captures"] == 3 and item["expires_at"] > 0
 
 
+
+@mock_aws
+def test_the_hourly_run_samples_before_the_official_pick(monkeypatch: pytest.MonkeyPatch):
+    # the official pick scans the whole captures table; if it fails as the table grows, the hour must
+    # already have its frame to label
+    _, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)], with_frame=True)
+    monkeypatch.setattr(ingest, "previous_hour", lambda now: "20261121-14")
+
+    def broken(*_args):
+        raise MemoryError("captures table too large")
+
+    monkeypatch.setattr(ingest, "_handle_hourly_official", broken)
+    with pytest.raises(MemoryError):
+        ingest.lambda_handler({"source": "aws.events"})
+    assert [a["audit_id"] for a in _table("test-audits").scan()["Items"]] == ["AUD-CAM-S01-A-20261121-14"]
+
 @mock_aws
 def test_backfill_writes_health_for_past_hours(monkeypatch: pytest.MonkeyPatch):
     _, ingest = _backend(monkeypatch)
