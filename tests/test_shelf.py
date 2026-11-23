@@ -9,7 +9,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from shelf import add_buckets, bucket_of, build_check, is_open, step_state, valid_hours  # noqa: E402
+from shelf import (  # noqa: E402
+    add_buckets,
+    bucket_of,
+    build_check,
+    change_pct,
+    is_open,
+    merge,
+    rollup,
+    step_state,
+    totals,
+    valid_hours,
+)
 
 
 def cap(camera: str, ts: str, counts: dict[str, int], boxes: list[dict] | None = None) -> dict:
@@ -150,3 +161,71 @@ def test_restock_after_out_of_stock_carries_its_open_minutes():
         ("OOS", "20261123-1410", None),
         ("RESTOCKED", "20261123-1430", 20),
     ]
+
+
+# --- Task 3: rollups and period totals ---
+
+
+def _sku(checks=0, available=0, units_sum=0, oos_started=0, restock_units=0, restock_events=0) -> dict:
+    return {
+        "checks": checks,
+        "available": available,
+        "units_sum": units_sum,
+        "oos_started": oos_started,
+        "restock_units": restock_units,
+        "restock_events": restock_events,
+    }
+
+
+def test_only_open_checks_of_expected_skus_count():
+    open_c = {
+        "bucket": "20261123-1400",
+        "counts": {"A": 3, "C": 9},
+        "open": True,
+        "expected": ["A", "B"],
+        "confident_skus": [],
+    }
+    shut_c = {
+        "bucket": "20261123-1405",
+        "counts": {"A": 5},
+        "open": False,
+        "expected": ["A", "B"],
+        "confident_skus": ["C"],
+    }
+    r = rollup([open_c, shut_c], [])
+    assert r["checks"] == 1 and r["max_total"] == 3 and r["confident_skus"] == ["C"]
+    assert r["skus"]["A"] == _sku(checks=1, available=1, units_sum=3)
+    assert r["skus"]["B"] == _sku(checks=1)  # in the list but not seen: a check without stock
+    assert "C" not in r["skus"]
+
+
+def test_events_feed_out_of_stock_and_restock_numbers():
+    ev = [
+        {"sku_id": "A", "type": "OOS", "delta": -5},
+        {"sku_id": "A", "type": "RESTOCKED", "delta": 6},
+        {"sku_id": "B", "type": "RESTOCKED", "delta": 2},
+    ]
+    r = rollup([], ev)
+    assert r["skus"]["A"] == _sku(oos_started=1, restock_units=6, restock_events=1)
+    assert r["skus"]["B"] == _sku(restock_units=2, restock_events=1)
+
+
+def test_merge_adds_hours_into_a_day():
+    h1 = {"checks": 12, "max_total": 9, "confident_skus": ["A"], "skus": {"A": _sku(12, 10, 40)}}
+    h2 = {"checks": 10, "max_total": 14, "confident_skus": ["B"], "skus": {"A": _sku(10, 10, 50, 0, 6, 1)}}
+    day = merge([h1, h2])
+    assert (day["checks"], day["max_total"], day["confident_skus"]) == (22, 14, ["A", "B"])
+    assert day["skus"]["A"] == _sku(22, 20, 90, 0, 6, 1)
+
+
+def test_osa_is_available_over_counted_checks_and_filters_by_sku():
+    r = {"checks": 2, "max_total": 7, "confident_skus": [], "skus": {"A": _sku(2, 2, 7), "B": _sku(2, 1, 1, 1)}}
+    t = totals([r])
+    assert (t["osa"], t["avg_total_units"], t["store_checks"], t["oos_started"]) == (0.75, 4.0, 2, 1)
+    assert totals([r], {"B"})["osa"] == 0.5
+    assert totals([])["osa"] is None and totals([])["avg_total_units"] is None
+
+
+def test_change_pct():
+    assert change_pct(13.4, 10.0) == 34.0
+    assert change_pct(5, 0) is None and change_pct(5, None) is None and change_pct(None, 5) is None

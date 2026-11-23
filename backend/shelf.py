@@ -153,3 +153,90 @@ def step_state(state: dict | None, units: int, bucket: str) -> tuple[dict, dict 
         s["oos_checks"] += 1
     s["L"], s["prev"], s["prev_bucket"] = new_level, x2, bucket
     return s, event
+
+
+SKU_FIELDS = ("checks", "available", "units_sum", "oos_started", "restock_units", "restock_events")
+
+
+def _blank() -> dict[str, int]:
+    return dict.fromkeys(SKU_FIELDS, 0)
+
+
+def _result(checks: int, max_total: int, confident: set[str], skus: dict[str, dict[str, int]]) -> dict[str, Any]:
+    return {
+        "checks": checks,
+        "max_total": max_total,
+        "confident_skus": sorted(confident),
+        "skus": {sku: dict(row) for sku, row in skus.items()},
+    }
+
+
+def rollup(checks: list[dict], events: list[dict]) -> dict[str, Any]:
+    """Sum of one hour: counted checks (open, with expected SKUs) per SKU, the store's largest total in one check,
+    SKUs seen confidently in any check, and the hour's OOS and RESTOCKED events. An expected SKU missing from a
+    check's counts is a check without stock."""
+    skus: dict[str, dict[str, int]] = defaultdict(_blank)
+    counted, max_total, confident = 0, 0, set()
+    for check in checks:
+        confident.update(check.get("confident_skus") or [])
+        expected = check.get("expected") or []
+        if not check.get("open") or not expected:
+            continue
+        counted += 1
+        total = 0
+        for sku in expected:
+            units = int((check.get("counts") or {}).get(sku, 0))
+            row = skus[sku]
+            row["checks"] += 1
+            row["available"] += 1 if units > 0 else 0
+            row["units_sum"] += units
+            total += units
+        max_total = max(max_total, total)
+    for event in events:
+        row = skus[event["sku_id"]]
+        if event["type"] == "OOS":
+            row["oos_started"] += 1
+        elif event["type"] == "RESTOCKED":
+            row["restock_units"] += int(event["delta"])
+            row["restock_events"] += 1
+    return _result(counted, max_total, confident, skus)
+
+
+def merge(rollups: list[dict]) -> dict[str, Any]:
+    """Hours into a day (or days into a period): counts add, max_total is the largest, confident SKUs unite."""
+    skus: dict[str, dict[str, int]] = defaultdict(_blank)
+    counted, max_total, confident = 0, 0, set()
+    for r in rollups:
+        counted += int(r.get("checks", 0))
+        max_total = max(max_total, int(r.get("max_total", 0)))
+        confident.update(r.get("confident_skus") or [])
+        for sku, row in (r.get("skus") or {}).items():
+            for field in SKU_FIELDS:
+                skus[sku][field] += int(row.get(field, 0))
+    return _result(counted, max_total, confident, skus)
+
+
+def totals(rollups: list[dict], skus: set[str] | None = None) -> dict[str, Any]:
+    """Numbers of a period, optionally for some SKUs only (a category). osa and avg_total_units are None when
+    nothing was counted."""
+    merged = merge(rollups)
+    rows = [row for sku, row in merged["skus"].items() if skus is None or sku in skus]
+    sums = {field: sum(row[field] for row in rows) for field in SKU_FIELDS}
+    store_checks = merged["checks"]
+    return {
+        "checks": sums["checks"],
+        "available": sums["available"],
+        "osa": sums["available"] / sums["checks"] if sums["checks"] else None,
+        "restock_units": sums["restock_units"],
+        "restock_events": sums["restock_events"],
+        "oos_started": sums["oos_started"],
+        "store_checks": store_checks,
+        "avg_total_units": sums["units_sum"] / store_checks if store_checks else None,
+    }
+
+
+def change_pct(current: float | None, previous: float | None) -> float | None:
+    """Percent change against the previous period, rounded to 1 decimal; None without a previous value."""
+    if current is None or not previous:
+        return None
+    return round((current - previous) / previous * 100, 1)
