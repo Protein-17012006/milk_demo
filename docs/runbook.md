@@ -1,5 +1,24 @@
 # Runbook: the milk hub pipeline
 
+> **The CD part was taken down on 2026-11-23.** hoang and khang agreed it is not needed. Few people use the
+> system, and the hub that does the real work is the EC2 hub of HOANG-P08, so the ECS copy only cost money
+> (about $50–100 a month).
+>
+> - **Removed:**
+>   - The workflows `cd`, `deploy`, `infra`, `power`, `rollback` and `reingest`.
+>   - The stacks `milk-development`, `milk-test`, `milk-staging`, `milk-production` and `milk-platform`
+>     (ALB, VPC, ECR, clusters).
+>   - The IAM user `milk-github` with its keys, and the GitHub secrets, variable and environments.
+> - **Kept:**
+>   - `ci.yml`, the four checks on every PR.
+>   - The templates and scripts below.
+>   - The bucket `milk-development-754361433393`. It is no longer managed by any stack, but the website
+>     backend (`milk-backend-development`) reads its Lambda code from `releases/backend/` there.
+> - **To bring CD back:** restore the six workflow files from the commit before the one that removed them,
+>   then follow section 1.
+>
+> The text below describes the pipeline as it was.
+
 One Docker image per commit, promoted through four environments on Amazon ECS Fargate in
 **ap-southeast-1 (Singapore)**, the same region as the EC2 hub. A merge to `main` deploys to development, test and staging by itself;
 production deploys after a reviewer approves it in GitHub. Nobody deploys by hand: every
