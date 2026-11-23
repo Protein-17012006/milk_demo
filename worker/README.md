@@ -58,6 +58,18 @@ Không đặt thì worker tự ghép `MILK_PIPELINE` với tên thư mục chứ
   được đọc file (đặt bằng `icacls`).
 - **ffmpeg**: cài bằng `winget install --id Gyan.FFmpeg -e`. Script chạy nền tự tìm ffmpeg, vì PATH của
   `SYSTEM` không có thư mục của winget.
+- **Chứng chỉ của hub**: hub dùng chứng chỉ TLS tự ký (`CN=milk-demo-ingest`), và ffmpeg 9 trên Windows từ chối
+  chứng chỉ đó (log báo `Peer certificate failed verification`). Lấy chứng chỉ ngay trên hub bằng
+  `.\infra\remote-run.ps1 "cat /etc/mediamtx/server.crt"`, lưu thành `C:\Users\huyho\Datagent\hub-ingest.crt`, rồi
+  thêm hai dòng vào `worker.env`:
+
+  ```
+  MILK_STREAM_CA_FILE=C:/Users/huyho/Datagent/hub-ingest.crt
+  MILK_STREAM_TLS_NAME=milk-demo-ingest
+  ```
+
+  Worker vẫn kiểm chứng chỉ, nhưng chỉ tin đúng chứng chỉ của hub. Dựng lại hub là sinh chứng chỉ mới, nên phải
+  chép lại file này.
 - **Đăng ký chạy nền** (một lần, PowerShell quyền admin):
   `powershell -ExecutionPolicy Bypass -File worker\windows\register-task.ps1 -Root C:\Users\huyho\Datagent`.
   Lệnh này tạo task `milk-worker`:

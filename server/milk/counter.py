@@ -103,7 +103,9 @@ def main(argv: list[str] | None = None) -> None:
     tz = timezone(timedelta(hours=s.utc_offset_hours))
     pipeline = load_pipeline(s.pipeline, s.models_dir)
     blurrer = load_blurrer(s.yunet_path, s.person_model, s.device, s.person_blur)
-    reader = LatestFrameReader(s.stream_url, keyframes_only=(s.decode != "all"))
+    reader = LatestFrameReader(
+        s.stream_url, keyframes_only=(s.decode != "all"), ca_file=s.stream_ca_file, tls_name=s.stream_tls_name
+    )
     reader.start()
     hub = HubClient(s.hub_url, s.internal_token)
     smoother = CountSmoother(s.smooth_window)

@@ -43,10 +43,18 @@ def redact(text: str) -> str:
     return _PASSPHRASE.sub(r"\1***", text)
 
 
-def _input_options(url: str) -> list[str]:
-    if url.startswith(("rtsp://", "rtsps://")):
-        return ["-rtsp_transport", "tcp", "-timeout", "10000000"]  # socket timeout, microseconds
-    return []
+def _input_options(url: str, ca_file: str | None = None, tls_name: str | None = None) -> list[str]:
+    """Options placed before the input URL. For RTSPS with `ca_file`, ffmpeg trusts only that certificate: the
+    hub's is self-signed, and ffmpeg 9 on Windows refuses it otherwise. `tls_name` is the name in the certificate
+    (milk-demo-ingest), needed because the URL holds the hub's IP address."""
+    if not url.startswith(("rtsp://", "rtsps://")):
+        return []
+    options = ["-rtsp_transport", "tcp", "-timeout", "10000000"]  # socket timeout, microseconds
+    if ca_file and url.startswith("rtsps://"):
+        options += ["-tls_verify", "1", "-ca_file", ca_file]
+        if tls_name:
+            options += ["-verifyhost", tls_name]
+    return options
 
 
 def _read_exact(stream, size: int) -> bytearray | None:
@@ -69,12 +77,15 @@ class LatestFrameReader(threading.Thread):
         reconnect_s: float = 2.0,
         ffmpeg: str = "ffmpeg",
         ffprobe: str = "ffprobe",
+        ca_file: str | None = None,
+        tls_name: str | None = None,
     ) -> None:
         super().__init__(daemon=True, name="stream-reader")
         self.url = url
         self.keyframes_only = keyframes_only
         self.reconnect_s = reconnect_s
         self.ffmpeg, self.ffprobe = ffmpeg, ffprobe
+        self._options = _input_options(url, ca_file, tls_name)
         self.connected = False
         self.last_error: str | None = None
         self.stream_info: dict = {}
@@ -92,7 +103,7 @@ class LatestFrameReader(threading.Thread):
             self.ffprobe,
             "-v",
             "error",
-            *_input_options(self.url),
+            *self._options,
             "-select_streams",
             "v:0",
             "-show_entries",
@@ -119,7 +130,7 @@ class LatestFrameReader(threading.Thread):
             proc = None
             try:
                 width, height, codec = self._probe()
-                cmd = [self.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", *_input_options(self.url)]
+                cmd = [self.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", *self._options]
                 if self.keyframes_only:
                     cmd += ["-skip_frame", "nokey"]
                 cmd += [

@@ -79,6 +79,8 @@ class Settings:
     cookie_secure: bool = True
     environment: str = "local"
     version: str = "dev"
+    stream_ca_file: str | None = None
+    stream_tls_name: str | None = None
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -130,4 +132,7 @@ def load(env_file: str | None = None) -> Settings:
         cookie_secure=_flag("MILK_COOKIE_SECURE", True),
         environment=_env("MILK_ENVIRONMENT", "local"),
         version=_env("MILK_VERSION", "dev"),  # image tag, set by the pipeline
+        # The hub's RTSPS certificate (self-signed) and the name in it, for workers whose ffmpeg checks it
+        stream_ca_file=_env("MILK_STREAM_CA_FILE"),
+        stream_tls_name=_env("MILK_STREAM_TLS_NAME"),
     )
