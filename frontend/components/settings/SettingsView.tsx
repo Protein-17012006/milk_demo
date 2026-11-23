@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { createApiClient, type ApiStore } from "@/lib/api";
+import { ShelfPlanSection } from "./ShelfPlanSection";
 
 const DATE_FORMATS = [
   "DD MMM YYYY, HH:mm",
@@ -429,6 +430,16 @@ export function SettingsView() {
               ))}
             </div>
           </section>
+
+          {/* Section 6: Shelf plan per store (opening hours + expected SKUs) for the Dashboard's shelf numbers */}
+          {isApproved && liveSynced && (
+            <ShelfPlanSection
+              stores={stores}
+              getIdToken={getIdToken}
+              isAdmin={hasGroup("team_admin")}
+              showToast={showToast}
+            />
+          )}
         </div>
       </div>
 
