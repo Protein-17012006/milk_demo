@@ -762,3 +762,70 @@ def test_a_saved_plan_is_recomputed_on_the_next_tick(monkeypatch: pytest.MonkeyP
     hot = _shelf("hour#20261121-14")["skus"][HOT]
     assert (hot["checks"], hot["available"]) == (4, 0)
     assert _event_keys() == [f"20261121-1410#{CHEESE}#OOS"]
+
+
+PLAN_PATH = "/v1/stores/DEMO-S01/shelf-plan"
+
+
+def _at(api, monkeypatch: pytest.MonkeyPatch, iso: str) -> None:
+    from datetime import datetime
+
+    monkeypatch.setattr(api, "_now", lambda: datetime.fromisoformat(iso))
+
+
+def _call(api, method: str, path: str, groups: str = "datagent", body: dict | None = None, query: dict | None = None):
+    resp = api.lambda_handler(_auth_event(method, path, groups=groups, body=body, query=query))
+    return resp["statusCode"], json.loads(resp["body"]) if resp["body"] else None
+
+
+@mock_aws
+def test_shelf_plan_starts_as_the_suggestion(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, "2026-11-21T15:00:00+07:00")
+    _table("test-shelf").put_item(Item={"store_id": "DEMO-S01", "key": "day#20261121", "confident_skus": [CHEESE]})
+    status, body = _call(api, "GET", PLAN_PATH)
+    assert status == 200 and body["source"] == "suggested"
+    assert body["expected_skus"] == [CHEESE] == [s["sku_id"] for s in body["suggested"]]
+    assert body["suggested"][0]["last_seen"] == "2026-11-21"
+
+
+@mock_aws
+def test_only_team_admin_saves_a_shelf_plan(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    plan = {"open_time": "06:00", "close_time": "22:00", "expected_skus": [CHEESE]}
+    assert _call(api, "PUT", PLAN_PATH, body=plan)[0] == 403
+    status, body = _call(api, "PUT", PLAN_PATH, groups="team_admin", body=plan)
+    assert status == 200 and body["source"] == "saved" and body["expected_skus"] == [CHEESE]
+    assert (body["open_time"], body["close_time"]) == ("06:00", "22:00")
+
+
+@mock_aws
+def test_shelf_plan_rejects_bad_hours_and_unknown_skus(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    for open_time, close_time in [("22:00", "06:00"), ("6:00", "22:00")]:
+        body = {"open_time": open_time, "close_time": close_time, "expected_skus": [CHEESE]}
+        status, out = _call(api, "PUT", PLAN_PATH, groups="team_admin", body=body)
+        assert (status, out["error"]) == (400, "INVALID_HOURS")
+    body = {"open_time": "06:00", "close_time": "22:00", "expected_skus": [CHEESE, "No Such Milk"]}
+    status, out = _call(api, "PUT", PLAN_PATH, groups="team_admin", body=body)
+    assert (status, out["error"], out["skus"]) == (400, "UNKNOWN_SKU", ["No Such Milk"])
+    store = _table("test-store-list").get_item(Key={"store_id": "DEMO-S01"})["Item"]
+    assert "open_time" not in store and "expected_skus" not in store
+
+
+@mock_aws
+def test_saving_a_plan_asks_for_a_recompute(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, "2026-11-21T15:00:00+07:00")
+    body = {"open_time": "06:00", "close_time": "22:00", "expected_skus": [CHEESE]}
+    assert _call(api, "PUT", PLAN_PATH, groups="team_admin", body=body)[0] == 200
+    store = _table("test-store-list").get_item(Key={"store_id": "DEMO-S01"})["Item"]
+    assert store["shelf_recompute_requested_at"] == "2026-11-21T15:00:00+07:00"
+    assert store["shelf_plan_updated_by"] == "tester@datagent.io"
+
+
+@mock_aws
+def test_shelf_plan_of_an_unknown_store_is_not_found(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    status, body = _call(api, "GET", "/v1/stores/NOPE/shelf-plan")
+    assert (status, body["error"]) == (404, "STORE_NOT_FOUND")

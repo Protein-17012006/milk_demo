@@ -20,7 +20,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import boto3
+import shelf
 from audit_scoring import SKIP_REASONS, summarize, validate_labels
+from boto3.dynamodb.conditions import Key
 from common import (
     CAPTURE_LOG_COLUMNS,
     CV_OUTPUT_COLUMNS,
@@ -47,6 +49,8 @@ ANALYTICS_BUCKET = os.environ.get("ANALYTICS_BUCKET", "")
 HUB_BUCKET = os.environ.get("HUB_BUCKET", "")
 AUDITS_TABLE = os.environ.get("AUDITS_TABLE", "")
 MODEL_HEALTH_TABLE = os.environ.get("MODEL_HEALTH_TABLE", "")
+SHELF_TABLE = os.environ.get("SHELF_TABLE", "")
+SHELF_EVENTS_TABLE = os.environ.get("SHELF_EVENTS_TABLE", "")
 ALLOWED_ORIGINS = {
     o.strip()
     for o in os.environ.get(
@@ -164,6 +168,20 @@ def _scan_all(table) -> list[dict[str, Any]]:
         resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
         items.extend(resp.get("Items", []))
     return from_dynamodb(items)
+
+
+def _query_all(table, **kwargs) -> list[dict[str, Any]]:
+    resp = table.query(**kwargs)
+    items = resp.get("Items", [])
+    while "LastEvaluatedKey" in resp:
+        resp = table.query(ExclusiveStartKey=resp["LastEvaluatedKey"], **kwargs)
+        items.extend(resp.get("Items", []))
+    return from_dynamodb(items)
+
+
+def _now() -> datetime:
+    """Current time in ICT; tests replace it."""
+    return datetime.now(ICT)
 
 
 def _load_products_catalog(ddb) -> tuple[list[dict[str, Any]], int, int]:
@@ -745,6 +763,88 @@ def _handle_seed_initial_data(event: dict[str, Any], ddb) -> dict[str, Any]:
     return _json_response(200, {"seeded_stores": 1, "seeded_skus": len(DEFAULT_ALIAS_MAP)}, event)
 
 
+# --- Shelf plan per store (spec docs/superpowers/specs/2026-11-24-dashboard-shelf-metrics-design.md) ----------
+
+
+def _store_item(ddb, store_id: str) -> dict[str, Any] | None:
+    return from_dynamodb(ddb.Table(STORE_LIST_TABLE).get_item(Key={"store_id": store_id}).get("Item"))
+
+
+def _shelf_days(ddb, store_id: str, first_day: str, last_day: str) -> list[dict[str, Any]]:
+    """day# rollups of a store from first_day through last_day (YYYYMMDD), oldest first."""
+    cond = Key("store_id").eq(store_id) & Key("key").between(f"day#{first_day}", f"day#{last_day}")
+    return _query_all(ddb.Table(SHELF_TABLE), KeyConditionExpression=cond)
+
+
+def _suggested_skus(ddb, store_id: str) -> list[dict[str, str]]:
+    """SKUs seen with a box at 0.70 or more in the last SUGGEST_DAYS days, with the last day each was seen."""
+    today = _now()
+    first = (today - timedelta(days=shelf.SUGGEST_DAYS - 1)).strftime("%Y%m%d")
+    last_seen: dict[str, str] = {}
+    for day in _shelf_days(ddb, store_id, first, today.strftime("%Y%m%d")):
+        date = day["key"][4:]
+        for sku in day.get("confident_skus") or []:
+            last_seen[sku] = max(last_seen.get(sku, ""), f"{date[:4]}-{date[4:6]}-{date[6:]}")
+    return [{"sku_id": sku, "last_seen": last_seen[sku]} for sku in sorted(last_seen)]
+
+
+def _shelf_plan_view(ddb, store: dict[str, Any]) -> dict[str, Any]:
+    suggested = _suggested_skus(ddb, store["store_id"])
+    saved = sorted(store.get("expected_skus") or [])
+    return {
+        "store_id": store["store_id"],
+        "open_time": store.get("open_time"),
+        "close_time": store.get("close_time"),
+        "expected_skus": saved or [s["sku_id"] for s in suggested],
+        "source": "saved" if saved else "suggested",
+        "suggested": suggested,
+        "updated_by": store.get("shelf_plan_updated_by"),
+        "updated_at": store.get("shelf_plan_updated_at"),
+    }
+
+
+def _handle_get_shelf_plan(store_id: str, event: dict[str, Any], ddb) -> dict[str, Any]:
+    store = _store_item(ddb, store_id)
+    if not store:
+        return _json_response(404, {"error": "STORE_NOT_FOUND"}, event)
+    return _json_response(200, _shelf_plan_view(ddb, store), event)
+
+
+def _handle_put_shelf_plan(store_id: str, event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
+    """team_admin saves opening hours and expected SKUs; the next shelf_tick recomputes the last 15 days."""
+    if not _store_item(ddb, store_id):
+        return _json_response(404, {"error": "STORE_NOT_FOUND"}, event)
+    body = _parse_body(event)
+    open_time, close_time = str(body.get("open_time") or ""), str(body.get("close_time") or "")
+    if not shelf.valid_hours(open_time, close_time):
+        return _json_response(400, {"error": "INVALID_HOURS"}, event)
+    skus = body.get("expected_skus") or []
+    if not isinstance(skus, list) or not all(isinstance(s, str) for s in skus):
+        return _json_response(400, {"error": "INVALID_SKUS"}, event)
+    known = {s["sku_id"] for s in _scan_all(ddb.Table(SKU_MASTER_TABLE))}
+    unknown = sorted({s for s in skus if s not in known})
+    if unknown:
+        return _json_response(400, {"error": "UNKNOWN_SKU", "skus": unknown}, event)
+    now_iso = _now().isoformat(timespec="seconds")
+    values = {
+        ":o": open_time,
+        ":c": close_time,
+        ":by": user["email"],
+        ":at": now_iso,
+    }
+    update = "SET open_time = :o, close_time = :c, shelf_plan_updated_by = :by, shelf_plan_updated_at = :at, "
+    update += "shelf_recompute_requested_at = :at"
+    if skus:
+        update += ", expected_skus = :skus"
+        values[":skus"] = sorted(set(skus))
+    else:  # an empty list means: use the suggestion again
+        update += " REMOVE expected_skus"
+    ddb.Table(STORE_LIST_TABLE).update_item(
+        Key={"store_id": store_id}, UpdateExpression=update, ExpressionAttributeValues=values
+    )
+    return _json_response(200, _shelf_plan_view(ddb, _store_item(ddb, store_id)), event)
+
+
 # --- Model page (spec docs/superpowers/specs/2026-11-23-model-quality-page-design.md) -------------------------
 
 
@@ -1028,6 +1128,16 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
 
         if method == "GET" and route_path == "/stores":
             return _handle_get_stores(event, ddb)
+
+        if route_path.startswith("/stores/") and route_path.endswith("/shelf-plan"):
+            store_id = urllib.parse.unquote(route_path[len("/stores/") : -len("/shelf-plan")])
+            if method == "GET":
+                return _handle_get_shelf_plan(store_id, event, ddb)
+            if method == "PUT":
+                err = _require_groups(user, ADMIN_GROUPS, event)
+                if err:
+                    return err
+                return _handle_put_shelf_plan(store_id, event, user, ddb)
 
         if method == "GET" and route_path == "/search":
             return _handle_search(event, ddb)
