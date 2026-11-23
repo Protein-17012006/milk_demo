@@ -178,15 +178,29 @@ function renderStatus(status) {
     const model = worker.pipeline === "null" ? "chưa nạp" : worker.pipeline;
     setChip("chip-model", `Model: ${model}${where ? ` (${where})` : ""}`, worker.pipeline === "null" ? "warn" : "ok");
   }
-  if (worker.frames_last_minute !== undefined) setChip("chip-rate", `${worker.frames_last_minute} khung/phút`, worker.frames_last_minute ? "ok" : "warn");
+  // The worker may read the stream in windows (MILK_SAMPLE_EVERY_S): between windows it is closed on purpose.
+  const waiting = betweenWindows(status);
+  if (waiting) {
+    setChip("chip-rate", `${Math.round(worker.sampling.every_s / 60)} phút/lượt`, "ok");
+  } else if (worker.frames_last_minute !== undefined) {
+    setChip("chip-rate", `${worker.frames_last_minute} khung/phút`, worker.frames_last_minute ? "ok" : "warn");
+  }
   if (!status.worker_ok) {
     setChip("chip-stream", "Bộ đếm không phản hồi", "bad");
   } else if (worker.connected) {
     const st = worker.stream || {};
     setChip("chip-stream", `Đang nhận luồng ${st.codec ? `(${st.codec.toUpperCase()} ${st.width}×${st.height})` : ""}`, "ok");
+  } else if (waiting) {
+    const next = new Date(worker.sampling.next_at * 1000).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+    setChip("chip-stream", `Đếm theo nhịp · lượt kế tiếp ${next}`, "ok");
   } else {
     setChip("chip-stream", "Chưa có luồng từ camera", "bad");
   }
+}
+
+function betweenWindows(status) {
+  const worker = status.worker || {};
+  return Boolean(status.worker_ok && worker.sampling && !worker.connected);
 }
 
 async function liveLoop() {
@@ -210,7 +224,8 @@ async function statusLoop() {
       const s = await (await api("/api/status")).json();
       $("where").textContent = `${s.store_id} · ${s.camera_id}`;
       renderStatus(s);
-      if (s.ingest && !s.ingest.ready && s.worker_ok) setChip("chip-stream", "Chưa có luồng từ camera", "bad");
+      // between sampling windows nobody reads the stream, so MediaMTX is not pulling the camera: that is expected
+      if (s.ingest && !s.ingest.ready && s.worker_ok && !betweenWindows(s)) setChip("chip-stream", "Chưa có luồng từ camera", "bad");
     } catch (err) {
       console.warn(err);
     }
