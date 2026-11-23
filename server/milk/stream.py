@@ -94,9 +94,18 @@ class LatestFrameReader(threading.Thread):
         self._seq = 0
         self._stop = threading.Event()
         self._stderr: deque[str] = deque(maxlen=20)
+        self._proc: subprocess.Popen | None = None
 
     def stop(self) -> None:
+        """Stops reading now. It also kills the running ffmpeg, so a sampling window closes at once instead of
+        after the socket timeout."""
         self._stop.set()
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except OSError:
+                pass  # it had already exited
 
     def _probe(self) -> tuple[int, int, str]:
         cmd = [
@@ -130,6 +139,8 @@ class LatestFrameReader(threading.Thread):
             proc = None
             try:
                 width, height, codec = self._probe()
+                if self._stop.is_set():
+                    break  # stopped while ffprobe was running
                 cmd = [self.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", *self._options]
                 if self.keyframes_only:
                     cmd += ["-skip_frame", "nokey"]
@@ -149,6 +160,7 @@ class LatestFrameReader(threading.Thread):
                     "pipe:1",
                 ]
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+                self._proc = proc
                 threading.Thread(target=self._drain, args=(proc.stderr,), daemon=True).start()
                 self.stream_info = {
                     "codec": codec,
@@ -170,12 +182,15 @@ class LatestFrameReader(threading.Thread):
                         self._latest = Frame(image, time.time(), self._seq)
                         self._cond.notify_all()
             except Exception as exc:  # noqa: BLE001 - any failure means reconnect
+                if self._stop.is_set():
+                    break  # the worker closed the stream itself (stop()); not an error
                 message = redact(f"{type(exc).__name__}: {exc}")
                 if message != self.last_error:
                     log.warning("stream unavailable: %s", message)
                 self.last_error = message
             finally:
                 self.connected = False
+                self._proc = None
                 if proc is not None:
                     proc.kill()
                     proc.wait()

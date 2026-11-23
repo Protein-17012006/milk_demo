@@ -1,4 +1,7 @@
 import io
+import logging
+import threading
+import time
 import types
 
 from milk import stream
@@ -76,6 +79,46 @@ def test_reader_gives_the_certificate_to_ffprobe_and_ffmpeg(monkeypatch):
         assert cmd[cmd.index("-ca_file") + 1] == "hub.crt"
         assert cmd[cmd.index("-verifyhost") + 1] == "milk-demo-ingest"
         assert cmd.index("-ca_file") < cmd.index(HUB)  # an input option, so before the URL
+
+
+def test_stop_ends_ffmpeg_at_once_without_a_warning(monkeypatch, caplog):
+    # a sampling window ends while ffmpeg waits for the next frame: the worker must not hang until the socket
+    # timeout, and closing the stream on purpose is not "stream unavailable"
+    killed = threading.Event()
+
+    class Silent(io.RawIOBase):
+        def readable(self):
+            return True
+
+        def readinto(self, b):
+            killed.wait(5)  # no frame comes until ffmpeg is killed
+            return 0
+
+    class Ffmpeg:
+        def __init__(self):
+            self.stdout, self.stderr = Silent(), io.BytesIO()
+
+        def kill(self):
+            killed.set()
+
+        def wait(self):
+            pass
+
+    probe = b'{"streams": [{"width": 2, "height": 2, "codec_name": "h264"}]}'
+    monkeypatch.setattr(stream.subprocess, "run", lambda cmd, **_: types.SimpleNamespace(returncode=0, stdout=probe))
+    monkeypatch.setattr(stream.subprocess, "Popen", lambda cmd, **_: Ffmpeg())
+    caplog.set_level(logging.WARNING)
+    reader = LatestFrameReader(HUB)
+    thread = threading.Thread(target=reader.run)
+    thread.start()
+    deadline = time.time() + 2
+    while not reader.connected and time.time() < deadline:
+        time.sleep(0.01)
+    reader.stop()
+    thread.join(2)
+    assert not thread.is_alive()
+    assert killed.is_set()
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 class Trickle(io.RawIOBase):

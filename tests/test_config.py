@@ -72,6 +72,28 @@ def test_environment_and_version_come_from_the_pipeline(monkeypatch):
     assert (s.environment, s.version) == ("staging", "1d58130")
 
 
+def test_sampling_defaults_to_continuous(monkeypatch):
+    monkeypatch.delenv("MILK_SAMPLE_EVERY_S", raising=False)
+    monkeypatch.delenv("MILK_SAMPLE_FOR_S", raising=False)
+    s = config.load()
+    assert (s.sample_every_s, s.sample_for_s) == (0.0, 30.0)
+
+
+def test_sampling_settings_from_env(monkeypatch):
+    monkeypatch.setenv("MILK_SAMPLE_EVERY_S", "300")
+    monkeypatch.setenv("MILK_SAMPLE_FOR_S", "30")
+    s = config.load()
+    assert (s.sample_every_s, s.sample_for_s) == (300.0, 30.0)
+
+
+@pytest.mark.parametrize("every, window", [("300", "300"), ("300", "0"), ("60", "90")])
+def test_sampling_window_must_fit_the_period(monkeypatch, every, window):
+    monkeypatch.setenv("MILK_SAMPLE_EVERY_S", every)
+    monkeypatch.setenv("MILK_SAMPLE_FOR_S", window)
+    with pytest.raises(ValueError, match="MILK_SAMPLE_FOR_S"):
+        config.load()
+
+
 def test_stream_certificate_settings(monkeypatch):
     monkeypatch.delenv("MILK_STREAM_CA_FILE", raising=False)
     monkeypatch.delenv("MILK_STREAM_TLS_NAME", raising=False)
