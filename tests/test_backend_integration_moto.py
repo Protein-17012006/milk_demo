@@ -1,4 +1,5 @@
 """Integration tests with mocked AWS (moto) matching KHANG-T001 CI conventions."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -109,20 +110,40 @@ def _ingest(ingest, camera_id: str, hhmmss: str, counts: list[tuple[str, int]]) 
     capture_id = f"CAP-S01-20261121-{hhmmss}"
     ts = f"2026-11-21T{hhmmss[:2]}:{hhmmss[2:4]}:{hhmmss[4:]}+07:00"
     image = f"{camera_id}_20261121_{hhmmss}.jpg"
-    head = {"capture_id": capture_id, "store_id": "DEMO-S01", "camera_id": camera_id, "capture_timestamp": ts,
-            "capture_source": "CCTV", "image_filename": image}
+    head = {
+        "capture_id": capture_id,
+        "store_id": "DEMO-S01",
+        "camera_id": camera_id,
+        "capture_timestamp": ts,
+        "capture_source": "CCTV",
+        "image_filename": image,
+    }
     rows = [
-        {**head, "reading_id": f"RD-S01-20261121-{hhmmss}-{i:03d}", "sku_id": label, "sku_name": label,
-         "unit_count": units, "confidence_score": 0.9, "detection_method": "Visual",
-         "bounding_box": [[10 + 60 * k, 20, 50, 80] for k in range(units)], "is_flagged": False, "flag_reason": "",
-         "processing_time_ms": 20}
+        {
+            **head,
+            "reading_id": f"RD-S01-20261121-{hhmmss}-{i:03d}",
+            "sku_id": label,
+            "sku_name": label,
+            "unit_count": units,
+            "confidence_score": 0.9,
+            "detection_method": "Visual",
+            "bounding_box": [[10 + 60 * k, 20, 50, 80] for k in range(units)],
+            "is_flagged": False,
+            "flag_reason": "",
+            "processing_time_ms": 20,
+        }
         for i, (label, units) in enumerate(counts, start=1)
     ]
     total = sum(units for _, units in counts)
-    record = {**head, "image_key": f"frames/{camera_id}/2026-11-21/{image}", "processing_time_ms": 20,
-              "units_found": total, "flagged_rows": 0, "rows": rows,
-              "log": {**head, "units_found": total, "rows_written": len(rows), "flagged_rows": 0,
-                      "processing_time_ms": 20}}
+    record = {
+        **head,
+        "image_key": f"frames/{camera_id}/2026-11-21/{image}",
+        "processing_time_ms": 20,
+        "units_found": total,
+        "flagged_rows": 0,
+        "rows": rows,
+        "log": {**head, "units_found": total, "rows_written": len(rows), "flagged_rows": 0, "processing_time_ms": 20},
+    }
     assert ingest.ingest_capture(ingest._normalize_record(record))["status"] == "ingested"
 
 

@@ -14,6 +14,7 @@ The class names of the model (original145, sourcream150, cheese145, hot160) are 
 milk pipeline writes its TMP-MLK-* labels; product names come from skus.json. Mapping them to Datagent's
 SKU (the product name) is the backend's alias table.
 """
+
 from __future__ import annotations
 
 import json
@@ -37,7 +38,7 @@ def to_detections(classes, scores, boxes_xyxy, names: dict[int, str], product: d
     """YOLO output (class index, score, x0 y0 x1 y1) as Detections with x, y, width, height boxes, one per can:
     the model's repeated boxes for one can are dropped (pipeline.dedupe)."""
     out = []
-    for c, s, b in zip(classes, scores, boxes_xyxy):
+    for c, s, b in zip(classes, scores, boxes_xyxy, strict=False):
         label = names[int(c)]
         x0, y0, x1, y1 = (float(v) for v in b)
         out.append(Detection(label, product.get(label, label), float(s), (x0, y0, x1 - x0, y1 - y0)))
@@ -58,14 +59,21 @@ class SlidePipeline:
         self._conf = float(os.environ.get("MILK_SLIDE_CONF", "0.25"))
         self.device = os.environ.get("MILK_DEVICE") or ("cuda" if _cuda() else "cpu")
         self._product = product_names()
-        self._model.predict(np.full((720, 1280, 3), 128, np.uint8), imgsz=self._imgsz, conf=self._conf,
-                            device=self.device, verbose=False)  # load onto the GPU now, not on the first frame
+        self._model.predict(
+            np.full((720, 1280, 3), 128, np.uint8),
+            imgsz=self._imgsz,
+            conf=self._conf,
+            device=self.device,
+            verbose=False,
+        )  # load onto the GPU now, not on the first frame
 
     def detect(self, image: np.ndarray) -> list[Detection]:
-        res = self._model.predict(image, imgsz=self._imgsz, conf=self._conf, max_det=500, device=self.device,
-                                  verbose=False)[0]
-        return to_detections(res.boxes.cls.tolist(), res.boxes.conf.tolist(), res.boxes.xyxy.tolist(),
-                             self._model.names, self._product)
+        res = self._model.predict(
+            image, imgsz=self._imgsz, conf=self._conf, max_det=500, device=self.device, verbose=False
+        )[0]
+        return to_detections(
+            res.boxes.cls.tolist(), res.boxes.conf.tolist(), res.boxes.xyxy.tolist(), self._model.names, self._product
+        )
 
 
 def _cuda() -> bool:

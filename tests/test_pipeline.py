@@ -41,7 +41,9 @@ class Fixed:
 
 
 def test_combined_pipeline_names_and_merges_in_order():
-    p = CombinedPipeline([Fixed("long", [det(None, (0, 0, 50, 100))]), Fixed("slide", [det("hot160", (2, 2, 50, 100))])])
+    p = CombinedPipeline(
+        [Fixed("long", [det(None, (0, 0, 50, 100))]), Fixed("slide", [det("hot160", (2, 2, 50, 100))])]
+    )
     assert p.name == "long+slide"
     assert p.device == "cuda"
     assert [d.sku_id for d in p.detect(None)] == ["hot160"]
