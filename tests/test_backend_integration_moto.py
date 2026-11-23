@@ -264,6 +264,93 @@ def test_an_older_capture_arriving_late_leaves_a_newer_reading(monkeypatch: pyte
     assert _units(api)[TH_SWEET] == 2
 
 
+
+AUDIT_14 = "AUD-CAM-S01-A-20261121-14"
+
+
+def _one_pending_audit(ingest, counts=(("hot160", 2),)) -> None:
+    """A stock row for the camera at 13:00, then one capture with a frame at 14:07, sampled into an audit."""
+    _ingest(ingest, "CAM-S01-A", "130000", [("hot160", 1)])
+    _ingest(ingest, "CAM-S01-A", "140700", list(counts), with_frame=True)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+
+
+def _call(api, method: str, path: str, groups: str = "field_team", body=None, query=None) -> tuple[int, dict]:
+    resp = api.lambda_handler(_auth_event(method, path, groups=groups, body=body, query=query))
+    return resp["statusCode"], json.loads(resp["body"])
+
+
+@mock_aws
+def test_datagent_cannot_open_model_routes(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _one_pending_audit(ingest)
+    for method, path in (("GET", "/v1/model/audits"), ("GET", f"/v1/model/audits/{AUDIT_14}"),
+                         ("PUT", f"/v1/model/audits/{AUDIT_14}"), ("POST", f"/v1/model/audits/{AUDIT_14}/skip"),
+                         ("GET", "/v1/model/summary"), ("GET", "/v1/model/health")):
+        assert _call(api, method, path, groups="datagent", body={})[0] == 403
+
+
+@mock_aws
+def test_list_and_detail_for_field_team(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _one_pending_audit(ingest)
+    status, listing = _call(api, "GET", "/v1/model/audits", query={"status": "pending", "days": "0"})
+    assert status == 200
+    assert [i["audit_id"] for i in listing["items"]] == [AUDIT_14]
+    assert listing["counts"] == {"pending": 1, "done": 0, "skipped": 0}
+    status, detail = _call(api, "GET", f"/v1/model/audits/{AUDIT_14}")
+    assert status == 200 and detail["frame_url"]
+    assert len(detail["ai_boxes"]) == 2
+    assert {"label": "hot160", "name": "Slide Hot & Spicy 160g"} in detail["sku_choices"]
+
+
+@mock_aws
+def test_saving_labels_marks_the_audit_done(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _one_pending_audit(ingest)
+    body = {"verdicts": [{"box_id": 1, "verdict": "correct"},
+                         {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "original145"}],
+            "missed": [{"sku_id": "hot160", "x": 5, "y": 5}]}
+    status, saved = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body=body)
+    assert status == 200
+    assert saved["status"] == "done" and saved["labeled_by"] == "tester@datagent.io"
+    assert saved["verdicts"] == body["verdicts"] and saved["missed"] == body["missed"]
+
+
+@mock_aws
+def test_saving_without_a_verdict_for_every_box_is_refused(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _one_pending_audit(ingest)
+    status, err = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}",
+                        body={"verdicts": [{"box_id": 1, "verdict": "correct"}], "missed": []})
+    assert status == 400 and err["error"] == "INVALID_LABELS" and "box 2 has no verdict" in err["message"]
+    assert _call(api, "GET", f"/v1/model/audits/{AUDIT_14}")[1]["status"] == "pending"
+
+
+@mock_aws
+def test_skip_needs_a_known_reason(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _one_pending_audit(ingest)
+    assert _call(api, "POST", f"/v1/model/audits/{AUDIT_14}/skip", body={"reason": "rain"})[0] == 400
+    status, skipped = _call(api, "POST", f"/v1/model/audits/{AUDIT_14}/skip", body={"reason": "blocked"})
+    assert status == 200 and skipped["status"] == "skipped" and skipped["skip_reason"] == "blocked"
+
+
+@mock_aws
+def test_a_frame_without_boxes_is_saved_with_misses_only(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _one_pending_audit(ingest, counts=())
+    assert _call(api, "GET", f"/v1/model/audits/{AUDIT_14}")[1]["ai_boxes"] == []
+    status, saved = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}",
+                          body={"verdicts": [], "missed": [{"sku_id": "hot160", "x": 1, "y": 1}]})
+    assert status == 200 and saved["status"] == "done"
+
+
+@mock_aws
+def test_an_unknown_audit_is_not_found(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    assert _call(api, "GET", "/v1/model/audits/AUD-NOPE")[0] == 404
+
 @mock_aws
 def test_end_to_end_ingest_review_and_export_with_moto(monkeypatch: pytest.MonkeyPatch):
     region = "ap-southeast-1"

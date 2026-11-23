@@ -21,6 +21,7 @@ from typing import Any
 import boto3
 from boto3.dynamodb.conditions import Key
 
+from audit_scoring import SKIP_REASONS, summarize, validate_labels
 from common import (
     CAPTURE_LOG_COLUMNS,
     CV_OUTPUT_COLUMNS,
@@ -45,6 +46,8 @@ CORRECTIONS_TABLE = os.environ.get("CORRECTIONS_TABLE", "")
 USER_PREFS_TABLE = os.environ.get("USER_PREFS_TABLE", "")
 ANALYTICS_BUCKET = os.environ.get("ANALYTICS_BUCKET", "")
 HUB_BUCKET = os.environ.get("HUB_BUCKET", "")
+AUDITS_TABLE = os.environ.get("AUDITS_TABLE", "")
+MODEL_HEALTH_TABLE = os.environ.get("MODEL_HEALTH_TABLE", "")
 ALLOWED_ORIGINS = {
     o.strip()
     for o in os.environ.get(
@@ -738,6 +741,143 @@ def _handle_seed_initial_data(event: dict[str, Any], ddb) -> dict[str, Any]:
     return _json_response(200, {"seeded_stores": 1, "seeded_skus": len(DEFAULT_ALIAS_MAP)}, event)
 
 
+# --- Model page (spec docs/superpowers/specs/2026-11-23-model-quality-page-design.md) -------------------------
+
+def _audit_view(item: dict[str, Any]) -> dict[str, Any]:
+    out = {k: v for k, v in item.items() if not k.endswith("_json")}
+    out["ai_boxes"] = json.loads(item.get("ai_boxes_json") or "[]")
+    out["verdicts"] = json.loads(item.get("verdicts_json") or "[]")
+    out["missed"] = json.loads(item.get("missed_json") or "[]")
+    return out
+
+
+def _find_audit(ddb, audit_id: str) -> dict[str, Any] | None:
+    found = [a for a in _scan_all(ddb.Table(AUDITS_TABLE)) if a.get("audit_id") == audit_id]
+    return found[0] if found else None
+
+
+def _within_days(ts: str, days: int) -> bool:
+    if days <= 0:
+        return True
+    try:
+        return datetime.fromisoformat(ts) >= datetime.now(ICT) - timedelta(days=days)
+    except ValueError:
+        return False
+
+
+def _sku_choices(ddb) -> dict[str, str]:
+    """Model label -> official product name: SKU Master first, the built-in alias table for the rest."""
+    choices = {s["model_alias"]: s["sku_id"] for s in _scan_all(ddb.Table(SKU_MASTER_TABLE)) if s.get("model_alias")}
+    for label, entry in DEFAULT_ALIAS_MAP.items():
+        choices.setdefault(label, entry["sku_id"])
+    return choices
+
+
+def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:
+    params = event.get("queryStringParameters") or {}
+    status = params.get("status") or ""
+    days = int(params.get("days") or 7)
+    audits = [a for a in _scan_all(ddb.Table(AUDITS_TABLE)) if _within_days(str(a.get("capture_timestamp", "")), days)]
+    counts = {s: sum(1 for a in audits if a.get("status") == s) for s in ("pending", "done", "skipped")}
+    chosen = sorted((a for a in audits if not status or a.get("status") == status),
+                    key=lambda a: str(a.get("capture_timestamp", "")), reverse=True)
+    items = [{
+        "audit_id": a["audit_id"],
+        "camera_id": a.get("camera_id"),
+        "capture_id": a.get("capture_id"),
+        "capture_timestamp": a.get("capture_timestamp"),
+        "model_version": a.get("model_version"),
+        "status": a.get("status"),
+        "n_boxes": len(json.loads(a.get("ai_boxes_json") or "[]")),
+        "labeled_by": a.get("labeled_by"),
+    } for a in chosen]
+    return _json_response(200, {"items": items, "counts": counts}, event)
+
+
+def _handle_model_audit_get(audit_id: str, event: dict[str, Any], s3, ddb) -> dict[str, Any]:
+    audit = _find_audit(ddb, audit_id)
+    if not audit:
+        return _json_response(404, {"error": "NOT_FOUND", "audit_id": audit_id}, event)
+    view = _audit_view(audit)
+    view["frame_url"] = _presign_frame(s3, audit.get("image_key", ""), ANALYTICS_BUCKET)
+    view["sku_choices"] = sorted(({"label": label, "name": name} for label, name in _sku_choices(ddb).items()),
+                                 key=lambda c: c["name"])
+    return _json_response(200, view, event)
+
+
+def _set_audit(ddb, audit: dict[str, Any], values: dict[str, Any], remove: tuple[str, ...] = ()) -> dict[str, Any]:
+    names = {f"#{k}": k for k in values}
+    expr = "SET " + ", ".join(f"#{k} = :{k}" for k in values)
+    if remove:
+        expr += " REMOVE " + ", ".join(remove)
+    table = ddb.Table(AUDITS_TABLE)
+    key = {"store_id": audit["store_id"], "audit_id": audit["audit_id"]}
+    table.update_item(Key=key, UpdateExpression=expr, ExpressionAttributeNames=names,
+                      ExpressionAttributeValues={f":{k}": v for k, v in values.items()})
+    return from_dynamodb(table.get_item(Key=key)["Item"])
+
+
+def _handle_model_audit_put(audit_id: str, event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
+    audit = _find_audit(ddb, audit_id)
+    if not audit:
+        return _json_response(404, {"error": "NOT_FOUND", "audit_id": audit_id}, event)
+    body = _parse_body(event)
+    verdicts, missed = body.get("verdicts"), body.get("missed")
+    if not isinstance(verdicts, list) or not isinstance(missed, list):
+        return _json_response(400, {"error": "INVALID_LABELS", "message": "verdicts and missed must be lists"}, event)
+    errors = validate_labels(json.loads(audit.get("ai_boxes_json") or "[]"), verdicts, missed, set(_sku_choices(ddb)))
+    if any(not isinstance(m.get("x"), (int, float)) or not isinstance(m.get("y"), (int, float)) for m in missed):
+        errors.append("every missed point needs numbers x and y")
+    if errors:
+        return _json_response(400, {"error": "INVALID_LABELS", "message": "; ".join(errors)}, event)
+    clean_verdicts = [
+        {"box_id": v["box_id"], "verdict": v["verdict"],
+         **({"true_sku_id": v["true_sku_id"]} if v["verdict"] == "wrong_sku" else {})}
+        for v in verdicts
+    ]
+    clean_missed = [{"sku_id": m["sku_id"], "x": m["x"], "y": m["y"]} for m in missed]
+    saved = _set_audit(ddb, audit, {
+        "verdicts_json": json.dumps(clean_verdicts, separators=(",", ":")),
+        "missed_json": json.dumps(clean_missed, separators=(",", ":")),
+        "status": "done",
+        "labeled_by": user["email"],
+        "labeled_at": datetime.now(ICT).isoformat(timespec="seconds"),
+    }, remove=("skip_reason", "skip_note"))
+    return _json_response(200, _audit_view(saved), event)
+
+
+def _handle_model_audit_skip(audit_id: str, event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
+    audit = _find_audit(ddb, audit_id)
+    if not audit:
+        return _json_response(404, {"error": "NOT_FOUND", "audit_id": audit_id}, event)
+    body = _parse_body(event)
+    if body.get("reason") not in SKIP_REASONS:
+        return _json_response(400, {"error": "INVALID_REASON", "message": f"reason must be one of {list(SKIP_REASONS)}"},
+                              event)
+    saved = _set_audit(ddb, audit, {
+        "status": "skipped",
+        "skip_reason": body["reason"],
+        "skip_note": str(body.get("note") or "")[:500],
+        "labeled_by": user["email"],
+        "labeled_at": datetime.now(ICT).isoformat(timespec="seconds"),
+    })
+    return _json_response(200, _audit_view(saved), event)
+
+
+def _route_model(method: str, route_path: str, event: dict[str, Any], user: dict[str, Any], s3, ddb):
+    parts = route_path.strip("/").split("/")  # model, audits, <id>, skip
+    if parts[:2] == ["model", "audits"]:
+        if len(parts) == 2 and method == "GET":
+            return _handle_model_audits(event, ddb)
+        if len(parts) == 3 and method == "GET":
+            return _handle_model_audit_get(parts[2], event, s3, ddb)
+        if len(parts) == 3 and method == "PUT":
+            return _handle_model_audit_put(parts[2], event, user, ddb)
+        if len(parts) == 4 and parts[3] == "skip" and method == "POST":
+            return _handle_model_audit_skip(parts[2], event, user, ddb)
+    return _json_response(404, {"error": "ROUTE_NOT_FOUND", "method": method, "path": route_path}, event)
+
+
 def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
     method = (event.get("httpMethod") or "GET").upper()
     path = event.get("path") or "/"
@@ -788,6 +928,12 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
     s3, ddb = _clients()
 
     try:
+        if route_path.startswith("/model/"):
+            err = _require_groups(user, WRITE_CORRECTION_GROUPS, event)
+            if err:
+                return err
+            return _route_model(method, route_path, event, user, s3, ddb)
+
         if method == "GET" and route_path == "/products":
             return _handle_get_products(event, ddb)
 
