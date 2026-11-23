@@ -157,6 +157,24 @@ def counts_of(rows: list[dict]) -> dict[str, int]:
     return {(r["sku_id"] or UNRECOGNIZED): r["unit_count"] for r in rows}
 
 
+def persist_record(log_line: dict, rows: list[dict], counts: dict, latency_ms: int,
+                   detections: list[Detection], model_version: str) -> dict:
+    """The record the hub stores for one capture: the CV Output rows and Capture Log line, plus the model
+    version and every box with its own score (rows only keep one score per SKU)."""
+    return {
+        **log_line,
+        "rows": rows,
+        "log": log_line,
+        "counts": counts,
+        "latency_ms": latency_ms,
+        "model_version": model_version,
+        "detections": [
+            {"sku_id": d.sku_id, "conf": round(d.confidence, 3), "box": [round(v) for v in d.box]}
+            for d in detections
+        ],
+    }
+
+
 def _cell(value) -> str:
     if value is None:
         return ""

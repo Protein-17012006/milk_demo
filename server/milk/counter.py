@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 
 from . import config
-from .cvoutput import CaptureIdAllocator, Detection, build_capture, counts_of
+from .cvoutput import CaptureIdAllocator, Detection, build_capture, counts_of, persist_record
 from .pipeline import load_pipeline
 from .privacy import load_blurrer
 from .smoothing import CountSmoother
@@ -207,7 +207,7 @@ def main(argv: list[str] | None = None) -> None:
                     last_publish = time.time()
             if persist:
                 full = encode_jpeg(shown, 85)[0] if blurrer else None  # never store unblurred frames
-                record = {**log_line, "rows": rows, "log": log_line, "counts": counts, "latency_ms": latency_ms}
+                record = persist_record(log_line, rows, counts, latency_ms, detections, s.model_version)
                 payload = {"record": record, "jpeg_b64": base64.b64encode(full).decode("ascii") if full else None}
                 if hub.post("/internal/persist", payload):
                     last_persist = time.time()
