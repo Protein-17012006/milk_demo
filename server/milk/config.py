@@ -81,6 +81,20 @@ class Settings:
     version: str = "dev"
     stream_ca_file: str | None = None
     stream_tls_name: str | None = None
+    sample_every_s: float = 0.0
+    sample_for_s: float = 30.0
+
+
+def _sampling() -> tuple[float, float]:
+    """MILK_SAMPLE_EVERY_S and MILK_SAMPLE_FOR_S: read the stream for FOR seconds every EVERY seconds.
+    EVERY = 0 counts continuously."""
+    every = float(_env("MILK_SAMPLE_EVERY_S", "0"))
+    window = float(_env("MILK_SAMPLE_FOR_S", "30"))
+    if every > 0 and not 0 < window < every:
+        raise ValueError(
+            f"MILK_SAMPLE_FOR_S ({window:g}) must be more than 0 and less than MILK_SAMPLE_EVERY_S ({every:g})"
+        )
+    return every, window
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -93,6 +107,7 @@ def load(env_file: str | None = None) -> Settings:
     if env_file:
         load_env_file(env_file)
     camera_path = _env("MILK_CAMERA_PATH", "cam-s01-a")
+    sample_every_s, sample_for_s = _sampling()
     return Settings(
         region=_env("MILK_REGION", "ap-southeast-1"),
         bucket=_env("MILK_BUCKET"),
@@ -135,4 +150,6 @@ def load(env_file: str | None = None) -> Settings:
         # The hub's RTSPS certificate (self-signed) and the name in it, for workers whose ffmpeg checks it
         stream_ca_file=_env("MILK_STREAM_CA_FILE"),
         stream_tls_name=_env("MILK_STREAM_TLS_NAME"),
+        sample_every_s=sample_every_s,
+        sample_for_s=sample_for_s,
     )
