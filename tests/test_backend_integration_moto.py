@@ -1579,9 +1579,9 @@ def _bucket_keys() -> set[str]:
     return {o["Key"] for o in listing.get("Contents", [])}
 
 
-def _put_event(key: str, kind: str = "OOS") -> None:
+def _put_event(key: str, kind: str = "OOS", sku: str = CHEESE) -> None:
     _table("test-shelf-events").put_item(
-        Item={"store_id": "DEMO-S01", "event_key": key, "type": kind, "sku_id": CHEESE, "at": key.split("#")[0]}
+        Item={"store_id": "DEMO-S01", "event_key": key, "type": kind, "sku_id": sku, "at": key.split("#")[0]}
     )
 
 
@@ -1707,6 +1707,23 @@ def test_alert_accuracy_ignores_unsure_and_needs_ten(monkeypatch: pytest.MonkeyP
         "OOS": {"right": 6, "wrong": 3, "unsure": 1},
         "DEPLETED": {"right": 1, "wrong": 0, "unsure": 0},
     }
+
+
+@mock_aws
+def test_alert_accuracy_follows_the_category(monkeypatch: pytest.MonkeyPatch):
+    # the list under the number applies the Category filter; the number must count the same events
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, "2026-11-21T22:30:00+07:00")
+    snack, milk = f"20261121-1000#{CHEESE}#OOS", f"20261121-1100#{TH_SWEET}#OOS"
+    _put_event(snack)
+    _put_verdict(snack, "right")
+    _put_event(milk, sku=TH_SWEET)
+    _put_verdict(milk, "wrong")
+    assert _kpi(api)["alert_accuracy"]["n"] == 2
+    acc = _kpi(api, category="Milk")["alert_accuracy"]
+    assert (acc["n"], acc["unsure"], acc["by_type"]) == (1, 0, {"OOS": {"right": 0, "wrong": 1, "unsure": 0}})
+    acc = _kpi(api, category="Snacks")["alert_accuracy"]
+    assert (acc["n"], acc["by_type"]) == (1, {"OOS": {"right": 1, "wrong": 0, "unsure": 0}})
 
 
 @mock_aws

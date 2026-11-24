@@ -904,15 +904,18 @@ def _verdicts_of(ddb, store_id: str) -> dict[str, dict[str, Any]]:
     return {i["event_key"][len("verdict#") :]: i for i in items}
 
 
-def _alert_accuracy(ddb, stores: list[dict[str, Any]], days: int) -> dict[str, Any]:
+def _alert_accuracy(ddb, stores: list[dict[str, Any]], days: int, skus: set[str] | None) -> dict[str, Any]:
     """How often alerts were confirmed right: right / (right + wrong) over the events still in the range that
-    have a verdict. Unsure is counted apart, not in the share or in the threshold."""
+    have a verdict, of the SKUs given (a category; None for every SKU), as the events list filters them. Unsure is
+    counted apart, not in the share or in the threshold."""
     by_type: dict[str, dict[str, int]] = {}
     for store in stores:
         verdicts = _verdicts_of(ddb, store["store_id"])
         if not verdicts:
             continue
         for item in _events_of(ddb, store["store_id"], _event_floor(days)):
+            if skus is not None and item["sku_id"] not in skus:
+                continue
             verdict = (verdicts.get(item["event_key"]) or {}).get("verdict")
             if verdict in VERDICTS:
                 counts = by_type.setdefault(item["type"], {"right": 0, "wrong": 0, "unsure": 0})
@@ -965,7 +968,7 @@ def _shelf_kpis(ddb, params: dict[str, Any]) -> dict[str, Any]:
         }
         out["oos_now"] = _oos_now(ddb, open_stores, skus)
         out["coverage"] = _coverage(open_stores, current, days)
-    out["alert_accuracy"] = _alert_accuracy(ddb, stores, days)
+    out["alert_accuracy"] = _alert_accuracy(ddb, stores, days, skus)
     audits = _done_audits(ddb, stores, days)
     value = kpis(audits, [])["sku_identification_accuracy"]["value"] if audits else None
     out["top_50_sku_accuracy"] = {
