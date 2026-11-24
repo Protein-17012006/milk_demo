@@ -78,15 +78,28 @@ const MINUS = "−";
 /** "1 frame", "3 frames". */
 export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** A signed mean with one decimal and the site's minus sign: "+0.7", "−2.0"; "0.0" has no sign; "—" without one. */
-export function signedText(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
+/** A signed mean with one decimal and the site's minus sign: "+0.7", "−2.0"; "0.0" has no sign. */
+export function signedText(value: number): string {
   const text = Math.abs(value).toFixed(1);
   return Number(text) === 0 ? text : `${value < 0 ? MINUS : "+"}${text}`;
 }
 
 function valueText(value: number, unit: Unit): string {
   return unit === "percent" ? pct(value) : unit === "signed" ? signedText(value) : value.toFixed(2);
+}
+
+/** A number in a table cell, or "Not enough samples (n = 0 boxes)" when there was nothing to divide by: never a bare
+ * dash, never 0%. n is the number's denominator, one/many what it counts. "—" only for a number an older backend
+ * does not send at all. */
+export function cellText(
+  value: number | null | undefined,
+  unit: Unit,
+  n: number,
+  one: string,
+  many = `${one}s`
+): string {
+  if (value === undefined) return "—";
+  return value === null ? `Not enough samples (n = ${plural(n, one, many)})` : valueText(value, unit);
 }
 
 function rangeText([lo, hi]: [number, number], unit: Unit): string {
@@ -135,11 +148,14 @@ export const PERIODS: { key: DayPeriod; label: string; hours: string }[] = [
   { key: "evening", label: "Evening", hours: "from 17:00" },
 ];
 
-/** One SKU at one time of day: "found right 80.0% · named right 90.0%", or why there are not enough samples. */
+/** One SKU at one time of day: "found right 80.0% · named right 90.0%", or why there are not enough samples. A SKU
+ * with enough true cans that the model never named has no named right: it says n = 0 boxes. */
 export function periodCellText(cell: ApiPeriodSku | undefined): string {
   if (!cell) return notEnoughText({ frames: 0, true_units: 0, days: 0 });
   if (!cell.enough) return notEnoughText(cell);
-  return `found right ${pct(cell.found_right)} · named right ${pct(cell.named_right)}`;
+  const found = cellText(cell.found_right, "percent", cell.true_units, "can");
+  const named = cellText(cell.named_right, "percent", cell.model_units, "box", "boxes");
+  return `found right ${found} · named right ${named}`;
 }
 
 export const PER_SKU_NOTE =

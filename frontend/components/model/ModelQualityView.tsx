@@ -21,6 +21,7 @@ import {
   PER_SKU_NOTE,
   PRESENCE,
   PRESENCE_INFO,
+  cellText,
   checkLevelText,
   ciText,
   kpiCiText,
@@ -29,7 +30,6 @@ import {
   pct,
   periodCellText,
   plural,
-  signedText,
   statParts,
   statText,
   type Tone,
@@ -362,9 +362,16 @@ function PerSkuTable({ rows, nameOf }: { rows: ApiPerSkuRow[]; nameOf: NameOf })
                 </td>
               ) : (
                 <>
-                  <ValueCell text={pct(r.id_accuracy)} ci={ciText(r.id_accuracy_ci)} />
-                  <ValueCell text={pct(r.found_right)} ci={ciText(r.found_right_ci)} />
-                  <ValueCell text={signedText(r.bias_per_frame)} ci={ciText(r.bias_per_frame_ci, "signed")} />
+                  <ValueCell
+                    text={cellText(r.id_accuracy, "percent", r.model_units, "box", "boxes")}
+                    ci={ciText(r.id_accuracy_ci)}
+                  />
+                  <ValueCell text={cellText(r.found_right, "percent", r.true_units, "can")} ci={ciText(r.found_right_ci)} />
+                  {/* a row's SKU was counted in some frame, so its bias has a frame; 0 only if that ever fails */}
+                  <ValueCell
+                    text={cellText(r.bias_per_frame, "signed", 0, "frame")}
+                    ci={ciText(r.bias_per_frame_ci, "signed")}
+                  />
                 </>
               )}
               <td className={NUM}>{r.missed_units}</td>

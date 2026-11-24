@@ -400,6 +400,23 @@ def test_check_level_compares_the_dashboard_counts_with_the_frame_truth():
     assert c["count_bias"]["ci"][0] <= c["count_bias"]["value"] <= c["count_bias"]["ci"][1]
 
 
+def test_each_frame_is_held_to_its_own_stores_plan():
+    a = {**AUDIT_1744, "store_id": "S-A"}  # model Cheese 5, Sour Cream 3; truth Original 3, Cheese 2, Sour Cream 3
+    b = {**AUDIT_2311, "store_id": "S-B"}  # model Hot 2, Original 1, Cheese 2; truth Original 3, Hot 2, Cheese 2
+    plans = {"S-A": {"cheese145", "sourcream150"}, "S-B": {"hot160", "TMP-MLK-TH-01"}}
+    # S-A: Cheese, Sour Cream, Original (counted): 2 agree of 3, Original a false empty; Hot and TH are not S-A's
+    # S-B: Hot, TH, Original, Cheese: 4 of 4, TH 0/0 is the only empty row. One merged plan would give 9/10, 1/5, 0/4.
+    p = summarize([a, b], [], expected=plans)["presence"]
+    assert (p["agree"]["value"], p["agree"]["n"]) == (6 / 7, 7)
+    assert (p["false_empty"]["value"], p["false_empty"]["n"]) == (0.5, 2)
+    assert (p["missed_empty"]["value"], p["missed_empty"]["n"]) == (0.0, 1)
+    pairs = [(a, {"cheese145": 5, "sourcream150": 3}), (b, {"hot160": 2, "original145": 1, "cheese145": 2})]
+    agree = check_level(pairs, plans)["presence_agree"]
+    assert (agree["value"], agree["n"]) == (6 / 7, 7)
+    alone = summarize([{**a, "store_id": "S-C"}], [], expected=plans)["presence"]["agree"]  # a store without a plan
+    assert (alone["value"], alone["n"]) == (2 / 3, 3)
+
+
 def test_check_level_without_checks_has_no_numbers():
     assert check_level([]) == {
         "frames": 0,

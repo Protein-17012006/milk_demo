@@ -62,6 +62,8 @@ PERIODS = ("morning", "afternoon", "evening")  # ICT hour of the frame: before 1
 PRESENCE = {"agree": "presence_agree", "false_empty": "false_empty", "missed_empty": "missed_empty"}
 
 Tally = tuple[float, float]  # (numerator, denominator) of one frame
+# the SKUs a frame must show (model labels): one set for every frame, or each store's own set by store_id
+Expected = set[str] | Mapping[str, set[str]] | None
 
 
 def validate_labels(ai_boxes: list[dict], verdicts: list[dict], missed: list[dict], catalog: set[str]) -> list[str]:
@@ -255,6 +257,12 @@ def frame_tallies(audit: dict, expected: set[str] | None = None, top: set[str] |
     tallies.update(_presence(model, truth, expected))
     tallies.update({f"kpi:{name}": pair for name, pair in _kpi_tallies(audit, top).items()})
     return tallies
+
+
+def _expected_of(expected: Expected, audit: dict) -> set[str] | None:
+    """The SKUs one frame must show: its own store's list when the lists are given per store (none for a store
+    without one), else the one list."""
+    return expected.get(audit.get("store_id")) if isinstance(expected, Mapping) else expected
 
 
 def _top_skus(audits: list[dict]) -> set[str]:
@@ -496,12 +504,13 @@ def by_day(audits: list[dict]) -> list[dict]:
     return days
 
 
-def summarize(audits: list[dict], processing_ms: list[int], expected: set[str] | None = None) -> dict:
+def summarize(audits: list[dict], processing_ms: list[int], expected: Expected = None) -> dict:
     """Everything the Model page shows from labelled frames. A number without samples is None, with n 0. Every KPI
     but #11, the two ways per SKU, present or absent and the time-of-day numbers carry a 95% frame-bootstrap
-    interval `ci` (None below 2 frames). expected: model labels of the SKUs the stores must carry."""
+    interval `ci` (None below 2 frames). expected: model labels of the SKUs that must be on the shelf, one set for
+    every frame or a set per store_id, so that each frame is held to its own store's list."""
     top = _top_skus(audits)
-    tallies = [frame_tallies(a, expected, top) for a in audits]
+    tallies = [frame_tallies(a, _expected_of(expected, a), top) for a in audits]
     days = [_day_of(a) for a in audits]
     k = kpis(audits, processing_ms, tallies)
     for name, kpi in k.items():
@@ -528,14 +537,15 @@ def _off_by(model: Mapping[str, int], truth: Mapping[str, int]) -> dict[str, Tal
     return {"count_mae": (sum(map(abs, diffs)), len(diffs)), "count_bias": (sum(diffs), len(diffs))}
 
 
-def check_level(pairs: list[tuple[dict, dict[str, int]]], expected: set[str] | None = None) -> dict:
+def check_level(pairs: list[tuple[dict, dict[str, int]]], expected: Expected = None) -> dict:
     """The Dashboard's 5-minute numbers against the truth. Each pair is a scoring frame and the counts, by model
     label, of the check that holds it. Units off per SKU either side counted (absolute and signed: positive counts
-    too many) and present-or-absent agreement over `expected` plus those SKUs, each with its interval."""
+    too many) and present-or-absent agreement over the frame's expected SKUs (as in summarize) plus those SKUs, each
+    with its interval."""
     tallies = []
     for audit, counts in pairs:
         truth = _truth_counts(scoped(audit))
-        tallies.append({**_off_by(counts, truth), **_presence(counts, truth, expected)})
+        tallies.append({**_off_by(counts, truth), **_presence(counts, truth, _expected_of(expected, audit))})
     return {
         "frames": len(pairs),
         **{key: _stat(_column(tallies, key)) for key in ("count_mae", "count_bias", "presence_agree")},

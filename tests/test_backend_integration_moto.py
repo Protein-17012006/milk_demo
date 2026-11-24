@@ -1489,6 +1489,39 @@ def test_presence_uses_the_suggested_plan_when_none_is_saved(monkeypatch: pytest
 
 
 @mock_aws
+def test_presence_holds_each_frame_to_its_own_stores_plan(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _labelled_frame_with_its_check(api, ingest)  # DEMO-S01 must carry Cheese, Hot and Sour Cream
+    _table("test-store-list").put_item(Item={"store_id": "DEMO-S02", "store_name": "S02", "expected_skus": [TH_SWEET]})
+    _table("test-audits").put_item(  # a labelled S02 frame: one TH Sweet box, right
+        Item={
+            "store_id": "DEMO-S02",
+            "audit_id": "AUD-CAM-S02-A-20261121-14",
+            "purpose": "scoring",
+            "camera_id": "CAM-S02-A",
+            "capture_id": "CAP-S02-20261121-140700",
+            "capture_timestamp": "2026-11-21T14:07:00+07:00",
+            "model_version": "unknown",
+            "status": "done",
+            "label_rule": "A",
+            "ai_boxes_json": json.dumps([{"box_id": 1, "sku_id": "TMP-MLK-TH-01", "conf": 0.9, "box": [1, 2, 3, 4]}]),
+            "verdicts_json": json.dumps([{"box_id": 1, "verdict": "correct"}]),
+            "missed_json": "[]",
+        }
+    )
+    s = _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]
+    # S01's frame: 3 of 4 as before; S02's frame: TH only, 1 of 1. One merged plan would add 0/0 rows to both
+    # frames: 8 of 9, false empty 1 of 6, missed empty 0 of 5, and 4 of 5 at the check.
+    p = s["presence"]
+    assert [(p[k]["value"], p[k]["n"]) for k in ("agree", "false_empty", "missed_empty")] == [
+        (0.8, 5),
+        (0.5, 2),
+        (0.0, 1),
+    ]
+    assert s["check_level"]["presence_agree"] == {"value": 0.75, "ci": None, "n": 4}  # S01's check only
+
+
+@mock_aws
 def test_summary_still_answers_when_the_checks_cannot_be_read(monkeypatch: pytest.MonkeyPatch):
     api, ingest = _backend(monkeypatch)
     _labelled_frame_with_its_check(api, ingest)

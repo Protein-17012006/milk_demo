@@ -1289,20 +1289,20 @@ def _hour_within_days(hour: str, days: int) -> bool:
     return start >= datetime.now(ICT) - timedelta(days=days)
 
 
-def _expected_labels(ddb, store_ids: set[str], label_of: dict[str, str]) -> set[str]:
-    """Model labels of the SKUs the stores must carry: the saved shelf plan, else the suggestion, as the Dashboard
-    counts them. A suggestion that cannot be read adds none: the Model page must still answer."""
-    names: set[str] = set()
+def _expected_labels(ddb, store_ids: set[str], label_of: dict[str, str]) -> dict[str, set[str]]:
+    """Per store, the model labels of the SKUs it must carry: its saved shelf plan, else the suggestion, as the
+    Dashboard counts them. Kept apart, so that a frame is never held to another store's SKUs. A suggestion that cannot
+    be read gives none: the Model page must still answer."""
+    plans: dict[str, set[str]] = {}
     for store_id in sorted(store_ids):
-        saved = (_store_item(ddb, store_id) or {}).get("expected_skus")
-        if saved:
-            names.update(saved)
-        elif SHELF_TABLE:
+        names = list((_store_item(ddb, store_id) or {}).get("expected_skus") or [])
+        if not names and SHELF_TABLE:
             try:
-                names.update(s["sku_id"] for s in _suggested_skus(ddb, store_id))
+                names = [s["sku_id"] for s in _suggested_skus(ddb, store_id)]
             except ClientError as exc:
                 print(json.dumps({"model_summary_plan_failed": store_id, "error": repr(exc)}))
-    return {label_of.get(name, name) for name in names}
+        plans[store_id] = {label_of.get(name, name) for name in names}
+    return plans
 
 
 def _checks_of(ddb, audits: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
@@ -1352,11 +1352,13 @@ def _check_pairs(
     return pairs
 
 
-def _against_the_shelf(ddb, audits: list[dict[str, Any]]) -> tuple[set[str], list[tuple[dict, dict[str, int]]]]:
-    """The model labels the audits' stores must carry, and the audits paired with their 5-minute checks."""
+def _against_the_shelf(
+    ddb, audits: list[dict[str, Any]]
+) -> tuple[dict[str, set[str]], list[tuple[dict, dict[str, int]]]]:
+    """Per store, the model labels it must carry, and the audits paired with their 5-minute checks."""
     label_of = {name: label for label, name in sorted(_sku_choices(ddb).items())}
-    expected = _expected_labels(ddb, {a["store_id"] for a in audits}, label_of)
-    return expected, _check_pairs(audits, _checks_of(ddb, audits), label_of)
+    plans = _expected_labels(ddb, {a["store_id"] for a in audits}, label_of)
+    return plans, _check_pairs(audits, _checks_of(ddb, audits), label_of)
 
 
 def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
@@ -1383,12 +1385,12 @@ def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
         for _ in range(int(h.get("captures", 0)))
     ]
     old_rule_frames = sum(1 for a in done if a.get("label_rule") != "A")
-    expected, pairs = _against_the_shelf(ddb, chosen)
+    plans, pairs = _against_the_shelf(ddb, chosen)  # each frame is held to its own store's plan
     return _json_response(
         200,
         {
-            **summarize(chosen, processing, expected),
-            "check_level": check_level(pairs, expected),
+            **summarize(chosen, processing, plans),
+            "check_level": check_level(pairs, plans),
             "display_check": display_agreement(in_version),
             "old_rule_frames": old_rule_frames,
             "model_versions": sorted(latest, key=lambda v: latest[v], reverse=True),

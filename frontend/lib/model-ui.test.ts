@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  cellText,
   checkLevelText,
   ciText,
   displayCheckText,
@@ -52,7 +53,16 @@ test("a KPI's interval follows the KPI's unit", () => {
 });
 
 test("a signed mean keeps the site's minus sign and drops the sign at zero", () => {
-  assert.deepEqual([signedText(-2), signedText(0.6667), signedText(-0.04), signedText(null)], ["−2.0", "+0.7", "0.0", "—"]);
+  assert.deepEqual([signedText(-2), signedText(0.6667), signedText(-0.04)], ["−2.0", "+0.7", "0.0"]);
+});
+
+test("a table number with nothing to divide by says its n, never a bare dash or 0%", () => {
+  assert.equal(cellText(null, "percent", 0, "box", "boxes"), "Not enough samples (n = 0 boxes)"); // never named
+  assert.equal(cellText(null, "percent", 0, "can"), "Not enough samples (n = 0 cans)"); // never really there
+  assert.equal(cellText(null, "signed", 0, "frame"), "Not enough samples (n = 0 frames)");
+  assert.equal(cellText(0.775, "percent", 40, "box", "boxes"), "77.5%");
+  assert.equal(cellText(-1.5, "signed", 11, "frame"), "−1.5");
+  assert.equal(cellText(undefined, "percent", 34, "can"), "—"); // an older backend does not send the number at all
 });
 
 test("a ratio with its interval and n, or not enough samples instead of 0%", () => {
@@ -73,7 +83,10 @@ test("a SKU below the sample rule says which part is short", () => {
 test("a time-of-day cell gives both ways, or why it cannot", () => {
   const cell = { named_right: 0.9, found_right: 0.8, model_units: 30, true_units: 34, frames: 12, days: 3, enough: true };
   assert.equal(periodCellText(cell), "found right 80.0% · named right 90.0%");
-  assert.equal(periodCellText({ ...cell, named_right: null }), "found right 80.0% · named right —");
+  assert.equal(
+    periodCellText({ ...cell, named_right: null, model_units: 0 }), // true cans the model never named
+    "found right 80.0% · named right Not enough samples (n = 0 boxes)"
+  );
   assert.equal(periodCellText({ ...cell, frames: 4, enough: false }), "Not enough samples (n = 4 frames · 34 cans · 3 days)");
   assert.equal(periodCellText(undefined), "Not enough samples (n = 0 frames)"); // not seen at that time of day
 });
