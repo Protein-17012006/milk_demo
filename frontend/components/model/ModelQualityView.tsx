@@ -35,6 +35,7 @@ import {
   type Tone,
 } from "@/lib/model-ui";
 import type { HealthMetric } from "@/lib/health-ui";
+import { relabelQueue } from "@/lib/audit-labeling";
 import { BADGE_COLORS, badgeLabel, reliabilityText } from "@/lib/reliability-ui";
 import { AuditLabeler } from "./AuditLabeler";
 import { LiveHealth } from "./LiveHealth";
@@ -67,6 +68,7 @@ export function ModelQualityView() {
   const [labelling, setLabelling] = useState<string[] | null>(null);
   const [healthMetric, setHealthMetric] = useState<HealthMetric>("conf_median");
   const [reloadKey, setReloadKey] = useState(0); // bumped after a save or a skip
+  const [findingOldFrames, setFindingOldFrames] = useState(false);
 
   useEffect(() => {
     if (!allowed) return;
@@ -121,6 +123,21 @@ export function ModelQualityView() {
     );
   }
 
+  // "Relabel them": the frames labelled before rule A in this range, read on click (no extra call on page load) and
+  // opened in the labeller with their saved verdicts; saving stores them under rule A and the note's count drops
+  const relabelOldFrames = () => {
+    setFindingOldFrames(true);
+    api
+      .listAudits("done", days, { oldRule: true })
+      .then((res) => {
+        const ids = relabelQueue(res.items);
+        if (ids.length > 0) setLabelling(ids);
+        else setReloadKey((k) => k + 1); // relabelled meanwhile: reload, and the note goes
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setFindingOldFrames(false));
+  };
+
   // scoring frames first, then training frames; each group oldest first
   const oldestFirst = [...pending].sort(
     (a, b) =>
@@ -173,9 +190,25 @@ export function ModelQualityView() {
       {error && <p className="mt-4 rounded-[8px] bg-[#FEF2F2] px-3 py-2 text-[13px] text-[#991B1B]">{error}</p>}
 
       {summary && summary.old_rule_frames > 0 && (
-        <p data-old-rule-frames className="mt-4 rounded-[8px] bg-[#FFF7ED] px-3 py-2 text-[13px] text-[#7C2D12]">
-          {summary.old_rule_frames} frames were labelled before rule A — relabel them so the numbers follow one rule
-        </p>
+        <div
+          data-old-rule-frames
+          className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-[8px] bg-[#FFF7ED] px-3 py-2 text-[13px] text-[#7C2D12]"
+        >
+          <p>
+            {summary.old_rule_frames === 1
+              ? "1 frame was labelled before rule A — relabel it so the numbers follow one rule"
+              : `${summary.old_rule_frames} frames were labelled before rule A — relabel them so the numbers follow one rule`}
+          </p>
+          <button
+            type="button"
+            data-relabel-old-frames
+            disabled={findingOldFrames}
+            onClick={relabelOldFrames}
+            className="rounded-[8px] border border-[#EE730A] bg-white px-3 py-1 font-semibold text-[#C2410C] hover:bg-[#FFEDD5] disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+          >
+            {findingOldFrames ? "Opening…" : summary.old_rule_frames === 1 ? "Relabel it" : "Relabel them"}
+          </button>
+        </div>
       )}
 
       <section className="mt-5">

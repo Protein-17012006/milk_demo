@@ -33,7 +33,8 @@ const SKIP_REASONS: { value: string; label: string }[] = [
 ];
 
 interface AuditLabelerProps {
-  /** Pending audits to label, oldest first; Next moves along this list. */
+  /** Audits to label, oldest first: pending ones, or done ones to relabel under rule A (their saved verdicts load
+   * first). Next moves along this list. */
   auditIds: string[];
   onClose(): void;
   /** Called after a save or a skip, so the page can reload its numbers. */

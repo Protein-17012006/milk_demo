@@ -1385,14 +1385,23 @@ def _sku_choices(ddb) -> dict[str, str]:
     return _choices_of(_scan_all(ddb.Table(SKU_MASTER_TABLE)))
 
 
+def _before_rule_a(audit: dict[str, Any]) -> bool:
+    """A done scoring frame labelled before rule A (no label_rule "A"): its numbers follow the old rule until the team
+    relabels it (spec 1.2a)."""
+    return audit.get("status") == "done" and _is_scoring(audit) and audit.get("label_rule") != "A"
+
+
 def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:
+    """Audits of the last `days` days (0: all), newest first, optionally of one status; old_rule=1 keeps only the
+    frames labelled before rule A, for the Model page's "Relabel them". counts are always those of the range."""
     params = event.get("queryStringParameters") or {}
     status = params.get("status") or ""
     days = int(params.get("days") or 7)
+    old_rule = params.get("old_rule") in ("1", "true")
     audits = [a for a in _scan_all(ddb.Table(AUDITS_TABLE)) if _within_days(str(a.get("capture_timestamp", "")), days)]
     counts = {s: sum(1 for a in audits if a.get("status") == s) for s in ("pending", "done", "skipped")}
     chosen = sorted(
-        (a for a in audits if not status or a.get("status") == status),
+        (a for a in audits if (not status or a.get("status") == status) and (not old_rule or _before_rule_a(a))),
         key=lambda a: str(a.get("capture_timestamp", "")),
         reverse=True,
     )
@@ -1407,6 +1416,7 @@ def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:
             "status": a.get("status"),
             "n_boxes": len(json.loads(a.get("ai_boxes_json") or "[]")),
             "labeled_by": a.get("labeled_by"),
+            "label_rule": a.get("label_rule"),
         }
         for a in chosen
     ]
@@ -1617,7 +1627,7 @@ def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
         if "processing_ms_median" in h
         for _ in range(int(h.get("captures", 0)))
     ]
-    old_rule_frames = sum(1 for a in done if a.get("label_rule") != "A")
+    old_rule_frames = sum(1 for a in done if _before_rule_a(a))
     plans, pairs = _against_the_shelf(ddb, chosen)  # each frame is held to its own store's plan
     return _json_response(
         200,

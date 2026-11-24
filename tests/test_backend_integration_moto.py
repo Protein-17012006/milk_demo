@@ -630,6 +630,51 @@ def test_summary_counts_frames_labelled_before_rule_a(monkeypatch: pytest.Monkey
         },
     )
     assert _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["old_rule_frames"] == 1
+    # "Relabel them" lists it and opens it in the labeller, with its saved verdicts
+    listed = _call(api, "GET", "/v1/model/audits", query={"days": "0", "status": "done", "old_rule": "1"})[1]
+    assert [(i["audit_id"], i["label_rule"]) for i in listed["items"]] == [(AUDIT_14, None)]
+    detail = _call(api, "GET", f"/v1/model/audits/{AUDIT_14}")[1]
+    assert [v["verdict"] for v in detail["verdicts"]] == ["correct", "correct"]
+    body = {"verdicts": detail["verdicts"], "missed": [], "misses_checked": True}
+    status, saved = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body=body)
+    assert status == 200 and saved["label_rule"] == "A"
+    assert _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["old_rule_frames"] == 0
+    assert _call(api, "GET", "/v1/model/audits", query={"days": "0", "old_rule": "1"})[1]["items"] == []
+
+
+@mock_aws
+def test_the_audits_list_finds_the_frames_labelled_before_rule_a(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+
+    def put(audit_id: str, status: str, **extra) -> None:
+        hour = audit_id[-2:]
+        _table("test-audits").put_item(
+            Item={
+                "store_id": "DEMO-S01",
+                "audit_id": audit_id,
+                "status": status,
+                "camera_id": "CAM-S01-A",
+                "capture_id": f"CAP-S01-20261123-{hour}1000",
+                "capture_timestamp": f"2026-11-23T{hour}:10:00+07:00",
+                "ai_boxes_json": "[]",
+                **extra,
+            }
+        )
+
+    put("AUD-CAM-S01-A-20261123-12", "done")  # labelled on 24/11, before rule A
+    put("AUD-CAM-S01-A-20261123-10", "done")
+    put("AUD-CAM-S01-A-20261123-13", "done", label_rule="A")
+    put("AUD-CAM-S01-A-20261123-14", "pending")
+    put("AUD-CAM-S01-A-20261123-15", "skipped", skip_reason="blurry")
+    put("TRN-CAM-S01-A-20261123-11", "done")  # a training frame is never scored
+    items = _call(api, "GET", "/v1/model/audits", query={"days": "0"})[1]["items"]
+    rules = {i["audit_id"]: i["label_rule"] for i in items}
+    assert rules.pop("AUD-CAM-S01-A-20261123-13") == "A" and len(rules) == 5
+    assert set(rules.values()) == {None}
+    for query in ({"old_rule": "1"}, {"old_rule": "1", "status": "done"}):
+        old = _call(api, "GET", "/v1/model/audits", query={"days": "0", **query})[1]
+        assert [i["audit_id"] for i in old["items"]] == ["AUD-CAM-S01-A-20261123-12", "AUD-CAM-S01-A-20261123-10"]
+        assert old["counts"] == {"pending": 1, "done": 4, "skipped": 1}  # the counts stay those of the range
 
 
 @mock_aws

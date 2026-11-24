@@ -307,6 +307,7 @@ export interface ApiAuditListItem {
   status: AuditStatus;
   n_boxes: number;
   labeled_by?: string | null;
+  label_rule?: string | null; // "A" when labelled under rule A; null when labelled before it, or not labelled yet
 }
 
 export interface ApiAuditListResponse {
@@ -662,9 +663,11 @@ export function createApiClient(getIdToken: TokenGetter) {
     exportCaptureLogCsv: () =>
       requestWithAuth("/exports/capture-log.csv", getIdToken, {}, true) as Promise<string>,
 
-    listAudits: (status?: AuditStatus, days = 7) => {
+    // oldRule: only the done scoring frames labelled before rule A, for "Relabel them"
+    listAudits: (status?: AuditStatus, days = 7, options: { oldRule?: boolean } = {}) => {
       const sp = new URLSearchParams({ days: String(days) });
       if (status) sp.set("status", status);
+      if (options.oldRule) sp.set("old_rule", "1");
       return requestWithAuth(`/model/audits?${sp.toString()}`, getIdToken) as Promise<ApiAuditListResponse>;
     },
 

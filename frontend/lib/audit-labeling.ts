@@ -8,6 +8,8 @@
  *   out_of_scope a real can that rule A does not count; the box is dropped from every number
  */
 
+import type { ApiAuditListItem } from "./api";
+
 export type Verdict = "correct" | "wrong_sku" | "not_product" | "out_of_scope";
 
 export interface BoxLabel {
@@ -64,6 +66,22 @@ export function canSave(aiBoxes: AuditBox[], labels: Record<number, BoxLabel>, m
     if (!label?.verdict) return false;
     return label.verdict !== "wrong_sku" || Boolean(label.trueSku);
   });
+}
+
+/** What relabelQueue reads of an item of GET /model/audits. */
+export type RelabelCandidate = Pick<
+  ApiAuditListItem,
+  "audit_id" | "capture_timestamp" | "purpose" | "status" | "label_rule"
+>;
+
+/** The frames "Relabel them" opens in the labeller: done scoring frames labelled before rule A (label_rule is not
+ * "A"), oldest first. GET /model/audits?old_rule=1 lists only these; the filter keeps the labeller to them anyway.
+ * The labeller loads each frame's saved verdicts, and Save stores it under rule A. */
+export function relabelQueue(items: RelabelCandidate[]): string[] {
+  return items
+    .filter((a) => a.status === "done" && a.purpose === "scoring" && a.label_rule !== "A")
+    .sort((a, b) => a.capture_timestamp.localeCompare(b.capture_timestamp))
+    .map((a) => a.audit_id);
 }
 
 /** Body of PUT /model/audits/{id}: verdicts by box, missed points rounded to whole frame pixels, check ticked. */
