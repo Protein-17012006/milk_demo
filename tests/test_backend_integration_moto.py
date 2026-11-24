@@ -1362,16 +1362,33 @@ def test_a_recompute_replays_measured_checks_and_gaps_from_stored_checks(monkeyp
 @mock_aws
 def test_kpi_says_how_many_hours_were_measured(monkeypatch: pytest.MonkeyPatch):
     api, _ = _backend(monkeypatch)
-    _at(api, monkeypatch, NOW)  # 28/11 12:00, open 06:00-22:00: checks 06:00..11:55 are closed = 72 checks
+    _at(api, monkeypatch, NOW)  # 28/11 12:00, open 06:00-22:00: checks up to 11:55 are closed
     _shelf_plan()
     _put_shelf("hour#20261128-09", **_rollup_item(6, 6, 0), unmeasured_checks=2)
     coverage = _kpi(api, days="1")["coverage"]
-    assert coverage == {"measured_hours": 0.5, "open_hours": 6.0, "display_away_hours": 0.2}
-    # an old rollup without unmeasured_checks counts none
+    # the store's first rollup is 09:00 today: open from 09:00 to 11:55 = 36 checks
+    assert coverage == {"measured_hours": 0.5, "open_hours": 3.0, "display_away_hours": 0.2}
+    # an old rollup without unmeasured_checks counts none; counted since 26/11, so the window start decides
     _put_shelf("day#20261127", **_rollup_item(12, 12, 0))
+    _put_shelf("hour#20261126-10", **_rollup_item(4, 4, 0))
     coverage = _kpi(api, days="2")["coverage"]
     assert coverage["measured_hours"] == 1.0 and coverage["display_away_hours"] == 0.0
     assert coverage["open_hours"] == 22.0  # all of 27/11 (192 checks) plus 72 today
+    assert _kpi(api, days="1")["coverage"]["open_hours"] == 6.0  # 06:00 to 11:55 today = 72 checks
+
+
+@mock_aws
+def test_kpi_open_hours_start_when_the_store_was_first_counted(monkeypatch: pytest.MonkeyPatch):
+    # 24/11: the 14-day window reached back to days before the camera existed (first capture 22/11 20:25), so the
+    # Dashboard read "Measured 19.1 h of 221.1 h open"
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, NOW)  # 28/11 12:00, open 06:00-22:00
+    _shelf_plan()
+    assert _kpi(api, days="14")["coverage"]["open_hours"] == 0.0  # never counted: no open hours to measure
+    _put_shelf("hour#20261127-15", **_rollup_item(6, 6, 0))  # the store's first rollup
+    _put_shelf("hour#20261128-09", **_rollup_item(6, 6, 0))
+    # from 27/11 15:00: 15:00-21:55 (84 checks) and today 06:00-11:55 (72), not 13 days and a half before that
+    assert _kpi(api, days="14")["coverage"]["open_hours"] == 13.0
 
 
 @mock_aws

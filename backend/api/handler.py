@@ -874,12 +874,40 @@ def _display_statuses(ddb, stores: list[dict[str, Any]]) -> list[dict[str, Any]]
     return sorted(rows, key=lambda r: (r["store_id"], r["camera_id"]))
 
 
-def _coverage(open_stores: list[dict[str, Any]], current: dict[str, Any], days: int) -> dict[str, float]:
-    """Hours measured, hours the display was out of view, and hours the stores were open up to the last closed check."""
-    now = _now()
-    first = (now - timedelta(days=days - 1)).strftime("%Y%m%d") + "-0000"
-    last = shelf.add_buckets(shelf.bucket_of(now.isoformat()), -1)
-    open_checks = sum(shelf.open_buckets(s["open_time"], s["close_time"], first, last) for s in open_stores)
+def _first_bucket_of(key: str) -> str:
+    """The first 5-minute bucket of a rollup key: day#20261127 → 20261127-0000, hour#20261128-09 → 20261128-0900."""
+    kind, value = key.split("#", 1)
+    return f"{value}-0000" if kind == "day" else f"{value}00"
+
+
+def _first_counted(ddb, store_id: str) -> str | None:
+    """The first bucket of the store's oldest hour# rollup, the hour it was first counted in; None when it has none.
+    One Query that reads one key."""
+    resp = ddb.Table(SHELF_TABLE).query(
+        KeyConditionExpression=Key("store_id").eq(store_id) & Key("key").begins_with("hour#"),
+        ProjectionExpression="#k",
+        ExpressionAttributeNames={"#k": "key"},
+        ScanIndexForward=True,
+        Limit=1,
+    )
+    items = resp.get("Items", [])
+    return _first_bucket_of(items[0]["key"]) if items else None
+
+
+def _coverage(ddb, open_stores: list[dict[str, Any]], current: dict[str, Any], window_start: str) -> dict[str, float]:
+    """Hours measured, hours the display was out of view, and hours the stores were open up to the last closed check.
+    window_start is the first rollup key of the window (_windows). A store's open hours start at the later of the
+    window start and the hour it was first counted: hours before its camera existed were never there to measure. A
+    store never counted adds none."""
+    last = shelf.add_buckets(shelf.bucket_of(_now().isoformat()), -1)
+    open_checks = 0
+    for s in open_stores:
+        counted_from = _first_counted(ddb, s["store_id"])
+        if counted_from is None:
+            continue
+        first = max(_first_bucket_of(window_start), counted_from)
+        if first <= last:
+            open_checks += shelf.open_buckets(s["open_time"], s["close_time"], first, last)
     return {
         "measured_hours": _hours(current["store_checks"]),
         "open_hours": _hours(open_checks),
@@ -967,7 +995,7 @@ def _shelf_kpis(ddb, params: dict[str, Any]) -> dict[str, Any]:
             "blocked_reason": reason,
         }
         out["oos_now"] = _oos_now(ddb, open_stores, skus)
-        out["coverage"] = _coverage(open_stores, current, days)
+        out["coverage"] = _coverage(ddb, open_stores, current, current_keys[0])
     out["alert_accuracy"] = _alert_accuracy(ddb, stores, days, skus)
     audits = _done_audits(ddb, stores, days)
     value = kpis(audits, [])["sku_identification_accuracy"]["value"] if audits else None
