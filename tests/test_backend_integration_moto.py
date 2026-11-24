@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import random
 import sys
 import urllib.parse
 from pathlib import Path
@@ -401,6 +402,30 @@ def test_training_frames_only_come_from_captures_that_see_the_display(monkeypatc
     ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
     a = _audits()
     assert set(a) == {AUDIT_14} and a[AUDIT_14]["display_visible"] is False  # scored frames are not filtered
+
+
+@mock_aws
+def test_the_training_frame_is_never_a_capture_that_hides_the_display(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    visible = "CAP-S01-20261121-140700"
+    _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)], with_frame=True, display_visible=True)
+    _ingest(ingest, "CAM-S01-A", "141200", [("hot160", 2)], with_frame=True, display_visible=False)
+    _ingest(ingest, "CAM-S01-A", "141700", [("hot160", 2)], with_frame=True, display_visible=False)
+    s3, ddb = ingest._aws_clients()
+    items = ingest.captures_in_hour(ddb, "CAM-S01-A", "S01", "20261121-14")
+    outcomes = set()
+    for seed in range(20):
+        for audit_id in _audits():
+            _table("test-audits").delete_item(Key={"store_id": "DEMO-S01", "audit_id": audit_id})
+        ingest.sample_frames(s3, ddb, "CAM-S01-A", items, "20261121-14", random.Random(seed), None)
+        a = _audits()
+        if a[AUDIT_14]["capture_id"] == visible:
+            assert set(a) == {AUDIT_14}  # the scoring frame took the only visible capture: no training frame
+            outcomes.add("no training frame")
+        else:
+            assert a[TRN_14]["capture_id"] == visible
+            outcomes.add("training frame")
+    assert outcomes == {"no training frame", "training frame"}
 
 
 @mock_aws
