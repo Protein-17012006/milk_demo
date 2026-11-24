@@ -299,7 +299,7 @@ def _handle_get_products(event: dict[str, Any], ddb) -> dict[str, Any]:
     else:
         filtered.sort(key=lambda x: x["unit_count"], reverse=True)
 
-    reliability = _reliability_by_name(ddb, _stores_for(ddb, params))
+    reliability = _reliability_by_name(ddb, _stores_for(ddb, params), products)
     for p in filtered:
         p["reliability"] = reliability.get(p["sku_id"]) or _no_reliability()
     return _json_response(
@@ -331,11 +331,12 @@ def _no_reliability() -> dict[str, Any]:
     }
 
 
-def _reliability_by_name(ddb, stores: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _reliability_by_name(ddb, stores: list[dict[str, Any]], masters: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Reliability badge per product name from the last RELIABILITY_DAYS days of done scoring frames: one pass per
     request, computed with the same code as the Model page. `confused_as` is turned from a model label to a
-    product name. A decoration of /products and /shelf-events: when the frames cannot be read, every SKU shows as
-    not enough samples and the lists still answer."""
+    product name, by `masters` (SKU Master rows the caller already loaded: no second read of them). A decoration of
+    /products and /shelf-events: when the frames cannot be read, every SKU shows as not enough samples and the lists
+    still answer."""
     if not AUDITS_TABLE:
         return {}
     try:
@@ -345,7 +346,7 @@ def _reliability_by_name(ddb, stores: list[dict[str, Any]]) -> dict[str, dict[st
         return {}
     if not audits:
         return {}
-    name_of = _sku_choices(ddb)
+    name_of = _choices_of(masters)
     out = {}
     for label, row in sku_reliability(audits).items():
         confused = row["confused_as"]
@@ -787,17 +788,40 @@ def _purpose(audit: dict[str, Any]) -> str:
     return audit.get("purpose") or ("scoring" if _is_scoring(audit) else "training")
 
 
+def _store_cameras(ddb, store_id: str) -> list[str]:
+    """Cameras of one store, from its latest_stock rows (one Query)."""
+    rows = _query_all(ddb.Table(LATEST_STOCK_TABLE), KeyConditionExpression=Key("store_id").eq(store_id))
+    return sorted({r["camera_id"] for r in rows if r.get("camera_id")})
+
+
+def _scoring_audits_of(ddb, store_id: str, first_day: str | None, last_day: str) -> list[dict[str, Any]]:
+    """The scoring audits (AUD-) of one store, read by key. Ids are AUD-<camera>-<YYYYMMDD>-<HH>, so with
+    `first_day` set (YYYYMMDD, ICT) only that camera's ids from that day through `last_day` are read; without it, or
+    when the store's cameras are unknown, every AUD- id of the store. Training audits (TRN-) are never read."""
+    table = ddb.Table(AUDITS_TABLE)
+    store = Key("store_id").eq(store_id)
+    cameras = _store_cameras(ddb, store_id) if first_day else []
+    if not cameras:
+        return _query_all(table, KeyConditionExpression=store & Key("audit_id").begins_with("AUD-"))
+    items: list[dict[str, Any]] = []
+    for camera in cameras:
+        low, high = f"AUD-{camera}-{first_day}", f"AUD-{camera}-{last_day}~"  # "~" sorts after any hour suffix
+        items.extend(_query_all(table, KeyConditionExpression=store & Key("audit_id").between(low, high)))
+    return items
+
+
 def _done_audits(ddb, stores: list[dict[str, Any]], days: int) -> list[dict[str, Any]]:
-    since = (_now() - timedelta(days=days)).isoformat(timespec="seconds")
-    store_ids = {s["store_id"] for s in stores}
-    return [
-        _audit_view(a)
-        for a in _scan_all(ddb.Table(AUDITS_TABLE))
-        if a.get("status") == "done"
-        and _is_scoring(a)
-        and a.get("store_id") in store_ids
-        and str(a.get("capture_timestamp", "")) >= since
-    ]
+    """Done scoring audits of these stores from the last `days` days (0 or less: all time)."""
+    now = _now()
+    since = (now - timedelta(days=days)).isoformat(timespec="seconds")
+    first_day = (now - timedelta(days=days)).strftime("%Y%m%d") if days > 0 else None
+    last_day = now.strftime("%Y%m%d")
+    out = []
+    for store in stores:
+        for a in _scoring_audits_of(ddb, store["store_id"], first_day, last_day):
+            if a.get("status") == "done" and _is_scoring(a) and str(a.get("capture_timestamp", "")) >= since:
+                out.append(_audit_view(a))
+    return out
 
 
 def _oos_now(ddb, stores: list[dict[str, Any]], skus: set[str] | None) -> dict[str, Any]:
@@ -996,7 +1020,7 @@ def _handle_shelf_events(event: dict[str, Any], ddb) -> dict[str, Any]:
     master = {s["sku_id"]: s for s in _scan_all(ddb.Table(SKU_MASTER_TABLE))}
     skus = _category_skus(ddb, params.get("category"))
     first = _event_floor(days)
-    reliability = _reliability_by_name(ddb, stores)
+    reliability = _reliability_by_name(ddb, stores, list(master.values()))
     items = []
     for store in stores:
         verdicts = _verdicts_of(ddb, store["store_id"])
@@ -1300,12 +1324,18 @@ def _within_days(ts: str, days: int) -> bool:
         return False
 
 
-def _sku_choices(ddb) -> dict[str, str]:
-    """Model label -> official product name: SKU Master first, the built-in alias table for the rest."""
-    choices = {s["model_alias"]: s["sku_id"] for s in _scan_all(ddb.Table(SKU_MASTER_TABLE)) if s.get("model_alias")}
+def _choices_of(masters: list[dict[str, Any]]) -> dict[str, str]:
+    """Model label -> official product name from rows carrying `model_alias` and `sku_id`, the built-in alias table
+    for the rest."""
+    choices = {s["model_alias"]: s["sku_id"] for s in masters if s.get("model_alias")}
     for label, entry in DEFAULT_ALIAS_MAP.items():
         choices.setdefault(label, entry["sku_id"])
     return choices
+
+
+def _sku_choices(ddb) -> dict[str, str]:
+    """Model label -> official product name: SKU Master first, the built-in alias table for the rest."""
+    return _choices_of(_scan_all(ddb.Table(SKU_MASTER_TABLE)))
 
 
 def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:

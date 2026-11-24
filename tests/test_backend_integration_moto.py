@@ -1863,3 +1863,37 @@ def test_lists_still_answer_when_the_scoring_frames_cannot_be_read(monkeypatch: 
         body = _call(api, "GET", "/v1/products", groups="datagent")[1]
         assert body["items"] and {p["reliability"]["badge"] for p in body["items"]} == {"insufficient"}
         assert _call(api, "GET", "/v1/shelf-events", groups="datagent")[0] == 200
+
+
+@mock_aws
+def test_scoring_frames_are_read_by_key_for_the_window_only(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140000", [("cheese145", 5)])  # gives the store its camera
+    _at(api, monkeypatch, NOW)  # 2026-11-28
+    _put_cheese_frames(("20", "21"), 6)  # in the window
+    _put_cheese_frames(("01",), 3)  # before the 14 days
+    _table("test-audits").put_item(  # a training frame of the store, a frame of another store: never read
+        Item={"store_id": "DEMO-S01", "audit_id": "TRN-CAM-S01-A-20261121-10", "status": "done", "purpose": "training"}
+    )
+    _table("test-audits").put_item(
+        Item={"store_id": "OTHER", "audit_id": "AUD-CAM-X-20261121-10", "status": "done", "purpose": "scoring"}
+    )
+    read: list[str] = []
+    real_query = api._query_all
+
+    def spy(table, **kwargs):
+        items = real_query(table, **kwargs)
+        if table.name == "test-audits":
+            read.extend(i["audit_id"] for i in items)
+        return items
+
+    def no_scan(table, **kwargs):
+        assert table.name != "test-audits", "the audits table must not be scanned"
+        return real_scan(table, **kwargs)
+
+    real_scan = api._scan_all
+    monkeypatch.setattr(api, "_query_all", spy)
+    monkeypatch.setattr(api, "_scan_all", no_scan)
+    items = {p["sku_id"]: p for p in _call(api, "GET", "/v1/products", groups="datagent")[1]["items"]}
+    assert items[CHEESE]["reliability"]["frames"] == 12
+    assert len(read) == 12 and all(a.startswith("AUD-CAM-S01-A-202611") and "-20261101-" not in a for a in read)
