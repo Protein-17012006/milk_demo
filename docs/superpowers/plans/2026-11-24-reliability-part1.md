@@ -196,7 +196,10 @@ def test_summary_counts_frames_labelled_before_rule_a(monkeypatch: pytest.Monkey
         Key={"store_id": "DEMO-S01", "audit_id": AUDIT_14},
         UpdateExpression="SET #s = :done, verdicts_json = :v",
         ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={":done": "done", ":v": '[{"box_id":1,"verdict":"correct"},{"box_id":2,"verdict":"correct"}]'},
+        ExpressionAttributeValues={
+            ":done": "done",
+            ":v": '[{"box_id":1,"verdict":"correct"},{"box_id":2,"verdict":"correct"}]',
+        },
     )
     assert _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["old_rule_frames"] == 1
 ```
@@ -328,8 +331,11 @@ def test_summary_and_top_50_ignore_training_frames(monkeypatch: pytest.MonkeyPat
     _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)], with_frame=True)
     _ingest(ingest, "CAM-S01-A", "141200", [("hot160", 2)], with_frame=True)
     ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
-    body = {"verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}], "missed": [],
-            "misses_checked": True}
+    body = {
+        "verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}],
+        "missed": [],
+        "misses_checked": True,
+    }
     assert _call(api, "PUT", f"/v1/model/audits/{TRN_14}", body=body)[0] == 200
     _, summary = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
     assert summary["n_audits"] == 0
@@ -345,8 +351,11 @@ def test_an_old_audit_without_purpose_counts_by_its_id(monkeypatch: pytest.Monke
     _table("test-audits").update_item(
         Key={"store_id": "DEMO-S01", "audit_id": AUD_14}, UpdateExpression="REMOVE purpose"
     )
-    body = {"verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}], "missed": [],
-            "misses_checked": True}
+    body = {
+        "verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}],
+        "missed": [],
+        "misses_checked": True,
+    }
     assert _call(api, "PUT", f"/v1/model/audits/{AUD_14}", body=body)[0] == 200
     assert _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["n_audits"] == 1
 ```
@@ -589,14 +598,29 @@ def test_an_event_right_after_a_gap_says_so():
         st, e = step_state(st, units, bucket, gap)
         events += [e] if e else []
     assert events == [
-        {"type": "OOS", "at": "20261124-0845", "delta": -5, "level_before": 5, "level_after": 0,
-         "duration_min": None, "after_gap": True, "gap_from": "20261123-2025", "gap_to": "20261124-0845"}
+        {
+            "type": "OOS",
+            "at": "20261124-0845",
+            "delta": -5,
+            "level_before": 5,
+            "level_after": 0,
+            "duration_min": None,
+            "after_gap": True,
+            "gap_from": "20261123-2025",
+            "gap_to": "20261124-0845",
+        }
     ]
 
 
 def test_unmeasured_open_checks_are_counted_apart():
-    c = {"bucket": "20261123-1400", "counts": {"A": 0}, "open": True, "measurable": False,
-         "expected": ["A"], "confident_skus": []}
+    c = {
+        "bucket": "20261123-1400",
+        "counts": {"A": 0},
+        "open": True,
+        "measurable": False,
+        "expected": ["A"],
+        "confident_skus": [],
+    }
     r = rollup([c], [])
     assert (r["checks"], r["unmeasured_checks"], "A" in r["skus"]) == (0, 1, False)
     assert totals([r])["unmeasured_checks"] == 1
@@ -825,8 +849,9 @@ def test_presence_counts_false_empties():
 
 
 def test_periods_follow_the_frame_hour():
-    assert [period_of(t) for t in ("2026-11-24T09:35:04+07:00", "2026-11-23T14:18:11+07:00",
-                                   "2026-11-23T17:44:38+07:00")] == ["morning", "afternoon", "evening"]
+    assert [
+        period_of(t) for t in ("2026-11-24T09:35:04+07:00", "2026-11-23T14:18:11+07:00", "2026-11-23T17:44:38+07:00")
+    ] == ["morning", "afternoon", "evening"]
 
 
 def test_bootstrap_is_repeatable_and_brackets_the_value():
