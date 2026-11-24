@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { ApiEventPhotos, ApiShelfEvent, ApiShelfEventsResponse, ShelfEventType, ShelfVerdict } from "@/lib/api";
 import { eventLabel, eventText, gapText, oosDurationText, timeAgo } from "@/lib/shelf-ui";
@@ -16,6 +16,8 @@ interface RecentActivitiesCardProps {
   blockedText: string | null;
   /** "Alerts confirmed right: 7 of 10", from the Dashboard's /kpi call; null when there is none. */
   accuracyLine: string | null;
+  /** "OOS 7 of 9 · Restocked 3 of 4": the same number per kind of event; null when none is confirmed yet. */
+  accuracyByType: string | null;
   /** Only team_admin and field_team confirm events; datagent only looks. */
   canVerify: boolean;
   loadPhotos: ((storeId: string, eventKey: string) => Promise<ApiEventPhotos>) | null;
@@ -148,7 +150,7 @@ function PhotosDialog({ item, photos, onClose }: { item: ApiShelfEvent; photos: 
 }
 
 /** Shelf events of the Dashboard filters, newest first: out of stock, low stock, depleted, restocked. */
-export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLine, canVerify, loadPhotos, saveVerdict }: RecentActivitiesCardProps) {
+export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLine, accuracyByType, canVerify, loadPhotos, saveVerdict }: RecentActivitiesCardProps) {
   const [kind, setKind] = useState<ActivityKind>("all");
   const [items, setItems] = useState<ApiShelfEvent[] | null>(null);
   const [allOpen, setAllOpen] = useState(false);
@@ -157,6 +159,7 @@ export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLin
   const [chosen, setChosen] = useState<Record<string, ShelfVerdict>>({});
   const [photoOf, setPhotoOf] = useState<ApiShelfEvent | null>(null);
   const [photos, setPhotos] = useState<ApiEventPhotos | null | undefined>(undefined);
+  const wantedPhotos = useRef<string | null>(null); // the event whose photos were asked for last
   const now = new Date();
   const idOf = (item: ApiShelfEvent) => `${item.store_id}|${item.event_key}`;
 
@@ -177,10 +180,16 @@ export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLin
       );
     },
     onPhotos: (item) => {
+      const id = idOf(item);
+      wantedPhotos.current = id;
       setPhotoOf(item);
       setPhotos(undefined);
       if (!loadPhotos) return setPhotos(null);
-      loadPhotos(item.store_id, item.event_key).then(setPhotos, () => setPhotos(null));
+      // an answer for an event that is no longer the open one is dropped
+      const settle = (value: ApiEventPhotos | null) => {
+        if (wantedPhotos.current === id) setPhotos(value);
+      };
+      loadPhotos(item.store_id, item.event_key).then(settle, () => settle(null));
     },
   };
 
@@ -218,6 +227,11 @@ export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLin
         {accuracyLine && (
           <p data-alert-accuracy className="mt-[4px] text-[12px] font-medium leading-[1.4] text-[#374151]">
             {accuracyLine}
+          </p>
+        )}
+        {accuracyByType && (
+          <p data-alert-accuracy-by-type className="text-[11.5px] leading-[1.4] text-[#6B7280]">
+            {accuracyByType}
           </p>
         )}
         <div className="mt-[8px] flex flex-wrap items-center gap-[8px]">
@@ -318,7 +332,10 @@ export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLin
           </div>
         </div>
       )}
-      {photoOf && <PhotosDialog item={photoOf} photos={photos} onClose={() => setPhotoOf(null)} />}
+      {photoOf && <PhotosDialog item={photoOf} photos={photos} onClose={() => {
+        wantedPhotos.current = null;
+        setPhotoOf(null);
+      }} />}
     </div>
   );
 }

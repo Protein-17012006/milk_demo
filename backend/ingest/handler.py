@@ -24,7 +24,7 @@ from typing import Any
 import boto3
 import shelf
 from boto3.dynamodb.conditions import Key
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from common import (
     UNRECOGNIZED,
     floor_two_decimals,
@@ -752,9 +752,35 @@ def _copy_photo(s3_client, source: dict, dest_key: str) -> str | None:
             CopySource={"Bucket": source["source_bucket"], "Key": source["image_key"]},
         )
         return dest_key
-    except ClientError as exc:
+    except (ClientError, BotoCoreError) as exc:  # a timeout or a dropped connection too: no photo, the tick goes on
         print(json.dumps({"event_photo_failed": dest_key, "error": repr(exc)}))
         return None
+
+
+def _before_check(table, store_id: str, event: dict[str, Any]) -> dict[str, Any] | None:
+    """The check the event's "before" photo comes from. After a gap that is the last measured check before it
+    (gap_from, where level_before was read), when it kept a frame; otherwise the newest open, measured check
+    with a frame before that point."""
+    bound = event["at"]
+    if event.get("after_gap") and event.get("gap_from"):
+        bound = event["gap_from"]
+        exact = from_dynamodb(table.get_item(Key={"store_id": store_id, "key": f"check#{bound}"}).get("Item"))
+        if exact and exact.get("image_key"):
+            return exact
+    resp = table.query(
+        KeyConditionExpression=Key("store_id").eq(store_id) & Key("key").lt(f"check#{bound}"),
+        ScanIndexForward=False,
+        Limit=24,
+    )
+    for c in from_dynamodb(resp.get("Items", [])):
+        if (
+            str(c["key"]).startswith("check#")
+            and c.get("measurable", True)
+            and c.get("open", True)
+            and c.get("image_key")
+        ):
+            return c
+    return None
 
 
 def _event_photos(s3_client, ddb_resource, store_id: str, event: dict[str, Any]) -> dict[str, str]:
@@ -769,20 +795,11 @@ def _event_photos(s3_client, ddb_resource, store_id: str, event: dict[str, Any])
     out: dict[str, str] = {}
     try:
         after = from_dynamodb(table.get_item(Key={"store_id": store_id, "key": f"check#{event['at']}"}).get("Item"))
-        resp = table.query(
-            KeyConditionExpression=Key("store_id").eq(store_id) & Key("key").lt(f"check#{event['at']}"),
-            ScanIndexForward=False,
-            Limit=24,
-        )
-    except ClientError as exc:
+        before = _before_check(table, store_id, event)
+    except (ClientError, BotoCoreError) as exc:
         print(json.dumps({"event_photo_failed": event["event_key"], "error": repr(exc)}))
         return {}
-    earlier = [
-        c
-        for c in from_dynamodb(resp.get("Items", []))
-        if str(c["key"]).startswith("check#") and c.get("measurable", True) and c.get("image_key")
-    ]
-    for name, source in (("before", earlier[0] if earlier else {}), ("after", after or {})):
+    for name, source in (("before", before or {}), ("after", after or {})):
         key = _copy_photo(s3_client, source, f"{prefix}-{name}.jpg")
         if key:
             out[f"photo_{name}_key"] = key

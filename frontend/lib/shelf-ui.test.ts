@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ApiShelfEvent } from "./api";
-import { alertAccuracyText, blockedText, coverageText, dashboardQuery, displayBanner, gapText, eventLabel, eventText, oosDurationText, pctChange, ptsChange, timeAgo } from "./shelf-ui.ts";
+import { alertAccuracyByTypeText, alertAccuracyText, blockedText, coverageText, dashboardQuery, displayBanner, gapText, eventLabel, eventText, oosDurationText, pctChange, ptsChange, timeAgo } from "./shelf-ui.ts";
 
 function ev(type: ApiShelfEvent["type"], delta: number, levelAfter: number): ApiShelfEvent {
   return {
@@ -130,14 +130,27 @@ test("alert accuracy says how many were right, and the unsure ones apart", () =>
   assert.equal(alertAccuracyText({ value: 0.8, n: 10, unsure: 0, blocked_reason: null }), "Alerts confirmed right: 8 of 10");
 });
 
-test("alert accuracy asks for more confirmations instead of showing a share", () => {
+test("alert accuracy below 10 says not enough samples, and asks only those who can confirm", () => {
+  const blocked = { value: null, blocked_reason: "few_verified" as const, n: 3, unsure: 0 };
+  assert.equal(alertAccuracyText(blocked, true), "Not enough samples (n = 3) · confirm 7 more alerts to see how often they are right");
+  assert.equal(alertAccuracyText(blocked, false), "Not enough samples (n = 3)");
+  assert.equal(alertAccuracyText(blocked), "Not enough samples (n = 3)");
   assert.equal(
-    alertAccuracyText({ value: null, blocked_reason: "few_verified", n: 3, unsure: 0 }),
-    "Confirm 7 more alerts to see how often they are right"
-  );
-  assert.equal(
-    alertAccuracyText({ value: null, blocked_reason: "few_verified", n: 9, unsure: 2 }),
-    "Confirm 1 more alert to see how often they are right"
+    alertAccuracyText({ value: null, blocked_reason: "few_verified", n: 9, unsure: 2 }, true),
+    "Not enough samples (n = 9) · confirm 1 more alert to see how often they are right (2 unsure)"
   );
   assert.equal(alertAccuracyText(undefined), null);
+});
+
+test("alert accuracy per kind of event leaves out kinds nobody confirmed", () => {
+  assert.equal(
+    alertAccuracyByTypeText({
+      RESTOCKED: { right: 3, wrong: 1, unsure: 0 },
+      OOS: { right: 7, wrong: 2, unsure: 1 },
+      DEPLETED: { right: 0, wrong: 0, unsure: 2 },
+    }),
+    "OOS 7 of 9 · Restocked 3 of 4"
+  );
+  assert.equal(alertAccuracyByTypeText({}), null);
+  assert.equal(alertAccuracyByTypeText(undefined), null);
 });

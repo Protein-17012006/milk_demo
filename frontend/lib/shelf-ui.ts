@@ -111,15 +111,39 @@ export function coverageText(c: ApiCoverage): string {
 }
 
 /** Head line of Recent Shelf Activities: how often the alerts the team checked were right. Null without the
- * number (an older backend). Below 10 confirmed events it says how many more are needed, never a percentage. */
-export function alertAccuracyText(a: (Partial<ApiAlertAccuracy> & { n: number }) | null | undefined): string | null {
+ * number (an older backend). Below 10 confirmed events it says "Not enough samples" and, for those who can
+ * confirm, how many more are needed; never a percentage. */
+export function alertAccuracyText(
+  a: (Partial<ApiAlertAccuracy> & { n: number }) | null | undefined,
+  canConfirm = false
+): string | null {
   if (!a) return null;
+  const unsure = (a.unsure ?? 0) > 0 ? ` (${a.unsure} unsure)` : "";
   if (a.value == null || a.blocked_reason) {
     const more = Math.max(1, ALERT_MIN_VERIFIED - a.n);
-    return `Confirm ${more} more ${more === 1 ? "alert" : "alerts"} to see how often they are right`;
+    const ask = canConfirm
+      ? ` · confirm ${more} more ${more === 1 ? "alert" : "alerts"} to see how often they are right`
+      : "";
+    return `Not enough samples (n = ${a.n})${ask}${unsure}`;
   }
-  const unsure = (a.unsure ?? 0) > 0 ? ` (${a.unsure} unsure)` : "";
   return `Alerts confirmed right: ${Math.round(a.value * a.n)} of ${a.n}${unsure}`;
+}
+
+const TYPE_NAMES: [string, string][] = [
+  ["OOS", "OOS"],
+  ["LOW_STOCK", "Low stock"],
+  ["DEPLETED", "Depleted"],
+  ["RESTOCKED", "Restocked"],
+];
+
+/** "OOS 7 of 9 · Restocked 3 of 4": right of right + wrong for each kind of event; kinds with none left out. */
+export function alertAccuracyByTypeText(byType: ApiAlertAccuracy["by_type"] | null | undefined): string | null {
+  const parts = TYPE_NAMES.flatMap(([type, name]) => {
+    const c = byType?.[type];
+    const n = c ? c.right + c.wrong : 0;
+    return c && n > 0 ? [`${name} ${c.right} of ${n}`] : [];
+  });
+  return parts.length ? parts.join(" · ") : null;
 }
 
 /** The time of day "HH:MM" of an ISO timestamp written in UTC+7. */

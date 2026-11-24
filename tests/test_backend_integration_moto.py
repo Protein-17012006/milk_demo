@@ -1709,3 +1709,78 @@ def test_photos_route_gives_null_for_a_missing_photo(monkeypatch: pytest.MonkeyP
     assert body == {"before_url": None, "after_url": None}
     query = {"store_id": "DEMO-S01", "event_key": "20261121-1500#nothing#OOS"}
     assert _call(api, "GET", "/v1/shelf-events/photos", groups="datagent", query=query)[0] == 404
+
+
+@mock_aws
+def test_after_a_long_gap_the_before_photo_is_the_check_before_the_gap(monkeypatch: pytest.MonkeyPatch):
+    # 44 checks (3.5 hours) in which the camera could not see the display, each with a frame of the wrong shelf
+    # state; the event right after the gap must show the last measured check, not "no photo" or a stray frame
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    s3 = boto3.client("s3", region_name="ap-southeast-1")
+
+    def frame(bucket: str, body: str) -> dict:
+        key = f"frames/CAM-S01-A/2026-11-21/{bucket}.jpg"
+        s3.put_object(Bucket="test-hub-bucket", Key=key, Body=body.encode())
+        return {"image_key": key, "source_bucket": "test-hub-bucket"}
+
+    base = {"captures": 1, "cameras": ["CAM-S01-A"], "confident_skus": []}
+    for bucket, units in [("1400", 5), ("1405", 5)]:
+        _put_shelf(
+            f"check#20261121-{bucket}",
+            bucket=f"20261121-{bucket}",
+            counts={CHEESE: units},
+            **base,
+            **frame(bucket, f"measured {bucket}"),
+        )
+    for i in range(44):
+        minute = 14 * 60 + 10 + 5 * i
+        bucket = f"{minute // 60:02d}{minute % 60:02d}"
+        _put_shelf(
+            f"check#20261121-{bucket}",
+            bucket=f"20261121-{bucket}",
+            counts={CHEESE: 5},
+            measurable=False,
+            unmeasured_reason="display_not_visible",
+            **base,
+            **frame(bucket, f"away {bucket}"),
+        )
+    for bucket in ("1750", "1755"):
+        _put_shelf(
+            f"check#20261121-{bucket}",
+            bucket=f"20261121-{bucket}",
+            counts={CHEESE: 0},
+            **base,
+            **frame(bucket, f"measured {bucket}"),
+        )
+    ingest.lambda_handler({"action": "shelf_recompute", "store_id": "DEMO-S01", "now": "2026-11-21T18:10:00+07:00"})
+    key = f"20261121-1750#{CHEESE}#OOS"
+    event = _table("test-shelf-events").get_item(Key={"store_id": "DEMO-S01", "event_key": key})["Item"]
+    assert event["after_gap"] and event["gap_from"] == "20261121-1405"
+    read = lambda k: s3.get_object(Bucket="test-analytics-bucket", Key=event[k])["Body"].read()  # noqa: E731
+    assert (read("photo_before_key"), read("photo_after_key")) == (b"measured 1405", b"measured 1750")
+
+
+@mock_aws
+def test_a_network_failure_while_copying_a_photo_does_not_stop_the_tick(monkeypatch: pytest.MonkeyPatch):
+    from botocore.exceptions import ReadTimeoutError
+
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    _framed_cheese_then_empty(ingest)
+    real = boto3.client("s3", region_name="ap-southeast-1")
+
+    class Flaky:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def copy_object(self, **kwargs):
+            raise ReadTimeoutError(endpoint_url="https://s3.test")
+
+    monkeypatch.setattr(
+        ingest, "_aws_clients", lambda: (Flaky(), boto3.resource("dynamodb", region_name="ap-southeast-1"))
+    )
+    _tick(ingest)
+    event = _oos_event()
+    assert "photo_before_key" not in event and "photo_after_key" not in event
+    assert _shelf("state")["last_bucket"] == "20261121-1415"
