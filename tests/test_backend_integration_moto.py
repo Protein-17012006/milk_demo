@@ -126,11 +126,13 @@ def _ingest(
     with_frame: bool = False,
     display_visible: bool | None = None,
     display_score: float | None = None,
+    flagged: tuple[str, ...] = (),
 ) -> None:
     """Ingest one hub result of store DEMO-S01 taken on 21/11 at hhmmss (may carry a -2 suffix); counts are
     (model label, units). with_frame puts a fake frame in the hub bucket, as the hub does. display_visible sets
     the worker's field (False also sets a low display_score); None leaves it out, as old workers did. display_score
-    sets the worker's score, as a worker that has learnt the display sends it."""
+    sets the worker's score, as a worker that has learnt the display sends it. Rows of the labels in flagged are
+    flagged Low Confidence (0.5), as the worker flags them."""
     capture_id = f"CAP-S01-20261121-{hhmmss}"
     ts = f"2026-11-21T{hhmmss[:2]}:{hhmmss[2:4]}:{hhmmss[4:6]}+07:00"
     image = f"{camera_id}_20261121_{hhmmss}.jpg"
@@ -154,24 +156,31 @@ def _ingest(
             "sku_id": label,
             "sku_name": label,
             "unit_count": units,
-            "confidence_score": 0.9,
+            "confidence_score": 0.5 if label in flagged else 0.9,
             "detection_method": "Visual",
             "bounding_box": [[10 + 60 * k, 20, 50, 80] for k in range(units)],
-            "is_flagged": False,
-            "flag_reason": "",
+            "is_flagged": label in flagged,
+            "flag_reason": "Low Confidence" if label in flagged else "",
             "processing_time_ms": 20,
         }
         for i, (label, units) in enumerate(counts, start=1)
     ]
     total = sum(units for _, units in counts)
+    n_flagged = sum(row["is_flagged"] for row in rows)
     record = {
         **head,
         "image_key": image_key,
         "processing_time_ms": 20,
         "units_found": total,
-        "flagged_rows": 0,
+        "flagged_rows": n_flagged,
         "rows": rows,
-        "log": {**head, "units_found": total, "rows_written": len(rows), "flagged_rows": 0, "processing_time_ms": 20},
+        "log": {
+            **head,
+            "units_found": total,
+            "rows_written": len(rows),
+            "flagged_rows": n_flagged,
+            "processing_time_ms": 20,
+        },
     }
     if detections is not None:
         record["detections"] = detections
@@ -1216,6 +1225,24 @@ def test_a_capture_without_the_display_leaves_the_shelf_numbers(monkeypatch: pyt
     assert _units(api)[CHEESE] == 5
     status = _shelf("display#CAM-S01-A")
     assert (status["visible"], status["since"]) == (False, "2026-11-21T14:05:00+07:00")
+
+
+@mock_aws
+def test_a_hidden_capture_with_rows_changes_no_stock_and_queues_nothing(monkeypatch: pytest.MonkeyPatch):
+    # the night phantom boxes: with the display packed away the model still draws boxes on whatever is in the zone
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140000", [("cheese145", 5)])
+    boxes = [("cheese145", 9), ("hot160", 1)]
+    _ingest(ingest, "CAM-S01-A", "140500", boxes, flagged=("hot160",), display_visible=False)
+    units = _units(api)
+    assert (units[CHEESE], units[HOT]) == (5, 0)
+    stock = _table("test-latest-stock").get_item(Key={"store_id": "DEMO-S01", "sku_id": CHEESE})["Item"]
+    assert (stock["capture_id"], stock["recent_counts"]) == ("CAP-S01-20261121-140000", [5])
+    assert "Item" not in _table("test-latest-stock").get_item(Key={"store_id": "DEMO-S01", "sku_id": HOT})
+    assert _table("test-review-queue").scan()["Items"] == []
+    # the same capture with the display in view does both: the helper's flagged row really reaches the queue
+    _ingest(ingest, "CAM-S01-A", "141000", boxes, flagged=("hot160",), display_visible=True)
+    assert [q["queue_key"] for q in _table("test-review-queue").scan()["Items"]] == [f"CAM-S01-A#{HOT}#Low Confidence"]
 
 
 @mock_aws
