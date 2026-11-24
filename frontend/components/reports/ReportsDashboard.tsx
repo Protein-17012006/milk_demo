@@ -78,7 +78,11 @@ export function ReportsDashboard() {
         setLiveTrends(Object.fromEntries(TREND_METRICS.map((m, i) => [m, trendRes[i].points])) as Trends);
       })
       .catch(() => {
-        // leave the cards at "—": never show numbers the API did not return
+        // show "—" rather than the previous filter's numbers under the new filter labels
+        if (cancelled) return;
+        setLiveKpi(null);
+        setLiveSeries(null);
+        setLiveTrends(NO_TRENDS);
       });
     return () => {
       cancelled = true;
