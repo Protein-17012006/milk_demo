@@ -103,3 +103,25 @@ def test_stream_certificate_settings(monkeypatch):
     monkeypatch.setenv("MILK_STREAM_TLS_NAME", "milk-demo-ingest")
     s = config.load()
     assert (s.stream_ca_file, s.stream_tls_name) == ("C:/Users/huyho/Datagent/hub-ingest.crt", "milk-demo-ingest")
+
+
+def test_display_settings_default_off(monkeypatch):
+    for key in ("MILK_DISPLAY_ZONE", "MILK_DISPLAY_MIN", "MILK_DISPLAY_REFS"):
+        monkeypatch.delenv(key, raising=False)
+    s = config.load()
+    assert s.display_zone is None and s.display_min == 0.5 and s.display_refs is None
+
+
+def test_display_settings_from_env(monkeypatch):
+    monkeypatch.setenv("MILK_DISPLAY_ZONE", "0.336,0.083,0.242,0.361")
+    monkeypatch.setenv("MILK_DISPLAY_MIN", "0.6")
+    monkeypatch.setenv("MILK_DISPLAY_REFS", "C:/refs/display.npz")
+    s = config.load()
+    assert s.display_zone == (0.336, 0.083, 0.242, 0.361)
+    assert s.display_min == 0.6 and s.display_refs == "C:/refs/display.npz"
+
+
+def test_bad_display_zone_is_rejected(monkeypatch):
+    monkeypatch.setenv("MILK_DISPLAY_ZONE", "0.1,0.2,0.8")
+    with pytest.raises(ValueError, match="MILK_DISPLAY_ZONE"):
+        config.load()

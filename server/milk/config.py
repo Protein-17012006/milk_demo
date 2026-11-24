@@ -23,16 +23,16 @@ def load_env_file(path: str) -> None:
             os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-def _roi(raw: str | None) -> tuple[float, float, float, float] | None:
-    """Region of interest as normalised x,y,w,h in 0..1, for example "0.1,0.2,0.8,0.6"."""
+def _roi(raw: str | None, name: str = "MILK_ROI") -> tuple[float, float, float, float] | None:
+    """Region as normalised x,y,w,h in 0..1, for example "0.1,0.2,0.8,0.6" (MILK_ROI, MILK_DISPLAY_ZONE)."""
     if not raw:
         return None
     parts = [float(p) for p in raw.split(",")]
     if len(parts) != 4:
-        raise ValueError(f"MILK_ROI needs four numbers x,y,w,h, got {raw!r}")
+        raise ValueError(f"{name} needs four numbers x,y,w,h, got {raw!r}")
     x, y, w, h = parts
     if not (0 <= x < 1 and 0 <= y < 1 and 0 < w <= 1 and 0 < h <= 1):
-        raise ValueError(f"MILK_ROI values must be fractions of the frame, got {raw!r}")
+        raise ValueError(f"{name} values must be fractions of the frame, got {raw!r}")
     return x, y, w, h
 
 
@@ -71,6 +71,9 @@ class Settings:
     max_fps: float
     roi: tuple[float, float, float, float] | None
     display_max_w: int
+    display_zone: tuple[float, float, float, float] | None
+    display_min: float
+    display_refs: str | None
     smooth_window: int
     flag_threshold: float
     mediamtx_api: str
@@ -136,6 +139,10 @@ def load(env_file: str | None = None) -> Settings:
         max_fps=float(_env("MILK_MAX_FPS", "0")),  # frames counted per second, 0 = as fast as possible
         roi=_roi(_env("MILK_ROI")),
         display_max_w=int(_env("MILK_DISPLAY_MAX_W", "1920")),
+        # The glass cabinet, as fractions of the frame; unset = the worker does not check whether it is in view
+        display_zone=_roi(_env("MILK_DISPLAY_ZONE"), "MILK_DISPLAY_ZONE"),
+        display_min=float(_env("MILK_DISPLAY_MIN", "0.5")),  # histogram correlation below this = cabinet not in view
+        display_refs=_env("MILK_DISPLAY_REFS"),  # .npz where the learnt references are kept across restarts
         smooth_window=int(_env("MILK_SMOOTH_WINDOW", "3")),
         flag_threshold=float(_env("MILK_FLAG_THRESHOLD", "0.70")),
         mediamtx_api=_env("MILK_MEDIAMTX_API", "http://127.0.0.1:9997"),

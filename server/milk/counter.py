@@ -24,6 +24,7 @@ import numpy as np
 
 from . import config
 from .cvoutput import CaptureIdAllocator, Detection, build_capture, counts_of, persist_record
+from .display import DisplayCheck
 from .pipeline import load_pipeline
 from .privacy import load_blurrer
 from .sampling import Sampler
@@ -139,6 +140,7 @@ def main(argv: list[str] | None = None) -> None:
             s.stream_url, keyframes_only=(s.decode != "all"), ca_file=s.stream_ca_file, tls_name=s.stream_tls_name
         ),
     )
+    display = DisplayCheck(s.display_zone, s.display_min, s.display_refs) if s.display_zone else None
     hub = HubClient(s.hub_url, s.internal_token)
     smoother = CountSmoother(s.smooth_window)
     ids = CaptureIdAllocator()
@@ -212,6 +214,8 @@ def main(argv: list[str] | None = None) -> None:
             detections = normalise(pipeline.detect(crop), x0, y0)
             processing_ms = round((time.perf_counter() - started) * 1000)
             done_at.append(time.time())
+            # On the original frame, before any blur; no zone set means the cabinet is taken as in view
+            display_score, display_visible = display.check(image, detections, time.time()) if display else (None, True)
 
             ts = datetime.fromtimestamp(frame.received_at, tz)
             rows, log_line = build_capture(
@@ -275,6 +279,8 @@ def main(argv: list[str] | None = None) -> None:
                         for r in rows
                         if r["is_flagged"]
                     ],
+                    "display_score": display_score,
+                    "display_visible": display_visible,
                     "faces_blurred": faces,
                     "pipeline": pipeline.name,
                 }
@@ -283,6 +289,8 @@ def main(argv: list[str] | None = None) -> None:
             if persist:
                 full = encode_jpeg(shown, 85)[0] if blurrer else None  # never store unblurred frames
                 record = persist_record(log_line, rows, counts, latency_ms, detections, s.model_version)
+                record["display_score"] = display_score
+                record["display_visible"] = display_visible
                 payload = {"record": record, "jpeg_b64": base64.b64encode(full).decode("ascii") if full else None}
                 if hub.post("/internal/persist", payload):
                     last_persist = time.time()
