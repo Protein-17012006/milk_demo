@@ -902,6 +902,32 @@ def test_kpi_capture_numbers_read_only_store_and_processing_time(monkeypatch: py
 
 
 @mock_aws
+def test_stores_last_capture_reads_only_store_and_timestamp(monkeypatch: pytest.MonkeyPatch):
+    """/stores scans captures for two fields only (ProjectionExpression); the latest capture must not change."""
+    api, _ = _backend(monkeypatch)
+    _table("test-store-list").put_item(Item={"store_id": "DEMO-S01", "store_name": "Demo Store S01"})
+    _table("test-store-list").put_item(Item={"store_id": "DEMO-S02", "store_name": "Demo Store S02"})
+    for ts in ("2026-11-24T08:45:10+07:00", "2026-11-24T09:05:40+07:00", "2026-11-23T22:00:28+07:00"):
+        _table("test-captures").put_item(
+            Item={
+                "camera_id": "CAM-S01-A",
+                "capture_id": f"CAP-S01-{ts[:10].replace('-', '')}-{ts[11:19].replace(':', '')}",
+                "store_id": "DEMO-S01",
+                "capture_timestamp": ts,
+                "rows_json": "[]",
+            }
+        )
+    status, body = _call(api, "GET", "/v1/stores", groups="datagent")
+    by_id = {s["store_id"]: s for s in body["items"]}
+    assert status == 200
+    assert (by_id["DEMO-S01"]["last_capture_timestamp"], by_id["DEMO-S01"]["has_recent_capture"]) == (
+        "2026-11-24T09:05:40+07:00",
+        True,
+    )
+    assert (by_id["DEMO-S02"]["last_capture_timestamp"], by_id["DEMO-S02"]["has_recent_capture"]) == (None, False)
+
+
+@mock_aws
 def test_oos_now_counts_expected_skus_out_of_stock(monkeypatch: pytest.MonkeyPatch):
     api, _ = _backend(monkeypatch)
     _at(api, monkeypatch, NOW)

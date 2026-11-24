@@ -391,7 +391,8 @@ def _handle_get_product_detail(sku_id_raw: str, event: dict[str, Any], s3, ddb) 
 
 def _handle_get_stores(event: dict[str, Any], ddb) -> dict[str, Any]:
     stores = _scan_all(ddb.Table(STORE_LIST_TABLE))
-    captures = _scan_all(ddb.Table(CAPTURES_TABLE))
+    # only the two fields used: the full items (rows, boxes) are ~18 MB and took ~9 s per call to read
+    captures = _scan_all(ddb.Table(CAPTURES_TABLE), ProjectionExpression="store_id, capture_timestamp")
     last_by_store: dict[str, str] = {}
     for c in captures:
         sid = c.get("store_id", "")
