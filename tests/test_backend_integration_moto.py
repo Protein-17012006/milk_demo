@@ -1802,6 +1802,11 @@ def _put_cheese_frames(days: tuple[str, ...], per_day: int) -> None:
         {"box_id": 3, "verdict": "wrong_sku", "true_sku_id": "cheese145"},
         {"box_id": 4, "verdict": "wrong_sku", "true_sku_id": "cheese145"},
     ]
+    _put_scoring_frames(days, per_day, boxes, verdicts)
+
+
+def _put_scoring_frames(days: tuple[str, ...], per_day: int, boxes: list[dict], verdicts: list[dict]) -> None:
+    """Done scoring frames of DEMO-S01's camera A, per_day of them on each day of November (hours 10, 11, ...)."""
     for day in days:
         for i in range(per_day):
             _table("test-audits").put_item(
@@ -1853,6 +1858,29 @@ def test_products_and_events_carry_the_badge_from_14_days_of_scoring_frames(monk
     events = {e["sku_id"]: e for e in _call(api, "GET", "/v1/shelf-events", "datagent")[1]["items"]}
     assert (events[CHEESE]["badge"], events[CHEESE]["uncertain"]) == ("low", True)
     assert events[HOT]["badge"] == "insufficient" and "uncertain" not in events[HOT]
+
+
+ORIGINAL = "Slide Original 145g"
+
+
+@mock_aws
+def test_a_sku_the_model_never_names_reads_low_and_its_events_uncertain(monkeypatch: pytest.MonkeyPatch):
+    # 23/11 evening: every real Original can was called Cheese, so the model never said Original at all
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140000", [("cheese145", 5)])  # gives the store its camera
+    _at(api, monkeypatch, NOW)  # 2026-11-28
+    boxes = [{"box_id": i, "sku_id": "cheese145", "conf": 0.93, "box": [i * 9, 0, 5, 5]} for i in (1, 2, 3)]
+    verdicts = [{"box_id": i, "verdict": "wrong_sku", "true_sku_id": "original145"} for i in (1, 2, 3)]
+    _put_scoring_frames(("20", "21"), 6, boxes, verdicts)  # 12 frames on 2 days, 36 real Original cans
+    items = {p["sku_id"]: p for p in _call(api, "GET", "/v1/products", groups="datagent")[1]["items"]}
+    r = items[ORIGINAL]["reliability"]
+    assert (r["badge"], r["found_right"], r["named_right"], r["true_units"], r["frames"]) == ("low", 0.0, None, 36, 12)
+    assert r["confused_as"] == CHEESE
+    at = "20261128-1000"
+    item = {"type": "OOS", "sku_id": ORIGINAL, "at": at, "delta": -3, "level_before": 3, "level_after": 0}
+    _table("test-shelf-events").put_item(Item={"store_id": "DEMO-S01", "event_key": f"{at}#{ORIGINAL}#OOS", **item})
+    event = _call(api, "GET", "/v1/shelf-events", "datagent")[1]["items"][0]
+    assert (event["sku_id"], event["badge"], event["uncertain"]) == (ORIGINAL, "low", True)
 
 
 @mock_aws

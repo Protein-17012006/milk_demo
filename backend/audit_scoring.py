@@ -418,13 +418,14 @@ def _two_way(tallies: list[dict], days: list[str], sku: str, with_bias: bool = T
 
 
 def badge(row: dict) -> str:
-    """Reliability of one SKU: "insufficient" below the sample rule or without both intervals; else the lower ends of
-    the intervals of named right and found right decide: both from BADGE_HIGH "high", both from BADGE_MEDIUM
-    "medium", otherwise "low"."""
+    """Reliability of one SKU (spec 1.3): "insufficient" below the sample rule or without an interval of found right;
+    else the lower ends of the intervals of named right and found right decide: both from BADGE_HIGH "high", both
+    from BADGE_MEDIUM "medium", otherwise "low". A SKU the model never names has true cans but no interval of named
+    right: that counts as a lower end of 0, so "low" (its cans are all read as something else)."""
     named, found = row.get("id_accuracy_ci"), row.get("found_right_ci")
-    if not row.get("enough") or not named or not found:
+    if not row.get("enough") or not found:
         return "insufficient"
-    low = min(named[0], found[0])
+    low = min(named[0] if named else 0.0, found[0])
     return "high" if low >= BADGE_HIGH else "medium" if low >= BADGE_MEDIUM else "low"
 
 

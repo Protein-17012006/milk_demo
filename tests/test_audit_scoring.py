@@ -468,7 +468,11 @@ def test_badges():
     assert badge(_row()) == "high"
     assert badge(_row(found=(0.72, 0.9))) == "medium"
     assert badge(_row(named=(0.55, 0.8))) == "low"
-    assert badge({"enough": True, "id_accuracy_ci": None, "found_right_ci": [0.9, 1.0]}) == "insufficient"
+    # never named by the model: no interval of named right, which counts as a lower bound of 0 (spec 1.3)
+    assert badge({"enough": True, "id_accuracy_ci": None, "found_right_ci": [0.9, 1.0]}) == "low"
+    assert badge({"enough": False, "id_accuracy_ci": None, "found_right_ci": [0.9, 1.0]}) == "insufficient"
+    # nothing to be found: no interval of found right
+    assert badge({"enough": True, "id_accuracy_ci": [0.95, 1.0], "found_right_ci": None}) == "insufficient"
 
 
 def _frames_of_cheese(days: tuple[str, ...], per_day: int) -> list[dict]:
@@ -509,6 +513,36 @@ def test_sku_reliability_counts_and_what_a_sku_is_read_as():
     assert cheese["confused_as"] == "hot160"  # its true cans were most often called Hot
     hot = rel["hot160"]  # never really on the shelf: nothing to be found, so not enough samples
     assert (hot["badge"], hot["true_units"], hot["frames"], hot["confused_as"]) == ("insufficient", 0, 0, None)
+
+
+def _frames_of_original_read_as_cheese(days: tuple[str, ...], per_day: int) -> list[dict]:
+    """Frames of the 23/11 evening story: 3 real Original cans, all called Cheese; the model never says Original."""
+    boxes = [{"box_id": b, "sku_id": "cheese145", "conf": 0.93, "box": [b * 9, 0, 5, 5]} for b in (1, 2, 3)]
+    verdicts = [{"box_id": b, "verdict": "wrong_sku", "true_sku_id": "original145"} for b in (1, 2, 3)]
+    return [
+        {
+            "store_id": "S1",
+            "capture_timestamp": f"2026-11-{day}T1{i % 10}:10:00+07:00",
+            "ai_boxes": boxes,
+            "verdicts": verdicts,
+            "missed": [],
+        }
+        for day in days
+        for i in range(per_day)
+    ]
+
+
+def test_a_sku_the_model_never_names_is_low_not_insufficient():
+    audits = _frames_of_original_read_as_cheese(("23", "24"), 6)  # 12 frames on 2 days, 36 real Original cans
+    original = sku_reliability(audits)["original145"]
+    # found right 0 of 36: enough samples, and named right has no interval (no box was ever named Original)
+    assert (original["badge"], original["found_right"], original["named_right"]) == ("low", 0.0, None)
+    assert (original["true_units"], original["frames"], original["confused_as"]) == (36, 12, "cheese145")
+    row = next(r for r in summarize(audits, [])["per_sku"] if r["sku_id"] == "original145")
+    assert (row["badge"], row["enough"]) == ("low", True)
+    assert (row["id_accuracy_ci"], row["found_right_ci"]) == (None, [0.0, 0.0])
+    # Cheese was called 36 times but never really there: nothing to be found, so not enough samples
+    assert sku_reliability(audits)["cheese145"]["badge"] == "insufficient"
 
 
 def test_sku_reliability_is_insufficient_on_one_day_and_without_audits():
