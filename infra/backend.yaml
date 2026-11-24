@@ -310,6 +310,54 @@ Resources:
         AttributeName: expires_at
         Enabled: true
 
+  # Dashboard shelf metrics: state, 5-minute checks (15 days), hour and day rollups (90 days)
+  ShelfTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "milk-backend-${Env}-shelf"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: store_id
+          AttributeType: S
+        - AttributeName: key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: store_id
+          KeyType: HASH
+        - AttributeName: key
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
+  # Dashboard shelf events (OOS, LOW_STOCK, DEPLETED, RESTOCKED), kept 90 days
+  ShelfEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "milk-backend-${Env}-shelf-events"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: store_id
+          AttributeType: S
+        - AttributeName: event_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: store_id
+          KeyType: HASH
+        - AttributeName: event_key
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
   # =========================================================================
   # 3. PRIVATE S3 ANALYTICS BUCKET + GLUE CATALOG + ATHENA WORKGROUP
   # =========================================================================
@@ -559,6 +607,15 @@ Resources:
                   - !GetAtt UserPrefsTable.Arn
                   - !GetAtt AuditsTable.Arn
                   - !GetAtt ModelHealthTable.Arn
+                  - !GetAtt ShelfTable.Arn
+                  - !GetAtt ShelfEventsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt ShelfTable.Arn
+                  - !GetAtt ShelfEventsTable.Arn
               - Effect: Allow
                 Action:
                   - dynamodb:Scan
@@ -612,6 +669,8 @@ Resources:
           USER_PREFS_TABLE: !Ref UserPrefsTable
           AUDITS_TABLE: !Ref AuditsTable
           MODEL_HEALTH_TABLE: !Ref ModelHealthTable
+          SHELF_TABLE: !Ref ShelfTable
+          SHELF_EVENTS_TABLE: !Ref ShelfEventsTable
           ANALYTICS_BUCKET: !Ref AnalyticsBucket
           HUB_BUCKET: !Ref HubDataBucket
           ALLOWED_ORIGINS: !Ref AllowedOrigins
@@ -635,6 +694,9 @@ Resources:
           REVIEW_QUEUE_TABLE: !Ref ReviewQueueTable
           AUDITS_TABLE: !Ref AuditsTable
           MODEL_HEALTH_TABLE: !Ref ModelHealthTable
+          SHELF_TABLE: !Ref ShelfTable
+          SHELF_EVENTS_TABLE: !Ref ShelfEventsTable
+          STORE_LIST_TABLE: !Ref StoreListTable
           ANALYTICS_BUCKET: !Ref AnalyticsBucket
           CAPTURE_TTL_DAYS: "7"
 
@@ -664,6 +726,26 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt HourlyOfficialRule.Arn
+
+  ShelfTickRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "milk-backend-${Env}-shelf-tick"
+      Description: Every 5 minutes, turn new captures into shelf checks, events and rollups for the Dashboard
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Id: IngestShelfTick
+          Arn: !GetAtt IngestLambda.Arn
+          Input: '{"action": "shelf_tick"}'
+
+  ShelfTickPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ShelfTickRule.Arn
 
   # =========================================================================
   # 6. REST API GATEWAY + COGNITO AUTHORIZER + CORS

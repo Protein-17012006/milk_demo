@@ -73,7 +73,7 @@ function StockBarTooltip({ active, payload }: CustomTooltipProps) {
       <div className="my-2 h-px bg-[#8F8F8F]/20" />
 
       <p className="text-center text-[9.5px] font-medium text-[#6B7280]">
-        {item.captures.toLocaleString("en-US")} captures
+        {item.checks.toLocaleString("en-US")} checks
       </p>
     </div>
   );
@@ -157,9 +157,14 @@ export function MonthlyStockChart({ series }: MonthlyStockChartProps) {
     <div className="flex h-[352px] flex-col rounded-[18px] border border-[#EFF0F6] bg-white px-[22px] pt-[16px] pb-[14px] shadow-[0_4px_18px_rgba(0,0,0,0.05)]">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-[#E4E5E7] pb-[12px]">
-        <h2 className="text-[13px] font-medium tracking-[-0.011em] text-[#4D4D4D]">
-          Shelf Stock Count
-        </h2>
+        <div>
+          <h2 className="text-[13px] font-medium tracking-[-0.011em] text-[#4D4D4D]">
+            Shelf Stock Count
+          </h2>
+          <p className="mt-[2px] text-[11px] text-[#9CA3AF]">
+            Average units of the store&apos;s expected SKUs per check, opening hours only
+          </p>
+        </div>
 
         <div ref={menuRef} className="relative">
           <button
@@ -200,12 +205,12 @@ export function MonthlyStockChart({ series }: MonthlyStockChartProps) {
         </div>
       </div>
 
-      {/* Bar Chart: one bar per day / ISO week / month of real captures */}
+      {/* Bar Chart: one bar per day / ISO week / month of counted checks */}
       {chartData.length === 0 ? (
         <div className="mt-4 flex flex-1 items-center justify-center px-6 text-center text-[12.5px] text-[#9CA3AF]">
           {series === null
             ? "Sign in with an approved account to load the stock history."
-            : "No captures stored yet."}
+            : "No counted checks yet. They start once the store has opening hours in Settings."}
         </div>
       ) : (
       <div className="mt-4 flex-1 min-h-0 w-full overflow-hidden">

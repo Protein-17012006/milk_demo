@@ -1,6 +1,8 @@
 "use client";
 
 import { AWS_CONFIG } from "./config";
+import { retryRead } from "./retry";
+import { dashboardQuery, type DashboardQuery } from "./shelf-ui";
 
 export class ApiError extends Error {
   status: number;
@@ -140,18 +142,80 @@ export interface ApiKpiResponse {
   total_on_shelf_units: number;
   unrecognized_units: number;
   avg_processing_time_ms: number;
-  top_50_sku_accuracy: number | null;
   top_50_scope_note: string;
   captures_count: number;
   flag_threshold: number;
+  // Shelf numbers for the Dashboard filters (spec 2026-11-24): null with blocked_reason when the data cannot say
+  days?: number;
+  osa?: { value: number | null; previous: number | null; blocked_reason: BlockedReason | null };
+  restock_rate?: {
+    units_per_day: number | null;
+    previous_units_per_day: number | null;
+    change_pct: number | null;
+    blocked_reason: BlockedReason | null;
+  };
+  oos_now?: { count: number | null; as_of: string | null; blocked_reason: BlockedReason | null };
+  top_50_sku_accuracy?: {
+    value: number | null;
+    n_frames: number;
+    scope_note: string;
+    blocked_reason: BlockedReason | null;
+  };
 }
 
-/** One day of GET /reports/series: units found per capture, from the backend captures table. */
+export type BlockedReason = "no_hours" | "no_expected" | "no_checks" | "no_previous" | "no_labels";
+export type ShelfEventType = "OOS" | "LOW_STOCK" | "DEPLETED" | "RESTOCKED";
+export type TrendMetric = "total_stock" | "oos" | "accuracy" | "restock_volume" | "osa";
+
+/** One shelf event; `at` is the 5-minute bucket YYYYMMDD-HHMM (UTC+7) where the change began. */
+export interface ApiShelfEvent {
+  event_key: string;
+  store_id: string;
+  store_name: string;
+  sku_id: string;
+  sku_name: string;
+  type: ShelfEventType;
+  at: string;
+  delta: number;
+  level_before: number;
+  level_after: number;
+  duration_min?: number | null; // left out when empty: only a RESTOCKED that ended an out-of-stock has it
+}
+
+export interface ApiShelfEventsResponse {
+  items: ApiShelfEvent[];
+  next_cursor: string | null;
+}
+
+/** t is YYYY-MM-DD, or YYYYMMDD-HH when the period is today. */
+export interface ApiTrendPoint {
+  t: string;
+  value: number | null;
+}
+
+export interface ApiTrendsResponse {
+  metric: TrendMetric;
+  days: number;
+  points: ApiTrendPoint[];
+}
+
+export interface ApiShelfPlan {
+  store_id: string;
+  open_time: string | null;
+  close_time: string | null;
+  expected_skus: string[];
+  source: "saved" | "suggested";
+  suggested: { sku_id: string; last_seen: string }[];
+  updated_by: string | null;
+  updated_at: string | null;
+}
+
+/** One day of GET /reports/series: units of the expected SKUs per counted check, from the day rollups. */
 export interface ApiReportsSeriesPoint {
   date: string; // YYYY-MM-DD (UTC+7)
   avg_units: number;
   max_units: number;
-  captures: number;
+  checks: number;
 }
 
 export interface ApiReportsSeriesResponse {
@@ -307,9 +371,13 @@ async function requestWithAuth(
     });
   };
 
-  let res = await execute(false);
+  // reads are tried again when Lambda is busy (lib/retry.ts); writes are sent once
+  const isRead = !init.method || init.method.toUpperCase() === "GET";
+  const send = (forceRefresh: boolean) => (isRead ? retryRead(() => execute(forceRefresh)) : execute(forceRefresh));
+
+  let res = await send(false);
   if (res.status === 401) {
-    res = await execute(true);
+    res = await send(true);
   }
 
   if (!res.ok) {
@@ -411,11 +479,26 @@ export function createApiClient(getIdToken: TokenGetter) {
         body: JSON.stringify({ items }),
       }),
 
-    getKpi: () =>
-      requestWithAuth("/kpi", getIdToken) as Promise<ApiKpiResponse>,
+    getKpi: (p: DashboardQuery = {}) =>
+      requestWithAuth(`/kpi${dashboardQuery(p)}`, getIdToken) as Promise<ApiKpiResponse>,
 
-    getReportsSeries: () =>
-      requestWithAuth("/reports/series", getIdToken) as Promise<ApiReportsSeriesResponse>,
+    getReportsSeries: (p: DashboardQuery = {}) =>
+      requestWithAuth(`/reports/series${dashboardQuery(p)}`, getIdToken) as Promise<ApiReportsSeriesResponse>,
+
+    getTrends: (metric: TrendMetric, p: DashboardQuery = {}) =>
+      requestWithAuth(`/reports/trends${dashboardQuery({ ...p, metric })}`, getIdToken) as Promise<ApiTrendsResponse>,
+
+    getShelfEvents: (p: DashboardQuery = {}) =>
+      requestWithAuth(`/shelf-events${dashboardQuery(p)}`, getIdToken) as Promise<ApiShelfEventsResponse>,
+
+    getShelfPlan: (storeId: string) =>
+      requestWithAuth(`/stores/${encodeURIComponent(storeId)}/shelf-plan`, getIdToken) as Promise<ApiShelfPlan>,
+
+    saveShelfPlan: (storeId: string, body: { open_time: string; close_time: string; expected_skus: string[] }) =>
+      requestWithAuth(`/stores/${encodeURIComponent(storeId)}/shelf-plan`, getIdToken, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }) as Promise<ApiShelfPlan>,
 
     getSettings: () =>
       requestWithAuth("/settings", getIdToken) as Promise<ApiSettingsResponse>,
