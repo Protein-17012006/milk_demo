@@ -1,6 +1,7 @@
 "use client";
 
 import { AWS_CONFIG } from "./config";
+import { retryRead } from "./retry";
 import { dashboardQuery, type DashboardQuery } from "./shelf-ui";
 
 export class ApiError extends Error {
@@ -370,9 +371,13 @@ async function requestWithAuth(
     });
   };
 
-  let res = await execute(false);
+  // reads are tried again when Lambda is busy (lib/retry.ts); writes are sent once
+  const isRead = !init.method || init.method.toUpperCase() === "GET";
+  const send = (forceRefresh: boolean) => (isRead ? retryRead(() => execute(forceRefresh)) : execute(forceRefresh));
+
+  let res = await send(false);
   if (res.status === 401) {
-    res = await execute(true);
+    res = await send(true);
   }
 
   if (!res.ok) {

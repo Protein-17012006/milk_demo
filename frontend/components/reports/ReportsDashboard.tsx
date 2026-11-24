@@ -7,8 +7,10 @@ import {
   createApiClient,
   type ApiKpiResponse,
   type ApiReportsSeriesPoint,
+  type ApiReportsSeriesResponse,
   type ApiStore,
   type ApiTrendPoint,
+  type ApiTrendsResponse,
   type TrendMetric,
 } from "@/lib/api";
 import { FilterBar } from "./FilterBar";
@@ -66,24 +68,25 @@ export function ReportsDashboard() {
   useEffect(() => {
     if (!isApproved) return;
     let cancelled = false;
-    Promise.all([
+    // Each part shows what it got: one failed call leaves only its own card at "—", never the previous filter's
+    // numbers under the new filter labels.
+    Promise.allSettled([
       api.getKpi(query),
       api.getReportsSeries({ storeId: query.storeId, category: query.category }),
       ...TREND_METRICS.map((metric) => api.getTrends(metric, query)),
-    ])
-      .then(([kpiRes, seriesRes, ...trendRes]) => {
-        if (cancelled) return;
-        setLiveKpi(kpiRes);
-        setLiveSeries(seriesRes.series);
-        setLiveTrends(Object.fromEntries(TREND_METRICS.map((m, i) => [m, trendRes[i].points])) as Trends);
-      })
-      .catch(() => {
-        // show "—" rather than the previous filter's numbers under the new filter labels
-        if (cancelled) return;
-        setLiveKpi(null);
-        setLiveSeries(null);
-        setLiveTrends(NO_TRENDS);
-      });
+    ]).then(([kpiRes, seriesRes, ...trendRes]) => {
+      if (cancelled) return;
+      setLiveKpi(kpiRes.status === "fulfilled" ? (kpiRes.value as ApiKpiResponse) : null);
+      setLiveSeries(seriesRes.status === "fulfilled" ? (seriesRes.value as ApiReportsSeriesResponse).series : null);
+      setLiveTrends(
+        Object.fromEntries(
+          TREND_METRICS.map((m, i) => {
+            const r = trendRes[i];
+            return [m, r.status === "fulfilled" ? (r.value as ApiTrendsResponse).points : null];
+          })
+        ) as Trends
+      );
+    });
     return () => {
       cancelled = true;
     };
