@@ -4,7 +4,8 @@
 Reads the captures of one camera from DynamoDB and each frame from S3 (into memory only, nothing is written to
 disk), takes one capture with a frame per --every-min slot, and runs them in time order through one DisplayCheck
 exactly as the worker does: references are learnt from the stored detections_json, `now` is the capture's time.
-The stored frame is the full-resolution blurred JPEG the worker saw, so its boxes need no scaling.
+The stored frame is the blurred JPEG at full resolution, not the frame the worker checked: the worker runs the check
+on the frame before people are blurred. It has the same size, so its boxes need no scaling.
 
 Times are ICT (+07:00) without an offset. A window is START/END, inclusive of START and exclusive of END.
 Frames inside --hidden must come out "NOT in view", every other frame "in view" unless it is inside --skip

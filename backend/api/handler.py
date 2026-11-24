@@ -811,7 +811,8 @@ def _scoring_audits_of(ddb, store_id: str, first_day: str | None, last_day: str)
 
 
 def _done_audits(ddb, stores: list[dict[str, Any]], days: int) -> list[dict[str, Any]]:
-    """Done scoring audits of these stores from the last `days` days (0 or less: all time)."""
+    """Done scoring audits of these stores whose frame was taken in the last `days` days: from now minus `days`
+    up to now. Every caller passes 1 or more (with 0 nothing older than now would be kept)."""
     now = _now()
     since = (now - timedelta(days=days)).isoformat(timespec="seconds")
     first_day = (now - timedelta(days=days)).strftime("%Y%m%d") if days > 0 else None
