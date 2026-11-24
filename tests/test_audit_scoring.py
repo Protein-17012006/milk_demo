@@ -20,6 +20,7 @@ from audit_scoring import (  # noqa: E402
     MIN_DAYS,
     MIN_FRAMES,
     MIN_TRUE_UNITS,
+    _resamples,
     badge,
     check_level,
     comparison_rows,
@@ -445,6 +446,22 @@ def test_bootstrap_resamples_whole_frames_with_the_fixed_seed():
     values = [sum(num for num, _ in draw) / sum(den for _, den in draw) for draw in draws]
     cuts = statistics.quantiles(values, n=40, method="inclusive")
     assert ratio_ci(tallies) == [round(cuts[0], 4), round(cuts[-1], 4)]
+
+
+def test_the_bootstrap_draws_are_not_kept_after_a_call():
+    # the API Lambda has 256 MB and stays warm: draws of 1,440 frames held ~99 MB after the call
+    frames = [AUDIT_1744, AUDIT_2311] * 6
+    summarize(frames, [], expected=EXPECTED)
+    assert _resamples.cache_info().currsize == 0
+    sku_reliability(_frames_of_cheese(("22", "23"), 6))
+    assert _resamples.cache_info().currsize == 0
+    check_level([(a, {"cheese145": 4}) for a in frames], EXPECTED)
+    assert _resamples.cache_info().currsize == 0
+    display_agreement([{"status": "done", "display_visible": True, "display_score": 0.9}] * 12)
+    assert _resamples.cache_info().currsize == 0
+    # ratio_ci itself keeps its draws, so that the ratios inside one of those calls share them
+    assert ratio_ci([(1, 2), (2, 3)]) and _resamples.cache_info().currsize == 1
+    _resamples.cache_clear()
 
 
 def test_frames_without_a_denominator_give_no_interval():

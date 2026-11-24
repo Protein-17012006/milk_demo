@@ -27,7 +27,7 @@ import statistics
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
+from functools import lru_cache, wraps
 from operator import itemgetter
 
 VERDICTS = ("correct", "wrong_sku", "not_product", "out_of_scope")
@@ -299,10 +299,24 @@ def _stat(pairs: list[Tally]) -> dict:
 def _resamples(frames: int, samples: int, seed: int) -> tuple[Callable, ...]:
     """`samples` draws of `frames` frame positions with replacement, by random.Random(seed): one getter per draw,
     picking the drawn items out of a list. The same arguments always give the same draws, so they are kept for every
-    ratio over the same number of frames."""
+    ratio over the same number of frames, within one call of a function marked _frees_draws."""
     rng = random.Random(seed)
     positions = range(frames)
     return tuple(itemgetter(*rng.choices(positions, k=frames)) for _ in range(samples))
+
+
+def _frees_draws(fn: Callable) -> Callable:
+    """Drops the kept bootstrap draws when `fn` returns or raises. The API Lambda (256 MB) stays warm between
+    requests, and the draws of 1,440 frames took about 99 MB; inside one call they are still shared."""
+
+    @wraps(fn)
+    def call(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _resamples.cache_clear()
+
+    return call
 
 
 def ratio_ci(tallies: list[Tally], samples: int = BOOTSTRAP_SAMPLES, seed: int = BOOTSTRAP_SEED) -> list[float] | None:
@@ -440,6 +454,7 @@ def _often_read_as(cells: Mapping[str, int], sku: str) -> str | None:
     return min(given, key=lambda lb: (-given[lb], lb)) if given else None
 
 
+@_frees_draws
 def sku_reliability(audits: list[dict]) -> dict[str, dict]:
     """What the reliability badge of each model label needs, from these frames and nothing more (no KPIs, no bias):
     {label: {badge, named_right, found_right, true_units, frames, confused_as}}. A number without samples is None;
@@ -555,6 +570,7 @@ def by_day(audits: list[dict]) -> list[dict]:
     return days
 
 
+@_frees_draws
 def summarize(audits: list[dict], processing_ms: list[int], expected: Expected = None) -> dict:
     """Everything the Model page shows from labelled frames. A number without samples is None, with n 0. Every KPI
     but #11, the two ways per SKU, present or absent and the time-of-day numbers carry a 95% frame-bootstrap
@@ -588,6 +604,7 @@ def _off_by(model: Mapping[str, int], truth: Mapping[str, int]) -> dict[str, Tal
     return {"count_mae": (sum(map(abs, diffs)), len(diffs)), "count_bias": (sum(diffs), len(diffs))}
 
 
+@_frees_draws
 def check_level(pairs: list[tuple[dict, dict[str, int]]], expected: Expected = None) -> dict:
     """The Dashboard's 5-minute numbers against the truth. Each pair is a scoring frame and the counts, by model
     label, of the check that holds it. Units off per SKU either side counted (absolute and signed: positive counts
@@ -603,6 +620,7 @@ def check_level(pairs: list[tuple[dict, dict[str, int]]], expected: Expected = N
     }
 
 
+@_frees_draws
 def display_agreement(audits: list[dict]) -> dict:
     """The worker's display check against the labellers on scoring frames: a labelled frame saw the display, one
     skipped as display_away did not; frames skipped for other reasons say nothing about it. A frame without
