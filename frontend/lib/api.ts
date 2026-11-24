@@ -308,12 +308,76 @@ export interface ApiAuditDetail {
   misses_checked?: boolean;
 }
 
+/** A 95% interval from resampling whole labelled frames; null under 2 frames. */
+export type ApiInterval = [number, number] | null;
+
+/** One ratio or mean over labelled frames: value null when nothing was counted (never 0); n = sum of denominators. */
+export interface ApiStat {
+  value: number | null;
+  ci: ApiInterval;
+  n: number;
+}
+
 export interface ApiKpiValue {
   value: number | null;
   target: [string, number];
   met: boolean | null;
   n: number;
   exact_or_minor?: number | null;
+  ci?: ApiInterval; // every KPI but processing time
+}
+
+export interface ApiPerSkuRow {
+  sku_id: string;
+  model_units: number;
+  true_units: number;
+  id_accuracy: number | null; // named right: boxes named this SKU and right / boxes named this SKU
+  missed_units: number;
+  confused_as: string | null;
+  confused_count: number;
+  // older backends leave the rest out
+  id_accuracy_ci?: ApiInterval;
+  found_right?: number | null; // boxes named this SKU and right / true cans of it
+  found_right_ci?: ApiInterval;
+  bias_per_frame?: number | null; // mean of model - truth over the frames where either side counted it
+  bias_per_frame_ci?: ApiInterval;
+  frames?: number; // frames with a true can
+  days?: number; // days of those frames (UTC+7)
+  enough?: boolean; // 10 frames, 20 true cans, 2 days
+}
+
+export type DayPeriod = "morning" | "afternoon" | "evening";
+
+export interface ApiPeriodSku {
+  named_right: number | null;
+  found_right: number | null;
+  model_units: number;
+  true_units: number;
+  frames: number;
+  days: number;
+  enough: boolean;
+}
+
+export interface ApiPeriod {
+  frames: number;
+  overall_identification_accuracy: ApiStat;
+  presence_agree: ApiStat;
+  per_sku: Record<string, ApiPeriodSku>;
+}
+
+/** The Dashboard's 5-minute checks against the truth of the labelled frame inside each; n = SKU rows. */
+export interface ApiCheckLevel {
+  frames: number;
+  count_mae: ApiStat;
+  count_bias: ApiStat; // check minus truth: positive counts too many
+  presence_agree: ApiStat;
+}
+
+/** The worker's display check against the labellers on scoring frames. */
+export interface ApiDisplayCheck {
+  agree: ApiStat;
+  false_not_visible: number;
+  false_visible: number;
 }
 
 export interface ApiModelSummary {
@@ -321,15 +385,7 @@ export interface ApiModelSummary {
   old_rule_frames: number; // done frames not labelled under rule A
   out_of_scope_share: { value: number | null; n: number }; // out_of_scope boxes / all AI boxes; n = boxes
   kpis: Record<string, ApiKpiValue>;
-  per_sku: {
-    sku_id: string;
-    model_units: number;
-    true_units: number;
-    id_accuracy: number | null;
-    missed_units: number;
-    confused_as: string | null;
-    confused_count: number;
-  }[];
+  per_sku: ApiPerSkuRow[];
   confusion: { rows: string[]; cols: string[]; cells: Record<string, number> };
   by_day: {
     day: string;
@@ -338,6 +394,11 @@ export interface ApiModelSummary {
     unit_count_mae: number | null;
     exact_or_minor_rate: number | null;
   }[];
+  // older backends leave these four out; n of presence = SKU rows (one SKU in one frame)
+  presence?: { agree: ApiStat; false_empty: ApiStat; missed_empty: ApiStat };
+  by_period?: Record<DayPeriod, ApiPeriod>;
+  check_level?: ApiCheckLevel;
+  display_check?: ApiDisplayCheck;
   model_versions: string[];
   range: { days: number; model_version: string };
 }

@@ -21,7 +21,7 @@ from typing import Any
 
 import boto3
 import shelf
-from audit_scoring import SKIP_REASONS, summarize, validate_labels
+from audit_scoring import SKIP_REASONS, by_day, check_level, display_agreement, kpis, summarize, validate_labels
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from common import (
@@ -847,7 +847,7 @@ def _shelf_kpis(ddb, params: dict[str, Any]) -> dict[str, Any]:
         out["oos_now"] = _oos_now(ddb, open_stores, skus)
         out["coverage"] = _coverage(open_stores, current, days)
     audits = _done_audits(ddb, stores, days)
-    value = summarize(audits, [])["kpis"]["sku_identification_accuracy"]["value"] if audits else None
+    value = kpis(audits, [])["sku_identification_accuracy"]["value"] if audits else None
     out["top_50_sku_accuracy"] = {
         "value": value,
         "n_frames": len(audits),
@@ -868,11 +868,8 @@ def _handle_reports_trends(event: dict[str, Any], ddb) -> dict[str, Any]:
     keys, _ = _windows(days)
     if metric == "accuracy":
         dates = sorted({_point_label(k)[:10] if k.startswith("day#") else _now().strftime("%Y-%m-%d") for k in keys})
-        by_day = {
-            d["day"]: d["overall_identification_accuracy"]
-            for d in summarize(_done_audits(ddb, stores, days), [])["by_day"]
-        }
-        points = [{"t": date, "value": by_day.get(date), "unmeasured_hours": None} for date in dates]
+        accuracy = {d["day"]: d["overall_identification_accuracy"] for d in by_day(_done_audits(ddb, stores, days))}
+        points = [{"t": date, "value": accuracy.get(date), "unmeasured_hours": None} for date in dates]
     else:
         skus = _category_skus(ddb, params.get("category"))
         by_key = _rollups_by_key(ddb, _with_hours(stores), keys)
@@ -1292,20 +1289,92 @@ def _hour_within_days(hour: str, days: int) -> bool:
     return start >= datetime.now(ICT) - timedelta(days=days)
 
 
+def _expected_labels(ddb, store_ids: set[str], label_of: dict[str, str]) -> set[str]:
+    """Model labels of the SKUs the stores must carry: the saved shelf plan, else the suggestion, as the Dashboard
+    counts them. A suggestion that cannot be read adds none: the Model page must still answer."""
+    names: set[str] = set()
+    for store_id in sorted(store_ids):
+        saved = (_store_item(ddb, store_id) or {}).get("expected_skus")
+        if saved:
+            names.update(saved)
+        elif SHELF_TABLE:
+            try:
+                names.update(s["sku_id"] for s in _suggested_skus(ddb, store_id))
+            except ClientError as exc:
+                print(json.dumps({"model_summary_plan_failed": store_id, "error": repr(exc)}))
+    return {label_of.get(name, name) for name in names}
+
+
+def _checks_of(ddb, audits: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    """The check# items of the audits' 5-minute buckets, by (store_id, key): one Query per store over the range of
+    its audits' buckets (the Lambda role may Query the shelf table, not BatchGetItem), projected to the fields the
+    comparison reads. A store whose checks cannot be read has none: the Model page still answers."""
+    wanted: dict[str, set[str]] = defaultdict(set)
+    for a in audits:
+        wanted[a["store_id"]].add(f"check#{shelf.bucket_of(a['capture_timestamp'])}")
+    if not SHELF_TABLE:
+        return {}
+    names = {"#k": "key", "#c": "counts", "#m": "measurable", "#cam": "cameras"}
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+    for store_id, keys in sorted(wanted.items()):
+        cond = Key("store_id").eq(store_id) & Key("key").between(min(keys), max(keys))
+        try:
+            items = _query_all(
+                ddb.Table(SHELF_TABLE),
+                KeyConditionExpression=cond,
+                ProjectionExpression=", ".join(names),
+                ExpressionAttributeNames=names,
+            )
+        except ClientError as exc:
+            print(json.dumps({"model_summary_checks_failed": store_id, "error": repr(exc)}))
+            continue
+        found.update({(store_id, item["key"]): item for item in items if item["key"] in keys})
+    return found
+
+
+def _check_pairs(
+    audits: list[dict[str, Any]], checks: dict[tuple[str, str], dict[str, Any]], label_of: dict[str, str]
+) -> list[tuple[dict[str, Any], dict[str, int]]]:
+    """Each audit with the counts, by model label, of the check that holds it. Left out: no check, a check that was
+    not measurable (an old item without the field was), and a check counted from other cameras too (a store-wide sum
+    is not one frame's truth)."""
+    pairs = []
+    for a in audits:
+        check = checks.get((a["store_id"], f"check#{shelf.bucket_of(a['capture_timestamp'])}"))
+        if not check or check.get("measurable", True) is False:
+            continue
+        if (check.get("cameras") or [a.get("camera_id")]) != [a.get("camera_id")]:
+            continue
+        counts: dict[str, int] = defaultdict(int)
+        for name, units in (check.get("counts") or {}).items():
+            counts[label_of.get(name, name)] += int(units)
+        pairs.append((a, dict(counts)))
+    return pairs
+
+
+def _against_the_shelf(ddb, audits: list[dict[str, Any]]) -> tuple[set[str], list[tuple[dict, dict[str, int]]]]:
+    """The model labels the audits' stores must carry, and the audits paired with their 5-minute checks."""
+    label_of = {name: label for label, name in sorted(_sku_choices(ddb).items())}
+    expected = _expected_labels(ddb, {a["store_id"] for a in audits}, label_of)
+    return expected, _check_pairs(audits, _checks_of(ddb, audits), label_of)
+
+
 def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
     params = event.get("queryStringParameters") or {}
     days = int(params.get("days") or 7)
     version = params.get("model_version") or "all"
-    done = [
+    scoring = [
         a
         for a in _scan_all(ddb.Table(AUDITS_TABLE))
-        if a.get("status") == "done" and _is_scoring(a) and _within_days(str(a.get("capture_timestamp", "")), days)
+        if _is_scoring(a) and _within_days(str(a.get("capture_timestamp", "")), days)
     ]
+    done = [a for a in scoring if a.get("status") == "done"]
     latest: dict[str, str] = {}
     for a in done:
         v = a.get("model_version") or "unknown"
         latest[v] = max(latest.get(v, ""), str(a.get("capture_timestamp", "")))
-    chosen = [a for a in done if version == "all" or (a.get("model_version") or "unknown") == version]
+    in_version = [a for a in scoring if version == "all" or (a.get("model_version") or "unknown") == version]
+    chosen = [_audit_view(a) for a in in_version if a.get("status") == "done"]
     health = [h for h in _scan_all(ddb.Table(MODEL_HEALTH_TABLE)) if _hour_within_days(str(h.get("hour", "")), days)]
     processing = [
         float(h["processing_ms_median"])
@@ -1314,10 +1383,13 @@ def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
         for _ in range(int(h.get("captures", 0)))
     ]
     old_rule_frames = sum(1 for a in done if a.get("label_rule") != "A")
+    expected, pairs = _against_the_shelf(ddb, chosen)
     return _json_response(
         200,
         {
-            **summarize([_audit_view(a) for a in chosen], processing),
+            **summarize(chosen, processing, expected),
+            "check_level": check_level(pairs, expected),
+            "display_check": display_agreement(in_version),
             "old_rule_frames": old_rule_frames,
             "model_versions": sorted(latest, key=lambda v: latest[v], reverse=True),
             "range": {"days": days, "model_version": version},

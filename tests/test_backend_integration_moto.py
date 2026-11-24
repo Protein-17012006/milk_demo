@@ -1378,3 +1378,121 @@ def test_products_still_answer_when_the_display_status_cannot_be_read(monkeypatc
         monkeypatch.setattr(api, "SHELF_TABLE", shelf_table)
         status, body = _call(api, "GET", "/v1/products", groups="datagent")
         assert status == 200 and body["items"] and body["displays"] == []
+
+
+# --- Model page: present or absent, by time of day, check level, display check (reliability spec 1.2c) ---
+
+SOUR = "Slide Sour Cream & Onion 150g"
+AUDIT_15 = "AUD-CAM-S01-A-20261121-15"
+
+
+def _labelled_frame_with_its_check(api, ingest) -> None:
+    """DEMO-S01 must carry Cheese, Hot and Sour Cream. The 14:07 scoring frame shows 2 Hot and 1 Cheese; the
+    labeller finds 1 Hot right, 1 "Hot" that is an Original, the Cheese right and 1 Cheese the model missed. Two
+    captures at 14:06 and 14:08 see 3 Hot and 3 Cheese, so check 14:05 (lower median of the three) says 3 and 3."""
+    _shelf_plan(expected=(CHEESE, HOT, SOUR))
+    _one_pending_audit(ingest, counts=(("hot160", 2), ("cheese145", 1)))
+    for hhmmss in ("140600", "140800"):
+        _ingest(ingest, "CAM-S01-A", hhmmss, [("hot160", 3), ("cheese145", 3)])
+    _tick(ingest)
+    body = {
+        "verdicts": [
+            {"box_id": 1, "verdict": "correct"},
+            {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "original145"},
+            {"box_id": 3, "verdict": "correct"},
+        ],
+        "missed": [{"sku_id": "cheese145", "x": 5, "y": 5}],
+        "misses_checked": True,
+    }
+    assert _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body=body)[0] == 200
+
+
+@mock_aws
+def test_summary_has_presence_periods_check_level_and_display_check(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _labelled_frame_with_its_check(api, ingest)
+    check = _shelf("check#20261121-1405")
+    assert (check["counts"], check["measurable"], check["cameras"]) == ({HOT: 3, CHEESE: 3}, True, ["CAM-S01-A"])
+    # a second scoring frame, 15:07: the worker said the display was in view, the labeller skipped it as away
+    _ingest(ingest, "CAM-S01-A", "150700", [("hot160", 2)], with_frame=True, display_visible=True)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-15"})
+    assert _call(api, "POST", f"/v1/model/audits/{AUDIT_15}/skip", body={"reason": "display_away"})[0] == 200
+
+    status, s = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
+    assert status == 200 and s["n_audits"] == 1
+    # truth: Hot 1, Original 1, Cheese 2; the frame: Hot 2, Cheese 1; expected: Cheese, Hot, Sour Cream
+    assert s["presence"] == {
+        "agree": {"value": 0.75, "ci": None, "n": 4},  # Original: model 0, truth 1
+        "false_empty": {"value": 0.5, "ci": None, "n": 2},  # model 0 for Original and Sour Cream
+        "missed_empty": {"value": 0.0, "ci": None, "n": 1},  # truth 0 for Sour Cream only
+    }
+    afternoon = s["by_period"]["afternoon"]
+    assert afternoon["frames"] == 1 and afternoon["presence_agree"] == {"value": 0.75, "ci": None, "n": 4}
+    assert afternoon["overall_identification_accuracy"]["value"] == pytest.approx(2 / 3)
+    assert afternoon["per_sku"]["hot160"] == {
+        "named_right": 0.5,
+        "found_right": 1.0,
+        "model_units": 2,
+        "true_units": 1,
+        "frames": 1,
+        "days": 1,
+        "enough": False,
+    }
+    assert s["by_period"]["morning"]["frames"] == 0 and s["by_period"]["evening"]["per_sku"] == {}
+    hot = next(r for r in s["per_sku"] if r["sku_id"] == "hot160")
+    assert (hot["found_right"], hot["bias_per_frame"], hot["enough"], hot["id_accuracy_ci"]) == (1.0, 1.0, False, None)
+    assert s["kpis"]["overall_identification_accuracy"]["ci"] is None  # one frame
+    # check 14:05 (Hot 3, Cheese 3) against the truth: off by +2 Hot, +1 Cheese, -1 Original; Sour Cream 0 on both
+    c = s["check_level"]
+    assert c["frames"] == 1
+    assert (c["count_mae"]["value"], c["count_mae"]["n"]) == (pytest.approx(4 / 3), 3)
+    assert (c["count_bias"]["value"], c["count_bias"]["n"]) == (pytest.approx(2 / 3), 3)
+    assert c["presence_agree"] == {"value": 0.75, "ci": None, "n": 4}
+    assert s["display_check"] == {
+        "agree": {"value": 0.5, "ci": [0.0, 1.0], "n": 2},
+        "false_not_visible": 0,
+        "false_visible": 1,
+    }
+
+
+@mock_aws
+def test_check_level_leaves_out_checks_it_cannot_compare(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _labelled_frame_with_its_check(api, ingest)
+    key = {"store_id": "DEMO-S01", "key": "check#20261121-1405"}
+    for update, values in [
+        ("SET measurable = :v", {":v": False}),  # the display was not in view in that check
+        ("SET measurable = :v, cameras = :c", {":v": True, ":c": ["CAM-S01-A", "CAM-S01-B"]}),  # store-wide sum
+    ]:
+        _table("test-shelf").update_item(Key=key, UpdateExpression=update, ExpressionAttributeValues=values)
+        c = _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["check_level"]
+        assert (c["frames"], c["count_mae"]) == (0, {"value": None, "ci": None, "n": 0})
+    _table("test-shelf").delete_item(Key=key)
+    assert _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["check_level"]["frames"] == 0
+    _table("test-shelf").put_item(Item={**key, "bucket": "20261121-1405", "counts": {HOT: 1}, "cameras": ["CAM-S01-A"]})
+    c = _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["check_level"]
+    assert (c["frames"], c["count_bias"]["value"]) == (1, -1.0)  # an old item without measurable was measured
+
+
+@mock_aws
+def test_presence_uses_the_suggested_plan_when_none_is_saved(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _labelled_frame_with_its_check(api, ingest)
+    _table("test-store-list").update_item(Key={"store_id": "DEMO-S01"}, UpdateExpression="REMOVE expected_skus")
+    _at(api, monkeypatch, "2026-11-21T15:00:00+07:00")
+    _put_shelf("day#20261121", confident_skus=[SOUR])  # the suggestion: only Sour Cream was seen surely
+    agree = _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["presence"]["agree"]
+    assert (agree["value"], agree["n"]) == (0.75, 4)  # Sour Cream, 0 on both sides, agrees
+    monkeypatch.setattr(api, "SHELF_TABLE", "no-such-table")  # no suggestion: only the SKUs either side counted
+    agree = _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["presence"]["agree"]
+    assert (agree["value"], agree["n"]) == (pytest.approx(2 / 3), 3)
+
+
+@mock_aws
+def test_summary_still_answers_when_the_checks_cannot_be_read(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _labelled_frame_with_its_check(api, ingest)
+    for shelf_table in ("", "no-such-table"):
+        monkeypatch.setattr(api, "SHELF_TABLE", shelf_table)
+        status, s = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
+        assert status == 200 and s["n_audits"] == 1 and s["check_level"]["frames"] == 0

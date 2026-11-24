@@ -7,10 +7,33 @@ import { useAuth } from "@/lib/auth";
 import {
   createApiClient,
   type ApiAuditListItem,
+  type ApiCheckLevel,
   type ApiModelHealthItem,
   type ApiModelSummary,
+  type ApiPerSkuRow,
+  type ApiPeriod,
+  type DayPeriod,
 } from "@/lib/api";
-import { KPI_ORDER, kpiDisplay, pct, type Tone } from "@/lib/model-ui";
+import {
+  KPI_ORDER,
+  PERIODS,
+  PERIOD_NOTE,
+  PER_SKU_NOTE,
+  PRESENCE,
+  PRESENCE_INFO,
+  checkLevelText,
+  ciText,
+  kpiCiText,
+  kpiDisplay,
+  notEnoughText,
+  pct,
+  periodCellText,
+  plural,
+  signedText,
+  statParts,
+  statText,
+  type Tone,
+} from "@/lib/model-ui";
 import type { HealthMetric } from "@/lib/health-ui";
 import { AuditLabeler } from "./AuditLabeler";
 import { LiveHealth } from "./LiveHealth";
@@ -24,8 +47,10 @@ const TONE: Record<Tone, string> = { met: "#15803D", missed: "#B91C1C", none: "#
 const CARD = "rounded-[18px] border border-[#EFF0F6] bg-white";
 
 /**
- * The Model page: Datagent's 12 KPIs from frames the team labelled, errors per SKU, the confusion matrix, the
- * daily trend and the live health of the last 7 days. Spec docs/superpowers/specs/2026-11-23-model-quality-page-design.md.
+ * The Model page: Datagent's 12 KPIs from frames the team labelled, each SKU both ways (named right, found right),
+ * the confusion matrix, present or absent, the time of day, the daily trend and the live health of the last 7 days.
+ * Intervals are 95% from resampling whole frames. Specs docs/superpowers/specs/2026-11-23-model-quality-page-design.md
+ * and 2026-11-24-reliability-design.md (1.2c).
  */
 export function ModelQualityView() {
   const { isApproved, hasGroup, getIdToken } = useAuth();
@@ -168,12 +193,18 @@ export function ModelQualityView() {
           {KPI_ORDER.map(({ name, label, hint }) => {
             const kpi = summary?.kpis[name];
             const shown = kpi ? kpiDisplay(name, kpi) : { text: "—", targetText: "", tone: "none" as Tone };
+            const ci = kpi ? kpiCiText(name, kpi.ci) : "";
             return (
               <div key={name} data-kpi={name} title={hint} className={`${CARD} px-4 py-3.5`}>
                 <p className="text-[12.5px] font-medium leading-snug text-black/70">{label}</p>
                 <p data-kpi-value className="mt-2 text-[22px] font-bold leading-none" style={{ color: TONE[shown.tone] }}>
                   {shown.text}
                 </p>
+                {ci && (
+                  <p data-kpi-ci className="mt-1 text-[11.5px] text-[#6B7280]">
+                    {ci}
+                  </p>
+                )}
                 <p className="mt-1.5 text-[11.5px] text-[#6B7280]">
                   Target {shown.targetText}
                   {kpi && kpi.n > 0 ? ` · n = ${kpi.n}` : ""}
@@ -187,41 +218,17 @@ export function ModelQualityView() {
         </div>
       </section>
 
-      <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <section className={`${CARD} p-4`}>
-          <h2 className="mb-2 text-[15px] font-semibold text-black">Per SKU</h2>
-          {!summary || summary.per_sku.length === 0 ? (
-            <p className="text-[13px] text-[#6B7280]">—</p>
-          ) : (
-            <table data-per-sku className="w-full text-left text-[13px]">
-              <thead className="text-[11.5px] text-[#6B7280]">
-                <tr>
-                  <th className="py-1 font-medium">SKU</th>
-                  <th className="text-right font-medium">Model</th>
-                  <th className="text-right font-medium">Truth</th>
-                  <th className="text-right font-medium">Named right</th>
-                  <th className="text-right font-medium">Missed</th>
-                  <th className="pl-3 font-medium">Mostly mistaken for</th>
-                </tr>
-              </thead>
-              <tbody>
-                {summary.per_sku.map((r) => (
-                  <tr key={r.sku_id} className="border-t border-black/5">
-                    <td className="py-1.5 pr-2">{nameOf(r.sku_id)}</td>
-                    <td className="text-right">{r.model_units}</td>
-                    <td className="text-right">{r.true_units}</td>
-                    <td className="text-right">{pct(r.id_accuracy)}</td>
-                    <td className="text-right">{r.missed_units}</td>
-                    <td className="pl-3 text-[#B91C1C]">
-                      {r.confused_as ? `${nameOf(r.confused_as)} (${r.confused_count})` : ""}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </section>
+      <section className={`${CARD} mt-6 p-4`}>
+        <h2 className="text-[15px] font-semibold text-black">Per SKU</h2>
+        <p className="mb-2 mt-1 max-w-[110ch] text-[12px] leading-[1.5] text-[#6B7280]">{PER_SKU_NOTE}</p>
+        {!summary || summary.per_sku.length === 0 ? (
+          <p className="text-[13px] text-[#6B7280]">—</p>
+        ) : (
+          <PerSkuTable rows={summary.per_sku} nameOf={nameOf} />
+        )}
+      </section>
 
+      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
         <section className={`${CARD} p-4`}>
           <h2 className="mb-2 text-[15px] font-semibold text-black">Confusion (model → truth)</h2>
           {!summary || summary.confusion.rows.length === 0 ? (
@@ -260,7 +267,13 @@ export function ModelQualityView() {
             </div>
           )}
         </section>
+
+        {summary?.presence && <PresenceCard presence={summary.presence} checkLevel={summary.check_level} />}
       </div>
+
+      {summary?.by_period && (
+        <PeriodCard periods={summary.by_period} skus={summary.per_sku.map((r) => r.sku_id)} nameOf={nameOf} />
+      )}
 
       <section className={`${CARD} mt-4 p-4`}>
         <h2 className="mb-2 text-[15px] font-semibold text-black">By day</h2>
@@ -290,11 +303,183 @@ export function ModelQualityView() {
         )}
       </section>
 
-      <LiveHealth health={health} metric={healthMetric} onMetricChange={setHealthMetric} />
+      <LiveHealth
+        health={health}
+        metric={healthMetric}
+        onMetricChange={setHealthMetric}
+        displayCheck={summary?.display_check}
+      />
 
       {labelling && (
         <AuditLabeler auditIds={labelling} onClose={() => setLabelling(null)} onChanged={() => setReloadKey((k) => k + 1)} />
       )}
     </div>
+  );
+}
+
+type NameOf = (label: string) => string;
+
+const NUM_HEAD = "pl-3 text-right font-medium";
+const NUM = "py-1.5 pl-3 text-right";
+
+/** A number with its 95% interval in small type under it. */
+function ValueCell({ text, ci }: { text: string; ci: string }) {
+  return (
+    <td className={NUM}>
+      {text}
+      {ci && <span className="block text-[11px] leading-tight text-[#6B7280]">{ci}</span>}
+    </td>
+  );
+}
+
+/** Each SKU both ways, with its bias per frame; a SKU below the sample rule shows why instead of its numbers. On a
+ * phone the table scrolls sideways rather than squeezing its columns together. */
+function PerSkuTable({ rows, nameOf }: { rows: ApiPerSkuRow[]; nameOf: NameOf }) {
+  return (
+    <div className="overflow-x-auto">
+      <table data-per-sku className="w-full min-w-[680px] text-left text-[13px]">
+        <thead className="text-[11.5px] text-[#6B7280]">
+          <tr>
+            <th className="py-1 font-medium">SKU</th>
+            <th className={NUM_HEAD}>Model</th>
+            <th className={NUM_HEAD}>Truth</th>
+            <th className={NUM_HEAD}>Named right</th>
+            <th className={NUM_HEAD}>Found right</th>
+            <th className={NUM_HEAD}>Bias / frame</th>
+            <th className={NUM_HEAD}>Missed</th>
+            <th className="pl-3 font-medium">Mostly mistaken for</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.sku_id} className="border-t border-black/5 align-top">
+              <td className="py-1.5 pr-2">{nameOf(r.sku_id)}</td>
+              <td className={NUM}>{r.model_units}</td>
+              <td className={NUM}>{r.true_units}</td>
+              {r.enough === false ? (
+                <td data-not-enough colSpan={3} className={`${NUM} text-[12px] text-[#6B7280]`}>
+                  {notEnoughText(r)}
+                </td>
+              ) : (
+                <>
+                  <ValueCell text={pct(r.id_accuracy)} ci={ciText(r.id_accuracy_ci)} />
+                  <ValueCell text={pct(r.found_right)} ci={ciText(r.found_right_ci)} />
+                  <ValueCell text={signedText(r.bias_per_frame)} ci={ciText(r.bias_per_frame_ci, "signed")} />
+                </>
+              )}
+              <td className={NUM}>{r.missed_units}</td>
+              <td className="py-1.5 pl-3 text-[#B91C1C]">
+                {r.confused_as ? `${nameOf(r.confused_as)} (${r.confused_count})` : ""}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** The three present-or-absent shares, what they mean, and the same question asked of the Dashboard's checks. */
+function PresenceCard({
+  presence,
+  checkLevel,
+}: {
+  presence: NonNullable<ApiModelSummary["presence"]>;
+  checkLevel?: ApiCheckLevel;
+}) {
+  return (
+    <section data-presence className={`${CARD} p-4`}>
+      <h2 className="mb-2 text-[15px] font-semibold text-black">Present or absent</h2>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        {PRESENCE.map(({ key, label, hint }) => {
+          const { text, detail } = statParts(presence[key], "percent", "SKU row");
+          return (
+            <div key={key} data-presence-stat={key} title={hint} className="rounded-[12px] bg-[#F7F8FA] px-3 py-2.5">
+              <p className="text-[12px] font-medium text-black/70">{label}</p>
+              <p
+                className={`mt-1 font-bold leading-tight text-[#111827] ${presence[key].value === null ? "text-[13px]" : "text-[18px]"}`}
+              >
+                {text}
+              </p>
+              <p className="mt-0.5 text-[11px] text-[#6B7280]">{detail}</p>
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-3 text-[12.5px] leading-[1.55] text-[#374151]">
+        <span className="font-medium text-[#111827]">What it measures. </span>
+        {PRESENCE_INFO.what}
+      </p>
+      <p className="mt-1 text-[12.5px] leading-[1.55] text-[#374151]">
+        <span className="font-medium text-[#111827]">How to read it. </span>
+        {PRESENCE_INFO.read}
+      </p>
+      {checkLevel && (
+        <p data-check-level className="mt-3 border-t border-black/5 pt-3 text-[12.5px] text-[#111827]">
+          {checkLevelText(checkLevel)}
+        </p>
+      )}
+    </section>
+  );
+}
+
+/** Identification and present-or-absent per time of day, then each SKU both ways. */
+function PeriodCard({
+  periods,
+  skus,
+  nameOf,
+}: {
+  periods: Record<DayPeriod, ApiPeriod>;
+  skus: string[];
+  nameOf: NameOf;
+}) {
+  return (
+    <section data-by-period className={`${CARD} mt-4 p-4`}>
+      <h2 className="text-[15px] font-semibold text-black">By time of day</h2>
+      <p className="mb-2 mt-1 text-[12px] text-[#6B7280]">{PERIOD_NOTE}</p>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[560px] text-left text-[12.5px]">
+          <thead className="text-[11.5px] text-[#6B7280]">
+            <tr>
+              <th className="py-1 pr-3 font-medium">SKU</th>
+              {PERIODS.map((p) => (
+                <th key={p.key} className="px-2 py-1 font-medium">
+                  <span className="block text-[12.5px] text-black/80">{p.label}</span>
+                  {p.hours} · {plural(periods[p.key].frames, "frame")}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-t border-black/5">
+              <th className="py-1.5 pr-3 font-medium">Identification, all SKUs</th>
+              {PERIODS.map((p) => (
+                <td key={p.key} className="px-2 py-1.5">
+                  {statText(periods[p.key].overall_identification_accuracy, "percent", "box", "boxes")}
+                </td>
+              ))}
+            </tr>
+            <tr className="border-t border-black/5">
+              <th className="py-1.5 pr-3 font-medium">Present or absent agree</th>
+              {PERIODS.map((p) => (
+                <td key={p.key} className="px-2 py-1.5">
+                  {statText(periods[p.key].presence_agree, "percent", "SKU row")}
+                </td>
+              ))}
+            </tr>
+            {skus.map((sku) => (
+              <tr key={sku} className="border-t border-black/5">
+                <td className="py-1.5 pr-3">{nameOf(sku)}</td>
+                {PERIODS.map((p) => (
+                  <td key={p.key} className="px-2 py-1.5">
+                    {periodCellText(periods[p.key].per_sku[sku])}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }

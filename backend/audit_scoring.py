@@ -11,13 +11,24 @@ UNRECOGNIZED), one verdict per box and the units the model missed. Verdicts:
 
 The formulas follow the column descriptions of "Validation - Accuracy Report" (the sheet's formula cells
 show #ERROR!), as written in docs/superpowers/specs/2026-11-23-model-quality-page-design.md, section 5.
+
+Every number over frames is a sum of per-frame numerators over a sum of per-frame denominators (frame_tallies), so
+its 95% interval comes from resampling whole frames (ratio_ci): boxes of one frame are not independent. The two-way
+numbers per SKU, present or absent, by time of day and the check level follow
+docs/superpowers/specs/2026-11-24-reliability-design.md, section 1.2c.
 Nothing here touches AWS, so the API can call it on whatever audits it loaded.
 """
 
 from __future__ import annotations
 
+import math
+import random
 import statistics
 from collections import Counter, defaultdict
+from collections.abc import Callable, Mapping
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from operator import itemgetter
 
 VERDICTS = ("correct", "wrong_sku", "not_product", "out_of_scope")
 SKIP_REASONS = ("blurry", "blocked", "camera_moved", "display_away", "other")
@@ -42,6 +53,15 @@ NOT_PRODUCT = "NOT_PRODUCT"
 OTHER_GOODS = "OTHER_GOODS"
 UNRECOGNIZED = "UNRECOGNIZED"
 MISSED = "MISSED"
+
+# "Not enough samples" for a SKU below any of these: frames with a true unit, true units, days of those frames
+MIN_FRAMES, MIN_TRUE_UNITS, MIN_DAYS = 10, 20, 2
+BOOTSTRAP_SAMPLES, BOOTSTRAP_SEED = 400, 20261124
+ICT = timezone(timedelta(hours=7))
+PERIODS = ("morning", "afternoon", "evening")  # ICT hour of the frame: before 12, 12 to 17, from 17
+PRESENCE = {"agree": "presence_agree", "false_empty": "false_empty", "missed_empty": "missed_empty"}
+
+Tally = tuple[float, float]  # (numerator, denominator) of one frame
 
 
 def validate_labels(ai_boxes: list[dict], verdicts: list[dict], missed: list[dict], catalog: set[str]) -> list[str]:
@@ -162,67 +182,164 @@ def _mean(values: list[float]) -> float | None:
     return statistics.fmean(values) if values else None
 
 
-def _kpis(audits: list[dict], processing_ms: list[int]) -> dict:
-    audits = [scoped(a) for a in audits]
-    rows = [r for a in audits for r in comparison_rows(a)]
-    boxes = []  # (box, verdict) of every labelled box
-    for a in audits:
-        labels = _verdicts_by_box(a)
-        boxes.extend((b, labels.get(b["box_id"])) for b in a.get("ai_boxes", []))
-
-    # Identification: boxes whose truth is a catalogue SKU, and whether the model named that SKU
-    truth_total: Counter = Counter()
-    for r in rows:
-        truth_total[r["sku_id"]] += r["human_unit_count"]
-    top = {sku for sku, _ in sorted(truth_total.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_N]}
-    ident = []  # (true sku, named right)
-    for b, v in boxes:
-        if not v:
-            continue
+def _kpi_tallies(audit: dict, top: set[str] | None) -> dict[str, Tally]:
+    """One scoped frame's numerator and denominator of KPIs #1-#10 and #12, and of exact_or_minor (what KPI #6 is
+    judged on). top: the SKUs KPI #1 counts, None for all."""
+    labels = _verdicts_by_box(audit)
+    judged = [(b, labels[b["box_id"]]) for b in audit.get("ai_boxes", []) if b["box_id"] in labels]
+    ident = []  # (true sku, named right) of every box whose truth is a catalogue SKU
+    for b, v in judged:
         if v["verdict"] == "correct" and b["sku_id"] is not None:
             ident.append((b["sku_id"], True))
         elif v["verdict"] == "wrong_sku":
             ident.append((v["true_sku_id"], False))
-    ident_top = [ok for sku, ok in ident if sku in top]
-
+    ident_top = [ok for sku, ok in ident if top is None or sku in top]
+    rows = comparison_rows(audit)
     with_truth = [r for r in rows if r["human_unit_count"] > 0]
     category = Counter(r["discrepancy_category"] for r in rows)
-    judged = [(b, v) for b, v in boxes if v]
     conf_right = [b["conf"] for b, v in judged if v["verdict"] == "correct" and b["sku_id"] is not None]
     conf_wrong = [b["conf"] for b, v in judged if v["verdict"] in ("wrong_sku", "not_product")]
-    exact_or_minor = _share(category["Exact Match"] + category["Minor"], len(rows))
-
-    minor = _kpi("minor_error_rate", _share(category["Minor"], len(rows)), len(rows), judged=exact_or_minor)
-    minor["exact_or_minor"] = exact_or_minor
     return {
-        "sku_identification_accuracy": _kpi(
-            "sku_identification_accuracy", _share(sum(ident_top), len(ident_top)), len(ident_top)
-        ),
-        "overall_identification_accuracy": _kpi(
-            "overall_identification_accuracy", _share(sum(ok for _, ok in ident), len(ident)), len(ident)
-        ),
-        "unit_count_mae": _kpi("unit_count_mae", _mean([abs(r["count_difference"]) for r in rows]), len(rows)),
-        "unit_count_accuracy_avg": _kpi(
-            "unit_count_accuracy_avg", _mean([r["count_accuracy_pct"] for r in with_truth]), len(with_truth)
-        ),
-        "exact_match_rate": _kpi("exact_match_rate", _share(category["Exact Match"], len(rows)), len(rows)),
-        "minor_error_rate": minor,
-        "missed_sku_rate": _kpi("missed_sku_rate", _share(category["Missed SKU"], len(with_truth)), len(with_truth)),
-        "false_detection_rate": _kpi(
-            "false_detection_rate",
-            _share(sum(v["verdict"] == "not_product" for _, v in judged), len(judged)),
-            len(judged),
-        ),
-        "avg_confidence_correct": _kpi("avg_confidence_correct", _mean(conf_right), len(conf_right)),
-        "avg_confidence_incorrect": _kpi("avg_confidence_incorrect", _mean(conf_wrong), len(conf_wrong)),
-        "avg_processing_time_ms": _kpi("avg_processing_time_ms", _mean(processing_ms), len(processing_ms)),
-        "unrecognized_product_rate": _kpi(
-            "unrecognized_product_rate", _share(sum(b["sku_id"] is None for b, _ in judged), len(judged)), len(judged)
-        ),
+        "sku_identification_accuracy": (sum(ident_top), len(ident_top)),
+        "overall_identification_accuracy": (sum(ok for _, ok in ident), len(ident)),
+        "unit_count_mae": (sum(abs(r["count_difference"]) for r in rows), len(rows)),
+        "unit_count_accuracy_avg": (math.fsum(r["count_accuracy_pct"] for r in with_truth), len(with_truth)),
+        "exact_match_rate": (category["Exact Match"], len(rows)),
+        "minor_error_rate": (category["Minor"], len(rows)),
+        "exact_or_minor": (category["Exact Match"] + category["Minor"], len(rows)),
+        "missed_sku_rate": (category["Missed SKU"], len(with_truth)),
+        "false_detection_rate": (sum(v["verdict"] == "not_product" for _, v in judged), len(judged)),
+        "avg_confidence_correct": (math.fsum(conf_right), len(conf_right)),
+        "avg_confidence_incorrect": (math.fsum(conf_wrong), len(conf_wrong)),
+        "unrecognized_product_rate": (sum(b["sku_id"] is None for b, _ in judged), len(judged)),
     }
 
 
-def _per_sku(audits: list[dict]) -> list[dict]:
+def _presence(model: Mapping[str, int], truth: Mapping[str, int], expected: set[str] | None) -> dict[str, Tally]:
+    """Present-or-absent pairs of one frame, one per SKU: the expected SKUs plus any SKU either side counted."""
+    skus = set(expected or ()) | {s for s, n in model.items() if n > 0} | {s for s, n in truth.items() if n > 0}
+    said = {s for s in skus if model.get(s, 0) > 0}
+    real = {s for s in skus if truth.get(s, 0) > 0}
+    return {
+        "presence_agree": (len(skus) - len(said ^ real), len(skus)),
+        "false_empty": (len(real - said), len(skus - said)),
+        "missed_empty": (len(said - real), len(skus - real)),
+    }
+
+
+def frame_tallies(audit: dict, expected: set[str] | None = None, top: set[str] | None = None) -> dict[str, Tally]:
+    """(numerator, denominator) pairs of one frame, scored as rule A scores it. Every ratio of the Model page is the
+    sum of a key's numerators over the sum of its denominators across frames.
+
+        named_right:<sku>  boxes named <sku> and right / boxes named <sku>
+        found_right:<sku>  boxes named <sku> and right / true units of <sku>
+        bias:<sku>         model units - true units / 1
+        presence_agree     SKUs both sides call present, or both absent / SKUs considered
+        false_empty        SKUs the model calls absent that are there / SKUs the model calls absent
+        missed_empty       SKUs the model calls present that are not there / SKUs really absent
+        kpi:<name>         the frame's part of KPI #1-#10 and #12 (kpi:exact_or_minor: what KPI #6 is judged on)
+
+    <sku> keys exist for the SKUs either side counted; SKUs considered are those plus `expected`. top: the SKUs KPI
+    #1 counts (None: all)."""
+    audit = scoped(audit)
+    labels = _verdicts_by_box(audit)
+    named = [b for b in audit.get("ai_boxes", []) if b["sku_id"] is not None]
+    model = Counter(b["sku_id"] for b in named)
+    right = Counter(b["sku_id"] for b in named if labels.get(b["box_id"], {}).get("verdict") == "correct")
+    truth = _truth_counts(audit)
+    tallies: dict[str, Tally] = {}
+    for sku in model.keys() | truth.keys():
+        tallies[f"named_right:{sku}"] = (right[sku], model[sku])
+        tallies[f"found_right:{sku}"] = (right[sku], truth[sku])
+        tallies[f"bias:{sku}"] = (model[sku] - truth[sku], 1)
+    tallies.update(_presence(model, truth, expected))
+    tallies.update({f"kpi:{name}": pair for name, pair in _kpi_tallies(audit, top).items()})
+    return tallies
+
+
+def _top_skus(audits: list[dict]) -> set[str]:
+    """The TOP_N SKUs with the most true units in these frames: the SKUs KPI #1 counts."""
+    truth: Counter = Counter()
+    for a in audits:
+        truth.update(_truth_counts(scoped(a)))
+    return {sku for sku, _ in sorted(truth.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_N]}
+
+
+def _column(tallies: list[dict[str, Tally]], key: str) -> list[Tally]:
+    """One key's pairs across frames; a frame without the key adds nothing."""
+    return [t[key] for t in tallies if key in t]
+
+
+def _sums(pairs: list[Tally]) -> tuple[float, int]:
+    return math.fsum(num for num, _ in pairs), sum(den for _, den in pairs)
+
+
+def _value(pairs: list[Tally]) -> float | None:
+    num, den = _sums(pairs)
+    return num / den if den else None
+
+
+def _stat(pairs: list[Tally]) -> dict:
+    """{value, ci, n} of one ratio over frames: n is the sum of denominators; value None when it is 0."""
+    return {"value": _value(pairs), "ci": ratio_ci(pairs), "n": _sums(pairs)[1]}
+
+
+@lru_cache(maxsize=8)
+def _resamples(frames: int, samples: int, seed: int) -> tuple[Callable, ...]:
+    """`samples` draws of `frames` frame positions with replacement, by random.Random(seed): one getter per draw,
+    picking the drawn items out of a list. The same arguments always give the same draws, so they are kept for every
+    ratio over the same number of frames."""
+    rng = random.Random(seed)
+    positions = range(frames)
+    return tuple(itemgetter(*rng.choices(positions, k=frames)) for _ in range(samples))
+
+
+def ratio_ci(tallies: list[Tally], samples: int = BOOTSTRAP_SAMPLES, seed: int = BOOTSTRAP_SEED) -> list[float] | None:
+    """95% interval of sum(numerators) / sum(denominators) by resampling whole frames (frame bootstrap): the 2.5th
+    and 97.5th percentiles, 4 decimals. Only frames with a denominator count; None below 2 such frames. The pairs are
+    worked out once per frame, so a resample only adds them up."""
+    kept = [(num, den) for num, den in tallies if den > 0]
+    if len(kept) < 2:
+        return None
+    nums, dens = [num for num, _ in kept], [den for _, den in kept]
+    values = []
+    for pick in _resamples(len(kept), samples, seed):
+        den = sum(pick(dens))
+        if den > 0:
+            values.append(sum(pick(nums)) / den)
+    if len(values) < 2:
+        return None
+    cuts = statistics.quantiles(values, n=40, method="inclusive")  # every 2.5%
+    return [round(cuts[0], 4), round(cuts[-1], 4)]
+
+
+def enough(frames: int, true_units: int, days: int) -> bool:
+    """Enough samples to speak of one SKU: MIN_FRAMES frames with a true unit, MIN_TRUE_UNITS true units, and those
+    frames on MIN_DAYS days or more (an interval over one day's frames says nothing about other days)."""
+    return frames >= MIN_FRAMES and true_units >= MIN_TRUE_UNITS and days >= MIN_DAYS
+
+
+def kpis(audits: list[dict], processing_ms: list[int], tallies: list[dict] | None = None) -> dict:
+    """Datagent's 12 KPIs, without intervals. Each one but #11 is the sum of the frames' numerators over the sum of
+    their denominators; tallies: the frames' frame_tallies (with the top SKUs of the same frames), when the caller
+    has them already."""
+    if tallies is None:
+        top = _top_skus(audits)
+        tallies = [frame_tallies(a, top=top) for a in audits]
+    exact_or_minor = _value(_column(tallies, "kpi:exact_or_minor"))
+    out = {}
+    for name in KPI_TARGETS:
+        if name == "avg_processing_time_ms":
+            out[name] = _kpi(name, _mean(processing_ms), len(processing_ms))
+            continue
+        num, den = _sums(_column(tallies, f"kpi:{name}"))
+        judged = exact_or_minor if name == "minor_error_rate" else None
+        out[name] = _kpi(name, num / den if den else None, den, judged=judged)
+    out["minor_error_rate"]["exact_or_minor"] = exact_or_minor
+    return out
+
+
+def _per_sku(audits: list[dict], tallies: list[dict], days: list[str]) -> list[dict]:
     audits = [scoped(a) for a in audits]
     model_units: Counter = Counter()
     true_units: Counter = Counter()
@@ -256,9 +373,34 @@ def _per_sku(audits: list[dict]) -> list[dict]:
                 "missed_units": missed[sku],
                 "confused_as": top[0][0] if top else None,
                 "confused_count": top[0][1] if top else 0,
+                **_two_way(tallies, days, sku),
             }
         )
     return out
+
+
+def _sample(tallies: list[dict], days: list[str], sku: str) -> tuple[int, int, int]:
+    """(true units, frames with a true unit, distinct days of those frames) of one SKU."""
+    key = f"found_right:{sku}"
+    seen = [(t[key][1], day) for t, day in zip(tallies, days, strict=True) if key in t and t[key][1] > 0]
+    return sum(units for units, _ in seen), len(seen), len({day for _, day in seen})
+
+
+def _two_way(tallies: list[dict], days: list[str], sku: str) -> dict:
+    """Found right and the bias per frame of one SKU with their intervals, the interval of named right, and whether
+    there are enough samples to speak of it."""
+    named, found, bias = (_column(tallies, f"{kind}:{sku}") for kind in ("named_right", "found_right", "bias"))
+    true_units, frames, n_days = _sample(tallies, days, sku)
+    return {
+        "found_right": _value(found),
+        "found_right_ci": ratio_ci(found),
+        "id_accuracy_ci": ratio_ci(named),
+        "bias_per_frame": _value(bias),
+        "bias_per_frame_ci": ratio_ci(bias),
+        "frames": frames,
+        "days": n_days,
+        "enough": enough(frames, true_units, n_days),
+    }
 
 
 def _confusion(audits: list[dict]) -> dict:
@@ -287,30 +429,129 @@ def _confusion(audits: list[dict]) -> dict:
     return {"rows": rows, "cols": cols, "cells": dict(cells)}
 
 
-def summarize(audits: list[dict], processing_ms: list[int]) -> dict:
-    """Everything the Model page shows from labelled frames. A KPI without samples has value None and n 0."""
-    by_day: dict[str, list[dict]] = defaultdict(list)
+def _ict(capture_ts: str) -> datetime:
+    """A capture timestamp in ICT; one without an offset is taken as ICT already."""
+    t = datetime.fromisoformat(capture_ts)
+    return t.astimezone(ICT) if t.tzinfo else t.replace(tzinfo=ICT)
+
+
+def _day_of(audit: dict) -> str:
+    return _ict(audit["capture_timestamp"]).date().isoformat()
+
+
+def period_of(capture_ts: str) -> str:
+    """The time of day of a frame, by its ICT hour: morning before 12:00, afternoon 12:00-17:00, evening from 17:00."""
+    hour = _ict(capture_ts).hour
+    return "morning" if hour < 12 else "afternoon" if hour < 17 else "evening"
+
+
+def _period_sku(tallies: list[dict], days: list[str], sku: str) -> dict:
+    named, found = _column(tallies, f"named_right:{sku}"), _column(tallies, f"found_right:{sku}")
+    true_units, frames, n_days = _sample(tallies, days, sku)
+    return {
+        "named_right": _value(named),
+        "found_right": _value(found),
+        "model_units": _sums(named)[1],
+        "true_units": true_units,
+        "frames": frames,
+        "days": n_days,
+        "enough": enough(frames, true_units, n_days),
+    }
+
+
+def _by_period(audits: list[dict], tallies: list[dict], days: list[str]) -> dict:
+    """Per time of day: frames, identification and present-or-absent agreement with intervals, both ways per SKU."""
+    periods = [period_of(a["capture_timestamp"]) for a in audits]
+    out = {}
+    for period in PERIODS:
+        picked = [i for i, p in enumerate(periods) if p == period]
+        part, part_days = [tallies[i] for i in picked], [days[i] for i in picked]
+        skus = sorted({key.split(":", 1)[1] for t in part for key in t if key.startswith("found_right:")})
+        out[period] = {
+            "frames": len(part),
+            "overall_identification_accuracy": _stat(_column(part, "kpi:overall_identification_accuracy")),
+            "presence_agree": _stat(_column(part, "presence_agree")),
+            "per_sku": {sku: _period_sku(part, part_days, sku) for sku in skus},
+        }
+    return out
+
+
+def by_day(audits: list[dict]) -> list[dict]:
+    """Per ICT day: frames, identification, count MAE and the exact + minor rate (no intervals)."""
+    groups: dict[str, list[dict]] = defaultdict(list)
     for a in audits:
-        by_day[a["capture_timestamp"][:10]].append(a)
+        groups[_day_of(a)].append(a)
     days = []
-    for day in sorted(by_day):
-        k = _kpis(by_day[day], [])
+    for day in sorted(groups):
+        k = kpis(groups[day], [])
         days.append(
             {
                 "day": day,
-                "audits": len(by_day[day]),
+                "audits": len(groups[day]),
                 "overall_identification_accuracy": k["overall_identification_accuracy"]["value"],
                 "unit_count_mae": k["unit_count_mae"]["value"],
                 "exact_or_minor_rate": k["minor_error_rate"]["exact_or_minor"],
             }
         )
+    return days
+
+
+def summarize(audits: list[dict], processing_ms: list[int], expected: set[str] | None = None) -> dict:
+    """Everything the Model page shows from labelled frames. A number without samples is None, with n 0. Every KPI
+    but #11, the two ways per SKU, present or absent and the time-of-day numbers carry a 95% frame-bootstrap
+    interval `ci` (None below 2 frames). expected: model labels of the SKUs the stores must carry."""
+    top = _top_skus(audits)
+    tallies = [frame_tallies(a, expected, top) for a in audits]
+    days = [_day_of(a) for a in audits]
+    k = kpis(audits, processing_ms, tallies)
+    for name, kpi in k.items():
+        if name != "avg_processing_time_ms":
+            kpi["ci"] = ratio_ci(_column(tallies, f"kpi:{name}"))
     n_boxes = sum(len(a.get("ai_boxes", [])) for a in audits)
     n_out = sum(v.get("verdict") == "out_of_scope" for a in audits for v in a.get("verdicts", []))
     return {
         "n_audits": len(audits),
         "out_of_scope_share": {"value": _share(n_out, n_boxes), "n": n_boxes},
-        "kpis": _kpis(audits, processing_ms),
-        "per_sku": _per_sku(audits),
+        "kpis": k,
+        "per_sku": _per_sku(audits, tallies, days),
         "confusion": _confusion(audits),
-        "by_day": days,
+        "by_day": by_day(audits),
+        "presence": {name: _stat(_column(tallies, key)) for name, key in PRESENCE.items()},
+        "by_period": _by_period(audits, tallies, days),
+    }
+
+
+def _off_by(model: Mapping[str, int], truth: Mapping[str, int]) -> dict[str, Tally]:
+    """Units off (model minus truth) over the SKUs either side counted: absolute and signed."""
+    counted = [s for s in model.keys() | truth.keys() if model.get(s, 0) > 0 or truth.get(s, 0) > 0]
+    diffs = [model.get(s, 0) - truth.get(s, 0) for s in counted]
+    return {"count_mae": (sum(map(abs, diffs)), len(diffs)), "count_bias": (sum(diffs), len(diffs))}
+
+
+def check_level(pairs: list[tuple[dict, dict[str, int]]], expected: set[str] | None = None) -> dict:
+    """The Dashboard's 5-minute numbers against the truth. Each pair is a scoring frame and the counts, by model
+    label, of the check that holds it. Units off per SKU either side counted (absolute and signed: positive counts
+    too many) and present-or-absent agreement over `expected` plus those SKUs, each with its interval."""
+    tallies = []
+    for audit, counts in pairs:
+        truth = _truth_counts(scoped(audit))
+        tallies.append({**_off_by(counts, truth), **_presence(counts, truth, expected)})
+    return {
+        "frames": len(pairs),
+        **{key: _stat(_column(tallies, key)) for key in ("count_mae", "count_bias", "presence_agree")},
+    }
+
+
+def display_agreement(audits: list[dict]) -> dict:
+    """The worker's display check against the labellers on scoring frames: a labelled frame saw the display, one
+    skipped as display_away did not; frames skipped for other reasons say nothing about it. A frame without
+    display_visible (before the check existed) counts as seen by the check."""
+    pairs = []  # (the labeller saw the display, the check said it was in view)
+    for a in audits:
+        if a.get("status") == "done" or (a.get("status") == "skipped" and a.get("skip_reason") == "display_away"):
+            pairs.append((a.get("status") == "done", a.get("display_visible", True) is not False))
+    return {
+        "agree": _stat([(int(seen == said), 1) for seen, said in pairs]),
+        "false_not_visible": sum(seen and not said for seen, said in pairs),
+        "false_visible": sum(said and not seen for seen, said in pairs),
     }

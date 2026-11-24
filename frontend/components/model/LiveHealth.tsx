@@ -12,8 +12,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import type { ApiModelHealthItem } from "@/lib/api";
+import type { ApiDisplayCheck, ApiModelHealthItem } from "@/lib/api";
 import {
+  DISPLAY_CHECK_INFO,
   HEALTH_METRICS,
   formatHealth,
   healthChart,
@@ -21,6 +22,7 @@ import {
   latestHealth,
   type HealthMetric,
 } from "@/lib/health-ui";
+import { displayCheckText } from "@/lib/model-ui";
 
 const CAMERA_COLORS = ["#EE730A", "#2563EB", "#059669", "#7C3AED"];
 
@@ -28,10 +30,13 @@ interface LiveHealthProps {
   health: ApiModelHealthItem[] | null;
   metric: HealthMetric;
   onMetricChange: (metric: HealthMetric) => void;
+  /** From the summary of labelled frames; older backends leave it out. */
+  displayCheck?: ApiDisplayCheck;
 }
 
-/** Hourly signs of how the counting model is doing, each with what it measures and how to read it. */
-export function LiveHealth({ health, metric, onMetricChange }: LiveHealthProps) {
+/** Hourly signs of how the counting model is doing, each with what it measures and how to read it, and how often the
+ * worker's display check agreed with the labellers. */
+export function LiveHealth({ health, metric, onMetricChange, displayCheck }: LiveHealthProps) {
   const info = HEALTH_METRICS.find((m) => m.key === metric) ?? HEALTH_METRICS[0];
   const chart = useMemo(() => healthChart(health ?? [], info.key), [health, info.key]);
   const latest = useMemo(() => latestHealth(health ?? [], info.key), [health, info.key]);
@@ -135,6 +140,15 @@ export function LiveHealth({ health, metric, onMetricChange }: LiveHealthProps) 
           </div>
           <HealthTotals health={health} />
         </>
+      )}
+
+      {displayCheck && (
+        <div data-display-check className="mt-3 border-t border-black/5 pt-3">
+          <p className="text-[12.5px] font-medium text-[#111827]">{displayCheckText(displayCheck)}</p>
+          <p className="mt-1 max-w-[110ch] text-[12px] leading-[1.5] text-[#6B7280]">
+            {DISPLAY_CHECK_INFO.what} {DISPLAY_CHECK_INFO.read}
+          </p>
+        </div>
       )}
     </section>
   );
