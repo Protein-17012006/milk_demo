@@ -317,6 +317,9 @@ def _handle_get_products(event: dict[str, Any], ddb) -> dict[str, Any]:
 
 
 RELIABILITY_DAYS = 14  # one Datagent cycle
+# sku_reliability per (sorted store ids, 5-minute ICT slot) in a warm container: Products re-reads every 15 s and
+# would rerun the bootstrap each time. Only the current slot is kept; badges can lag the labelling by 5 minutes.
+_RELIABILITY_CACHE: dict[tuple[tuple[str, ...], str], dict[str, dict[str, Any]]] = {}
 
 
 def _no_reliability() -> dict[str, Any]:
@@ -331,24 +334,36 @@ def _no_reliability() -> dict[str, Any]:
     }
 
 
+def _reliability_by_label(ddb, stores: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """sku_reliability of the stores' done scoring frames of the last RELIABILITY_DAYS days, kept for the current
+    5-minute ICT slot (_RELIABILITY_CACHE); the first call of a new slot drops the older ones. A read that fails
+    raises and keeps nothing."""
+    slot = shelf.bucket_of(_now().isoformat())
+    key = (tuple(sorted(s["store_id"] for s in stores)), slot)
+    if key not in _RELIABILITY_CACHE:
+        rows = sku_reliability(_done_audits(ddb, stores, RELIABILITY_DAYS))
+        for old in [k for k in _RELIABILITY_CACHE if k[1] != slot]:
+            del _RELIABILITY_CACHE[old]
+        _RELIABILITY_CACHE[key] = rows
+    return _RELIABILITY_CACHE[key]
+
+
 def _reliability_by_name(ddb, stores: list[dict[str, Any]], masters: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Reliability badge per product name from the last RELIABILITY_DAYS days of done scoring frames: one pass per
-    request, computed with the same code as the Model page. `confused_as` is turned from a model label to a
-    product name, by `masters` (SKU Master rows the caller already loaded: no second read of them). A decoration of
-    /products and /shelf-events: when the frames cannot be read, every SKU shows as not enough samples and the lists
-    still answer."""
+    """Reliability badge per product name from the last RELIABILITY_DAYS days of done scoring frames, computed with
+    the same code as the Model page and kept for 5 minutes (_reliability_by_label). `confused_as` is turned from a
+    model label to a product name, by `masters` (SKU Master rows the caller already loaded: no second read of them).
+    A decoration of /products and /shelf-events: when the frames cannot be read, every SKU shows as not enough
+    samples and the lists still answer."""
     if not AUDITS_TABLE:
         return {}
     try:
-        audits = _done_audits(ddb, stores, RELIABILITY_DAYS)
+        by_label = _reliability_by_label(ddb, stores)
     except ClientError as exc:
         print(json.dumps({"reliability_failed": repr(exc)}))
         return {}
-    if not audits:
-        return {}
     name_of = _choices_of(masters)
     out = {}
-    for label, row in sku_reliability(audits).items():
+    for label, row in by_label.items():
         confused = row["confused_as"]
         out[name_of.get(label, label)] = {**row, "confused_as": name_of.get(confused, confused) if confused else None}
     return out

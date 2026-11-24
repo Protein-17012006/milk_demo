@@ -1966,6 +1966,30 @@ def test_a_sku_the_model_never_names_reads_low_and_its_events_uncertain(monkeypa
 
 
 @mock_aws
+def test_the_reliability_map_is_worked_out_once_per_five_minutes(monkeypatch: pytest.MonkeyPatch):
+    # Products re-reads every 15 s: the badges of a store set come from one bootstrap per 5-minute slot (ICT)
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140000", [("cheese145", 5)])
+    _put_cheese_frames(("20", "21"), 6)  # 12 frames, Cheese reads Low
+    runs: list[int] = []
+    real = api.sku_reliability
+    monkeypatch.setattr(api, "sku_reliability", lambda audits: runs.append(len(audits)) or real(audits))
+
+    def badge_of_cheese() -> str:
+        items = _call(api, "GET", "/v1/products", groups="datagent")[1]["items"]
+        return next(p for p in items if p["sku_id"] == CHEESE)["reliability"]["badge"]
+
+    _at(api, monkeypatch, "2026-11-28T12:00:10+07:00")
+    assert badge_of_cheese() == "low" and runs == [12]
+    _at(api, monkeypatch, "2026-11-28T12:04:50+07:00")  # the same slot, 12:00-12:05
+    assert badge_of_cheese() == "low" and runs == [12]
+    assert _call(api, "GET", "/v1/shelf-events", groups="datagent")[0] == 200 and runs == [12]  # same map
+    _at(api, monkeypatch, "2026-11-28T12:05:00+07:00")  # the next slot: worked out again, the old slot dropped
+    assert badge_of_cheese() == "low" and runs == [12, 12]
+    assert list(api._RELIABILITY_CACHE) == [(("DEMO-S01",), "20261128-1205")]
+
+
+@mock_aws
 def test_lists_still_answer_when_the_scoring_frames_cannot_be_read(monkeypatch: pytest.MonkeyPatch):
     api, _ = _backend(monkeypatch)
     for audits_table in ("", "no-such-table"):  # unset, and a table that does not exist
