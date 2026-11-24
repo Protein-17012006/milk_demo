@@ -70,6 +70,7 @@ def _normalize_record(raw: dict[str, Any], source_bucket: str = "") -> dict[str,
             json.loads(raw["detections_json"]) if isinstance(raw["detections_json"], str) else raw["detections_json"]
         )
 
+    display_score = raw.get("display_score")
     record = {
         "capture_id": raw.get("capture_id") or (log or {}).get("capture_id", ""),
         "store_id": raw.get("store_id") or (log or {}).get("store_id", ""),
@@ -86,6 +87,9 @@ def _normalize_record(raw: dict[str, Any], source_bucket: str = "") -> dict[str,
         "faces_blurred": int(raw.get("faces_blurred") or 0),
         "pipeline": raw.get("pipeline", "long"),
         "model_version": raw.get("model_version") or "unknown",
+        # what the worker saw of the display: old workers send neither, which means "visible"
+        "display_score": float(display_score) if display_score is not None else None,
+        "display_visible": bool(raw.get("display_visible", True)),
         "detections": from_dynamodb(detections) if detections is not None else None,
         "counts": from_dynamodb(raw.get("counts") or {}),
         "rows": from_dynamodb(rows or []),
@@ -151,6 +155,8 @@ def ingest_capture(
             "faces_blurred": record["faces_blurred"],
             "pipeline": record["pipeline"],
             "model_version": record.get("model_version") or "unknown",
+            "display_visible": record.get("display_visible", True),
+            **({"display_score": record["display_score"]} if record.get("display_score") is not None else {}),
             "detections_json": (
                 json.dumps(record["detections"], separators=(",", ":"))
                 if record.get("detections") is not None
@@ -436,20 +442,11 @@ def captures_in_hour(ddb_resource, camera_id: str, store_code: str, hour: str) -
     return from_dynamodb(items)
 
 
-def sample_audit(
-    s3_client, ddb_resource, camera_id: str, items: list[dict[str, Any]], hour: str, rng: random.Random
+def _write_frame_audit(
+    s3_client, table, audit_id: str, purpose: str, pick: dict[str, Any], camera_id: str
 ) -> str | None:
-    """Picks one capture with a frame at random, copies the frame to the analytics bucket and writes a
-    pending audit. Returns the audit id, or None when the hour has no frame or already has its audit."""
-    with_frame = sorted((it for it in items if it.get("image_key")), key=lambda it: it["capture_id"])
-    if not with_frame:
-        return None
-    table = ddb_resource.Table(AUDITS_TABLE)
-    store_id = with_frame[0]["store_id"]
-    audit_id = f"AUD-{camera_id}-{hour}"
-    if table.get_item(Key={"store_id": store_id, "audit_id": audit_id}).get("Item"):
-        return None
-    pick = rng.choice(with_frame)
+    """Copies the picked capture's frame to the analytics bucket and writes a pending audit of that purpose.
+    Returns the audit id, or None when the audit already exists."""
     filename = pick.get("image_filename") or pick["image_key"].rsplit("/", 1)[-1]
     image_key = f"audits/frames/{camera_id}/{pick['capture_timestamp'][:10]}/{filename}"
     s3_client.copy_object(
@@ -459,14 +456,16 @@ def sample_audit(
         table.put_item(
             Item=to_dynamodb_safe(
                 {
-                    "store_id": store_id,
+                    "store_id": pick["store_id"],
                     "audit_id": audit_id,
+                    "purpose": purpose,
                     "camera_id": camera_id,
                     "capture_id": pick["capture_id"],
                     "capture_timestamp": pick["capture_timestamp"],
                     "image_key": image_key,
                     "model_version": pick.get("model_version") or "unknown",
                     "pipeline": pick.get("pipeline", ""),
+                    "display_visible": pick.get("display_visible", True) is not False,
                     "status": "pending",
                     "sampled_at": datetime.now(ICT).isoformat(timespec="seconds"),
                     "ai_boxes_json": json.dumps(capture_boxes(pick), separators=(",", ":")),
@@ -481,6 +480,52 @@ def sample_audit(
             return None
         raise
     return audit_id
+
+
+def sample_frames(
+    s3_client,
+    ddb_resource,
+    camera_id: str,
+    items: list[dict[str, Any]],
+    hour: str,
+    rng: random.Random,
+    store: dict[str, Any] | None,
+) -> list[str]:
+    """Picks, for one camera-hour, a scoring frame (AUD-, any capture with a frame) and a training frame
+    (TRN-, a different capture whose worker saw the display). Frames outside the store's opening hours are not
+    sampled. Returns the audit ids created now (0, 1 or 2); an existing audit is left alone."""
+    with_frame = sorted((it for it in items if it.get("image_key")), key=lambda it: it["capture_id"])
+    if store and store.get("open_time") and store.get("close_time"):
+        with_frame = [
+            it
+            for it in with_frame
+            if shelf.is_open(shelf.bucket_of(it["capture_timestamp"]), store["open_time"], store["close_time"])
+        ]
+    if not with_frame:
+        return []
+    table = ddb_resource.Table(AUDITS_TABLE)
+    store_id = with_frame[0]["store_id"]
+    scoring_id, training_id = f"AUD-{camera_id}-{hour}", f"TRN-{camera_id}-{hour}"
+    created: list[str] = []
+
+    scoring = table.get_item(Key={"store_id": store_id, "audit_id": scoring_id}).get("Item")
+    if scoring:
+        scoring_capture = scoring.get("capture_id")
+    else:
+        pick = rng.choice(with_frame)
+        scoring_capture = pick["capture_id"]
+        if _write_frame_audit(s3_client, table, scoring_id, "scoring", pick, camera_id):
+            created.append(scoring_id)
+
+    if not table.get_item(Key={"store_id": store_id, "audit_id": training_id}).get("Item"):
+        seeing = [
+            it for it in with_frame if it.get("display_visible") is not False and it["capture_id"] != scoring_capture
+        ]
+        if seeing:
+            pick = rng.choice(seeing)
+            if _write_frame_audit(s3_client, table, training_id, "training", pick, camera_id):
+                created.append(training_id)
+    return created
 
 
 def record_health(ddb_resource, camera_id: str, hour: str, items: list[dict[str, Any]]) -> None:
@@ -509,9 +554,10 @@ def _run_hour(s3_client, ddb_resource, hour: str, rng: random.Random, sample: bo
             record_health(ddb_resource, camera_id, hour, items)
             health += 1
             if sample:
-                audit_id = sample_audit(s3_client, ddb_resource, camera_id, items, hour, rng)
-                if audit_id:
-                    audits.append(audit_id)
+                store = from_dynamodb(
+                    ddb_resource.Table(STORE_LIST_TABLE).get_item(Key={"store_id": items[0]["store_id"]}).get("Item")
+                )
+                audits.extend(sample_frames(s3_client, ddb_resource, camera_id, items, hour, rng, store))
         except Exception as exc:  # noqa: BLE001 - one camera failing must not stop the others
             print(json.dumps({"model_page_hour_failed": camera_id, "hour": hour, "error": repr(exc)}))
     return {"hour": hour, "audits": audits, "health_items": health}

@@ -95,7 +95,12 @@ export function ModelQualityView() {
     );
   }
 
-  const oldestFirst = [...pending].sort((a, b) => a.capture_timestamp.localeCompare(b.capture_timestamp));
+  // scoring frames first, then training frames; each group oldest first
+  const oldestFirst = [...pending].sort(
+    (a, b) =>
+      Number(a.purpose === "training") - Number(b.purpose === "training") ||
+      a.capture_timestamp.localeCompare(b.capture_timestamp)
+  );
   const versions = summary?.model_versions ?? [];
 
   return (

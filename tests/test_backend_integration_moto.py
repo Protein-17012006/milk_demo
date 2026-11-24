@@ -122,9 +122,11 @@ def _ingest(
     detections=None,
     model_version=None,
     with_frame: bool = False,
+    display_visible: bool | None = None,
 ) -> None:
     """Ingest one hub result of store DEMO-S01 taken on 21/11 at hhmmss (may carry a -2 suffix); counts are
-    (model label, units). with_frame puts a fake frame in the hub bucket, as the hub does."""
+    (model label, units). with_frame puts a fake frame in the hub bucket, as the hub does. display_visible sets
+    the worker's field (False also sets a low display_score); None leaves it out, as old workers did."""
     capture_id = f"CAP-S01-20261121-{hhmmss}"
     ts = f"2026-11-21T{hhmmss[:2]}:{hhmmss[2:4]}:{hhmmss[4:6]}+07:00"
     image = f"{camera_id}_20261121_{hhmmss}.jpg"
@@ -171,6 +173,10 @@ def _ingest(
         record["detections"] = detections
     if model_version is not None:
         record["model_version"] = model_version
+    if display_visible is not None:
+        record["display_visible"] = display_visible
+        if not display_visible:
+            record["display_score"] = 0.2
     normalized = ingest._normalize_record(record, source_bucket="test-hub-bucket")
     assert ingest.ingest_capture(normalized)["status"] == "ingested"
 
@@ -216,8 +222,8 @@ def test_hourly_sampling_picks_one_frame_and_copies_it(monkeypatch: pytest.Monke
     ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
 
     audits = _table("test-audits").scan()["Items"]
-    assert [a["audit_id"] for a in audits] == ["AUD-CAM-S01-A-20261121-14"]
-    audit = audits[0]
+    assert sorted(a["audit_id"] for a in audits) == ["AUD-CAM-S01-A-20261121-14", "TRN-CAM-S01-A-20261121-14"]
+    audit = next(a for a in audits if a["audit_id"].startswith("AUD-"))
     assert audit["status"] == "pending"
     assert audit["capture_id"] in {"CAP-S01-20261121-140700", "CAP-S01-20261121-140710", "CAP-S01-20261121-140710-2"}
     assert [b["box"] for b in json.loads(audit["ai_boxes_json"])] == [[10, 20, 50, 80], [70, 20, 50, 80]]
@@ -236,10 +242,10 @@ def test_sampling_the_same_hour_twice_keeps_one_audit(monkeypatch: pytest.Monkey
     for t in ("140700", "140710"):
         _ingest(ingest, "CAM-S01-A", t, [("hot160", 2)], with_frame=True)
     ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
-    first = _table("test-audits").scan()["Items"][0]["capture_id"]
+    first = _table("test-audits").get_item(Key={"store_id": "DEMO-S01", "audit_id": AUDIT_14})["Item"]["capture_id"]
     ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
     audits = _table("test-audits").scan()["Items"]
-    assert len(audits) == 1 and audits[0]["capture_id"] == first
+    assert len(audits) == 2 and {a["audit_id"]: a["capture_id"] for a in audits}[AUDIT_14] == first
 
 
 @mock_aws
@@ -351,6 +357,106 @@ def _one_pending_audit(ingest, counts=(("hot160", 2),)) -> None:
 def _call(api, method: str, path: str, groups: str = "field_team", body=None, query=None) -> tuple[int, dict]:
     resp = api.lambda_handler(_auth_event(method, path, groups=groups, body=body, query=query))
     return resp["statusCode"], json.loads(resp["body"])
+
+
+TRN_14 = "TRN-CAM-S01-A-20261121-14"
+
+
+def _audits() -> dict[str, dict]:
+    return {i["audit_id"]: i for i in _table("test-audits").scan()["Items"]}
+
+
+@mock_aws
+def test_an_hour_gives_a_scoring_frame_and_a_training_frame(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)], with_frame=True)
+    _ingest(ingest, "CAM-S01-A", "141200", [("hot160", 2)], with_frame=True)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    a = _audits()
+    assert set(a) == {AUDIT_14, TRN_14}
+    assert a[AUDIT_14]["capture_id"] != a[TRN_14]["capture_id"]
+    assert (a[AUDIT_14]["purpose"], a[TRN_14]["purpose"]) == ("scoring", "training")
+
+
+@mock_aws
+def test_sampling_an_hour_again_creates_nothing_and_keeps_the_scoring_frame(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)], with_frame=True)
+    _ingest(ingest, "CAM-S01-A", "141200", [("hot160", 2)], with_frame=True)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    first = _audits()
+    again = ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    second = _audits()
+    assert again["audits"] == []
+    assert set(second) == {AUDIT_14, TRN_14}
+    assert second[AUDIT_14]["capture_id"] != second[TRN_14]["capture_id"]
+    assert second[AUDIT_14]["capture_id"] == first[AUDIT_14]["capture_id"]
+
+
+@mock_aws
+def test_training_frames_only_come_from_captures_that_see_the_display(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "130000", [("hot160", 1)])  # a stock row, so the camera is known
+    _ingest(ingest, "CAM-S01-A", "140700", [], with_frame=True, display_visible=False)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    a = _audits()
+    assert set(a) == {AUDIT_14} and a[AUDIT_14]["display_visible"] is False  # scored frames are not filtered
+
+
+@mock_aws
+def test_frames_outside_opening_hours_are_not_sampled(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan(open_time="06:00", close_time="14:00")
+    _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)], with_frame=True)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    assert _audits() == {}
+
+
+@mock_aws
+def test_ingest_keeps_the_display_fields_and_old_records_mean_visible(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140700", [], display_visible=False)
+    _ingest(ingest, "CAM-S01-A", "141200", [])
+    items = {i["capture_id"]: i for i in _table("test-captures").scan()["Items"]}
+    hidden, old = items["CAP-S01-20261121-140700"], items["CAP-S01-20261121-141200"]
+    assert hidden["display_visible"] is False and float(hidden["display_score"]) == 0.2
+    assert old["display_visible"] is True and "display_score" not in old
+
+
+@mock_aws
+def test_summary_and_top_50_ignore_training_frames(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)], with_frame=True)
+    _ingest(ingest, "CAM-S01-A", "141200", [("hot160", 2)], with_frame=True)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    body = {
+        "verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}],
+        "missed": [],
+        "misses_checked": True,
+    }
+    assert _call(api, "PUT", f"/v1/model/audits/{TRN_14}", body=body)[0] == 200
+    _, summary = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
+    assert summary["n_audits"] == 0
+    _, items = _call(api, "GET", "/v1/model/audits", query={"days": "0"})
+    assert {i["audit_id"]: i["purpose"] for i in items["items"]} == {AUDIT_14: "scoring", TRN_14: "training"}
+
+
+@mock_aws
+def test_an_old_audit_without_purpose_counts_by_its_id(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _one_pending_audit(ingest)
+    _table("test-audits").update_item(
+        Key={"store_id": "DEMO-S01", "audit_id": AUDIT_14}, UpdateExpression="REMOVE purpose"
+    )
+    body = {
+        "verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}],
+        "missed": [],
+        "misses_checked": True,
+    }
+    assert _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body=body)[0] == 200
+    assert _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["n_audits"] == 1
+    items = _call(api, "GET", "/v1/model/audits", query={"days": "0"})[1]["items"]
+    assert [i["purpose"] for i in items] == ["scoring"]
 
 
 @mock_aws

@@ -212,6 +212,11 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
           </span>
           {detail && (
             <>
+              <span className="font-semibold">
+                {detail.purpose === "training"
+                  ? "Training frame — teaches the flavour gallery, never scored"
+                  : "Scoring frame — counts in the accuracy numbers"}
+              </span>
               <span className="font-mono text-[12px]">{detail.capture_id}</span>
               <span className="text-white/70">{detail.capture_timestamp}</span>
               <span className="text-white/70">Model {detail.model_version}</span>

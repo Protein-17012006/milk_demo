@@ -234,12 +234,16 @@ export interface ApiAuditBox {
   box: [number, number, number, number]; // x, y, w, h in frame pixels
 }
 
+// scoring frames count in the accuracy numbers; training frames only teach the flavour gallery
+export type AuditPurpose = "scoring" | "training";
+
 export interface ApiAuditListItem {
   audit_id: string;
   camera_id: string;
   capture_id: string;
   capture_timestamp: string;
   model_version: string;
+  purpose: AuditPurpose;
   status: AuditStatus;
   n_boxes: number;
   labeled_by?: string | null;
@@ -263,6 +267,7 @@ export interface ApiAuditDetail {
   capture_id: string;
   capture_timestamp: string;
   model_version: string;
+  purpose: AuditPurpose;
   status: AuditStatus;
   ai_boxes: ApiAuditBox[];
   verdicts: ApiAuditVerdict[];

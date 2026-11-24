@@ -724,13 +724,26 @@ def _with_hours(stores: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [s for s in stores if s.get("open_time") and s.get("close_time")]
 
 
+def _is_scoring(audit: dict[str, Any]) -> bool:
+    """Only scoring frames (AUD-) count in the metrics; training frames (TRN-) never do."""
+    return str(audit.get("audit_id", "")).startswith("AUD-")
+
+
+def _purpose(audit: dict[str, Any]) -> str:
+    """The audit's purpose; an old audit without one is judged by its id."""
+    return audit.get("purpose") or ("scoring" if _is_scoring(audit) else "training")
+
+
 def _done_audits(ddb, stores: list[dict[str, Any]], days: int) -> list[dict[str, Any]]:
     since = (_now() - timedelta(days=days)).isoformat(timespec="seconds")
     store_ids = {s["store_id"] for s in stores}
     return [
         _audit_view(a)
         for a in _scan_all(ddb.Table(AUDITS_TABLE))
-        if a.get("status") == "done" and a.get("store_id") in store_ids and str(a.get("capture_timestamp", "")) >= since
+        if a.get("status") == "done"
+        and _is_scoring(a)
+        and a.get("store_id") in store_ids
+        and str(a.get("capture_timestamp", "")) >= since
     ]
 
 
@@ -1065,6 +1078,7 @@ def _handle_put_shelf_plan(store_id: str, event: dict[str, Any], user: dict[str,
 
 def _audit_view(item: dict[str, Any]) -> dict[str, Any]:
     out = {k: v for k, v in item.items() if not k.endswith("_json")}
+    out["purpose"] = _purpose(item)
     out["ai_boxes"] = json.loads(item.get("ai_boxes_json") or "[]")
     out["verdicts"] = json.loads(item.get("verdicts_json") or "[]")
     out["missed"] = json.loads(item.get("missed_json") or "[]")
@@ -1111,6 +1125,7 @@ def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:
             "capture_id": a.get("capture_id"),
             "capture_timestamp": a.get("capture_timestamp"),
             "model_version": a.get("model_version"),
+            "purpose": _purpose(a),
             "status": a.get("status"),
             "n_boxes": len(json.loads(a.get("ai_boxes_json") or "[]")),
             "labeled_by": a.get("labeled_by"),
@@ -1236,7 +1251,7 @@ def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
     done = [
         a
         for a in _scan_all(ddb.Table(AUDITS_TABLE))
-        if a.get("status") == "done" and _within_days(str(a.get("capture_timestamp", "")), days)
+        if a.get("status") == "done" and _is_scoring(a) and _within_days(str(a.get("capture_timestamp", "")), days)
     ]
     latest: dict[str, str] = {}
     for a in done:
@@ -1250,9 +1265,7 @@ def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
         if "processing_ms_median" in h
         for _ in range(int(h.get("captures", 0)))
     ]
-    old_rule_frames = sum(
-        1 for a in done if str(a.get("audit_id", "")).startswith("AUD-") and a.get("label_rule") != "A"
-    )
+    old_rule_frames = sum(1 for a in done if a.get("label_rule") != "A")
     return _json_response(
         200,
         {
