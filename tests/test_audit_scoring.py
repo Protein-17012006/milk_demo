@@ -7,6 +7,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from audit_scoring import comparison_rows, summarize, validate_labels  # noqa: E402
@@ -124,3 +126,47 @@ def test_validate_labels():
     bad = AUDIT_2311["verdicts"][:4] + [{"box_id": 5, "verdict": "wrong_sku", "true_sku_id": "xyz"}]
     assert validate_labels(boxes, bad, [], CATALOG) == ["unknown sku 'xyz'"]
     assert validate_labels([], [], [{"sku_id": "hot160", "x": 1, "y": 1}], CATALOG) == []
+
+
+AUDIT_SCOPE = {  # 2 Cheese named right, 1 real Cheese can on the lower tier (out of scope under rule A)
+    "capture_timestamp": "2026-11-24T09:35:04+07:00",
+    "ai_boxes": [
+        {"box_id": 1, "sku_id": "cheese145", "conf": 0.96, "box": [907, 227, 69, 180]},
+        {"box_id": 2, "sku_id": "cheese145", "conf": 0.95, "box": [944, 259, 70, 46]},
+        {"box_id": 3, "sku_id": "cheese145", "conf": 0.41, "box": [950, 560, 60, 70]},
+    ],
+    "verdicts": [
+        {"box_id": 1, "verdict": "correct"},
+        {"box_id": 2, "verdict": "correct"},
+        {"box_id": 3, "verdict": "out_of_scope"},
+    ],
+    "missed": [],
+}
+
+
+def test_out_of_scope_boxes_count_nowhere():
+    rows = comparison_rows(AUDIT_SCOPE)
+    assert [(r["sku_id"], r["ai_unit_count"], r["human_unit_count"], r["discrepancy_category"]) for r in rows] == [
+        ("cheese145", 2, 2, "Exact Match")
+    ]
+    s = summarize([AUDIT_SCOPE], [])
+    assert (s["kpis"]["false_detection_rate"]["value"], s["kpis"]["false_detection_rate"]["n"]) == (0.0, 2)
+    assert s["kpis"]["avg_confidence_correct"]["n"] == 2
+    assert next(r for r in s["per_sku"] if r["sku_id"] == "cheese145")["model_units"] == 2
+    assert s["confusion"]["cells"] == {"cheese145|cheese145": 2}
+
+
+def test_a_frame_of_only_out_of_scope_boxes_has_no_numbers():
+    only = {**AUDIT_SCOPE, "ai_boxes": AUDIT_SCOPE["ai_boxes"][2:], "verdicts": AUDIT_SCOPE["verdicts"][2:]}
+    k = summarize([only], [])["kpis"]
+    assert k["false_detection_rate"]["value"] is None and k["unit_count_mae"]["value"] is None
+
+
+def test_validate_labels_accepts_out_of_scope():
+    assert validate_labels(AUDIT_SCOPE["ai_boxes"], AUDIT_SCOPE["verdicts"], [], CATALOG) == []
+
+
+def test_share_of_out_of_scope_boxes_is_counted_before_they_are_dropped():
+    share = summarize([AUDIT_SCOPE], [])["out_of_scope_share"]
+    assert share["n"] == 3 and share["value"] == pytest.approx(1 / 3)
+    assert summarize([], [])["out_of_scope_share"] == {"value": None, "n": 0}

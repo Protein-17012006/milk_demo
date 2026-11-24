@@ -1156,6 +1156,15 @@ def _handle_model_audit_put(audit_id: str, event: dict[str, Any], user: dict[str
     verdicts, missed = body.get("verdicts"), body.get("missed")
     if not isinstance(verdicts, list) or not isinstance(missed, list):
         return _json_response(400, {"error": "INVALID_LABELS", "message": "verdicts and missed must be lists"}, event)
+    if body.get("misses_checked") is not True:
+        return _json_response(
+            400,
+            {
+                "error": "INVALID_LABELS",
+                "message": "misses_checked must be true: check for cans the model missed",
+            },
+            event,
+        )
     errors = validate_labels(json.loads(audit.get("ai_boxes_json") or "[]"), verdicts, missed, set(_sku_choices(ddb)))
     if any(not isinstance(m.get("x"), (int, float)) or not isinstance(m.get("y"), (int, float)) for m in missed):
         errors.append("every missed point needs numbers x and y")
@@ -1177,6 +1186,8 @@ def _handle_model_audit_put(audit_id: str, event: dict[str, Any], user: dict[str
             "verdicts_json": json.dumps(clean_verdicts, separators=(",", ":")),
             "missed_json": json.dumps(clean_missed, separators=(",", ":")),
             "status": "done",
+            "label_rule": "A",
+            "misses_checked": True,
             "labeled_by": user["email"],
             "labeled_at": datetime.now(ICT).isoformat(timespec="seconds"),
         },
@@ -1239,10 +1250,14 @@ def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
         if "processing_ms_median" in h
         for _ in range(int(h.get("captures", 0)))
     ]
+    old_rule_frames = sum(
+        1 for a in done if str(a.get("audit_id", "")).startswith("AUD-") and a.get("label_rule") != "A"
+    )
     return _json_response(
         200,
         {
             **summarize([_audit_view(a) for a in chosen], processing),
+            "old_rule_frames": old_rule_frames,
             "model_versions": sorted(latest, key=lambda v: latest[v], reverse=True),
             "range": {"days": days, "model_version": version},
         },

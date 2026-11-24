@@ -21,12 +21,14 @@ const VERDICT_STYLE: Record<string, { color: string; label: string }> = {
   correct: { color: "#16A34A", label: "Right" },
   wrong_sku: { color: "#DC2626", label: "Wrong SKU" },
   not_product: { color: "#7C3AED", label: "Not our SKU" },
+  out_of_scope: { color: "#6B7280", label: "Out of scope" },
 };
 const MISSED_COLOR = "#EE730A";
 const SKIP_REASONS: { value: string; label: string }[] = [
   { value: "blurry", label: "Blurry frame" },
   { value: "blocked", label: "Shelf blocked (person, object)" },
   { value: "camera_moved", label: "Camera moved" },
+  { value: "display_away", label: "Display not in view" },
   { value: "other", label: "Other" },
 ];
 
@@ -39,7 +41,7 @@ interface AuditLabelerProps {
 }
 
 /**
- * Labels one sampled frame at a time: click a box to cycle Right → Wrong SKU → Not our SKU, pick the right
+ * Labels one sampled frame at a time: click a box to cycle Right → Wrong SKU → Not our SKU → Out of scope, pick the right
  * SKU for wrong boxes, click empty shelf to add a unit the model missed. Spec 2026-11-23, section 7.
  */
 export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps) {
@@ -55,6 +57,7 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
   const [skipping, setSkipping] = useState(false);
   const [skipReason, setSkipReason] = useState("blocked");
   const [skipNote, setSkipNote] = useState("");
+  const [missesChecked, setMissesChecked] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0); // bumped to fetch a fresh signed link
@@ -132,7 +135,7 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
   }, [size, zoomed, boxes]);
   const fontSize = region ? region.w / 50 : 0;
   const totals = useMemo(() => totalsBySku(boxes, labels, missed), [boxes, labels, missed]);
-  const saveAllowed = detail !== null && canSave(boxes, labels) && !busy;
+  const saveAllowed = detail !== null && canSave(boxes, labels, missesChecked) && !busy;
 
   const setVerdict = (boxId: number, verdict: Verdict | null) =>
     setLabels((prev) => ({ ...prev, [boxId]: { verdict, trueSku: prev[boxId]?.trueSku ?? null } }));
@@ -158,6 +161,7 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
     setSize(null);
     setLabels({});
     setMissed([]);
+    setMissesChecked(false);
     setPendingPoint(null);
     setSkipping(false);
     setMessage(null);
@@ -243,6 +247,12 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
         </p>
       )}
 
+      <p data-rule-a className="bg-[#F3F4F6] px-5 py-2 text-[12.5px] text-[#1F2937]">
+        <b>Rule A</b> — count catalogue cans on the display&apos;s top tray whose face or lid shows enough to tell the
+        flavour. Mark <b>Out of scope</b>: cans on the lower tier, cans almost fully hidden, cans whose flavour you
+        can&apos;t tell.
+      </p>
+
       <div className="flex min-h-0 flex-1 flex-col gap-3 p-3 lg:flex-row">
         <div className="flex min-h-[300px] flex-1 items-center justify-center">
           {detail && region && size ? (
@@ -304,7 +314,7 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
         <aside className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto rounded-[12px] bg-white p-4 text-[13px] lg:w-[360px]">
           <p className="text-[12px] leading-snug text-[#6B7280]">
             Click a box to cycle <b className="text-[#16A34A]">Right</b> → <b className="text-[#DC2626]">Wrong SKU</b> →{" "}
-            <b className="text-[#7C3AED]">Not our SKU</b>. Click empty shelf to add a unit the model missed; click an
+            <b className="text-[#7C3AED]">Not our SKU</b> → <b className="text-[#6B7280]">Out of scope</b>. Click empty shelf to add a unit the model missed; click an
             orange dot to remove it.
           </p>
 
@@ -356,7 +366,7 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
                       </span>
                     </div>
                     <div className="mt-1.5 flex gap-1">
-                      {(["correct", "wrong_sku", "not_product"] as Verdict[]).map((v) => (
+                      {(["correct", "wrong_sku", "not_product", "out_of_scope"] as Verdict[]).map((v) => (
                         <button
                           key={v}
                           type="button"
@@ -444,13 +454,23 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
               </div>
             </div>
           ) : (
-            <div className="mt-auto flex gap-2 pt-1">
+            <div className="mt-auto flex flex-wrap gap-2 pt-1">
+              <label className="flex w-full items-start gap-2 text-[12.5px]">
+                <input
+                  type="checkbox"
+                  data-misses-checked
+                  checked={missesChecked}
+                  onChange={(e) => setMissesChecked(e.target.checked)}
+                  className="mt-0.5 cursor-pointer"
+                />
+                <span>I checked for cans the model missed (click the shelf to add them)</span>
+              </label>
               <button
                 type="button"
                 data-save
                 disabled={!saveAllowed}
                 onClick={() => void save()}
-                title={saveAllowed ? undefined : "Judge every box first (and pick the right SKU for wrong ones)"}
+                title={saveAllowed ? undefined : "Judge every box, pick the right SKU for wrong ones, and tick the missed-cans check"}
                 className="flex-1 rounded-[8px] bg-[#EE730A] px-3 py-2 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
               >
                 {busy ? "Saving…" : "Save"}

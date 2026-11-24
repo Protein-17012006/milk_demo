@@ -141,8 +141,19 @@ export function ModelQualityView() {
 
       {error && <p className="mt-4 rounded-[8px] bg-[#FEF2F2] px-3 py-2 text-[13px] text-[#991B1B]">{error}</p>}
 
+      {summary && summary.old_rule_frames > 0 && (
+        <p data-old-rule-frames className="mt-4 rounded-[8px] bg-[#FFF7ED] px-3 py-2 text-[13px] text-[#7C2D12]">
+          {summary.old_rule_frames} frames were labelled before rule A — relabel them so the numbers follow one rule
+        </p>
+      )}
+
       <section className="mt-5">
         <h2 className="mb-2 text-[15px] font-semibold text-black">Datagent KPIs</h2>
+        {summary && summary.out_of_scope_share.n > 0 && (
+          <p data-out-of-scope-share className="mb-3 text-[13px] text-[#6B7280]">
+            Out of scope boxes: {pct(summary.out_of_scope_share.value)} of {summary.out_of_scope_share.n} boxes
+          </p>
+        )}
         {summary && summary.n_audits === 0 && (
           <p data-no-labels className="mb-3 text-[13px] text-[#6B7280]">
             No labelled frames yet. Label the sampled frames to fill these numbers.

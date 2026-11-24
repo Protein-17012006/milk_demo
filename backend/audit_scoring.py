@@ -6,6 +6,8 @@ UNRECOGNIZED), one verdict per box and the units the model missed. Verdicts:
     correct      named box: one unit of that SKU; UNRECOGNIZED box: goods outside the catalogue
     wrong_sku    one unit of catalogue SKU `true_sku_id`, not what the model said
     not_product  named box: not any catalogue SKU; UNRECOGNIZED box: not goods at all
+    out_of_scope a real can that labelling rule A does not count (lower tier, almost hidden, flavour unclear):
+                 the box and its verdict are dropped from every number
 
 The formulas follow the column descriptions of "Validation - Accuracy Report" (the sheet's formula cells
 show #ERROR!), as written in docs/superpowers/specs/2026-11-23-model-quality-page-design.md, section 5.
@@ -17,8 +19,8 @@ from __future__ import annotations
 import statistics
 from collections import Counter, defaultdict
 
-VERDICTS = ("correct", "wrong_sku", "not_product")
-SKIP_REASONS = ("blurry", "blocked", "camera_moved", "other")
+VERDICTS = ("correct", "wrong_sku", "not_product", "out_of_scope")
+SKIP_REASONS = ("blurry", "blocked", "camera_moved", "display_away", "other")
 
 # Pilot targets of the Accuracy Report, part B. minor_error_rate's target applies to exact + minor.
 KPI_TARGETS: dict[str, tuple[str, float]] = {
@@ -76,6 +78,18 @@ def _verdicts_by_box(audit: dict) -> dict:
     return {v["box_id"]: v for v in audit.get("verdicts", [])}
 
 
+def scoped(audit: dict) -> dict:
+    """The audit as rule A scores it: a copy without the out_of_scope boxes and their verdicts."""
+    dropped = {v["box_id"] for v in audit.get("verdicts", []) if v.get("verdict") == "out_of_scope"}
+    if not dropped:
+        return audit
+    return {
+        **audit,
+        "ai_boxes": [b for b in audit.get("ai_boxes", []) if b["box_id"] not in dropped],
+        "verdicts": [v for v in audit.get("verdicts", []) if v["box_id"] not in dropped],
+    }
+
+
 def _truth_counts(audit: dict) -> Counter:
     """Units of each catalogue SKU that are really in the frame."""
     labels = _verdicts_by_box(audit)
@@ -96,6 +110,7 @@ def _truth_counts(audit: dict) -> Counter:
 def comparison_rows(audit: dict) -> list[dict]:
     """Part A of the Accuracy Report: one row per catalogue SKU the model or the labeller found in the frame.
     UNRECOGNIZED boxes get no row (no truth exists for goods outside the catalogue)."""
+    audit = scoped(audit)
     labels = _verdicts_by_box(audit)
     boxes = audit.get("ai_boxes", [])
     ai = Counter(b["sku_id"] for b in boxes if b["sku_id"] is not None)
@@ -148,6 +163,7 @@ def _mean(values: list[float]) -> float | None:
 
 
 def _kpis(audits: list[dict], processing_ms: list[int]) -> dict:
+    audits = [scoped(a) for a in audits]
     rows = [r for a in audits for r in comparison_rows(a)]
     boxes = []  # (box, verdict) of every labelled box
     for a in audits:
@@ -207,6 +223,7 @@ def _kpis(audits: list[dict], processing_ms: list[int]) -> dict:
 
 
 def _per_sku(audits: list[dict]) -> list[dict]:
+    audits = [scoped(a) for a in audits]
     model_units: Counter = Counter()
     true_units: Counter = Counter()
     right: Counter = Counter()
@@ -245,6 +262,7 @@ def _per_sku(audits: list[dict]) -> list[dict]:
 
 
 def _confusion(audits: list[dict]) -> dict:
+    audits = [scoped(a) for a in audits]
     cells: Counter = Counter()
     for a in audits:
         labels = _verdicts_by_box(a)
@@ -286,8 +304,11 @@ def summarize(audits: list[dict], processing_ms: list[int]) -> dict:
                 "exact_or_minor_rate": k["minor_error_rate"]["exact_or_minor"],
             }
         )
+    n_boxes = sum(len(a.get("ai_boxes", [])) for a in audits)
+    n_out = sum(v.get("verdict") == "out_of_scope" for a in audits for v in a.get("verdicts", []))
     return {
         "n_audits": len(audits),
+        "out_of_scope_share": {"value": _share(n_out, n_boxes), "n": n_boxes},
         "kpis": _kpis(audits, processing_ms),
         "per_sku": _per_sku(audits),
         "confusion": _confusion(audits),

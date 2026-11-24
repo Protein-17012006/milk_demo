@@ -392,6 +392,7 @@ def test_saving_labels_marks_the_audit_done(monkeypatch: pytest.MonkeyPatch):
             {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "original145"},
         ],
         "missed": [{"sku_id": "hot160", "x": 5, "y": 5}],
+        "misses_checked": True,
     }
     status, saved = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body=body)
     assert status == 200
@@ -407,7 +408,7 @@ def test_saving_without_a_verdict_for_every_box_is_refused(monkeypatch: pytest.M
         api,
         "PUT",
         f"/v1/model/audits/{AUDIT_14}",
-        body={"verdicts": [{"box_id": 1, "verdict": "correct"}], "missed": []},
+        body={"verdicts": [{"box_id": 1, "verdict": "correct"}], "missed": [], "misses_checked": True},
     )
     assert status == 400 and err["error"] == "INVALID_LABELS" and "box 2 has no verdict" in err["message"]
     assert _call(api, "GET", f"/v1/model/audits/{AUDIT_14}")[1]["status"] == "pending"
@@ -431,9 +432,44 @@ def test_a_frame_without_boxes_is_saved_with_misses_only(monkeypatch: pytest.Mon
         api,
         "PUT",
         f"/v1/model/audits/{AUDIT_14}",
-        body={"verdicts": [], "missed": [{"sku_id": "hot160", "x": 1, "y": 1}]},
+        body={"verdicts": [], "missed": [{"sku_id": "hot160", "x": 1, "y": 1}], "misses_checked": True},
     )
     assert status == 200 and saved["status"] == "done"
+
+
+@mock_aws
+def test_saving_needs_the_missed_cans_check(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _one_pending_audit(ingest)  # two hot160 boxes
+    labels = {"verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "out_of_scope"}], "missed": []}
+    status, body = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body=labels)
+    assert status == 400 and "misses_checked" in body["message"]
+    status, body = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body={**labels, "misses_checked": True})
+    assert status == 200 and (body["label_rule"], body["misses_checked"]) == ("A", True)
+
+
+@mock_aws
+def test_a_frame_without_the_display_is_skipped_as_display_away(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _one_pending_audit(ingest)
+    status, body = _call(api, "POST", f"/v1/model/audits/{AUDIT_14}/skip", body={"reason": "display_away"})
+    assert status == 200 and body["skip_reason"] == "display_away"
+
+
+@mock_aws
+def test_summary_counts_frames_labelled_before_rule_a(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _one_pending_audit(ingest)
+    _table("test-audits").update_item(  # labelled on 24/11 before rule A existed: done, no label_rule
+        Key={"store_id": "DEMO-S01", "audit_id": AUDIT_14},
+        UpdateExpression="SET #s = :done, verdicts_json = :v",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={
+            ":done": "done",
+            ":v": '[{"box_id":1,"verdict":"correct"},{"box_id":2,"verdict":"correct"}]',
+        },
+    )
+    assert _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["old_rule_frames"] == 1
 
 
 @mock_aws
@@ -469,6 +505,7 @@ def test_summary_after_labelling_one_frame(monkeypatch: pytest.MonkeyPatch):
                 {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "original145"},
             ],
             "missed": [],
+            "misses_checked": True,
         },
     )
     status, summary = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
@@ -486,7 +523,11 @@ def test_summary_for_a_version_without_frames(monkeypatch: pytest.MonkeyPatch):
         api,
         "PUT",
         f"/v1/model/audits/{AUDIT_14}",
-        body={"verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}], "missed": []},
+        body={
+            "verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}],
+            "missed": [],
+            "misses_checked": True,
+        },
     )
     status, summary = _call(api, "GET", "/v1/model/summary", query={"days": "0", "model_version": "v9"})
     assert status == 200 and summary["n_audits"] == 0
@@ -946,7 +987,8 @@ def test_top_50_accuracy_needs_labelled_frames(monkeypatch: pytest.MonkeyPatch):
     assert (top["value"], top["n_frames"], top["blocked_reason"]) == (None, 0, "no_labels")
     _one_pending_audit(ingest)
     verdicts = [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}]
-    assert _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body={"verdicts": verdicts, "missed": []})[0] == 200
+    body = {"verdicts": verdicts, "missed": [], "misses_checked": True}
+    assert _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body=body)[0] == 200
     top = _kpi(api)["top_50_sku_accuracy"]
     assert (top["value"], top["n_frames"], top["blocked_reason"]) == (1.0, 1, None)
     assert top["scope_note"] == "All SKUs: Datagent has not sent a top-50 list yet"

@@ -252,7 +252,7 @@ export interface ApiAuditListResponse {
 
 export interface ApiAuditVerdict {
   box_id: number;
-  verdict: "correct" | "wrong_sku" | "not_product";
+  verdict: "correct" | "wrong_sku" | "not_product" | "out_of_scope";
   true_sku_id?: string;
 }
 
@@ -273,6 +273,8 @@ export interface ApiAuditDetail {
   labeled_at?: string;
   skip_reason?: string;
   skip_note?: string;
+  label_rule?: string;
+  misses_checked?: boolean;
 }
 
 export interface ApiKpiValue {
@@ -285,6 +287,8 @@ export interface ApiKpiValue {
 
 export interface ApiModelSummary {
   n_audits: number;
+  old_rule_frames: number; // done frames not labelled under rule A
+  out_of_scope_share: { value: number | null; n: number }; // out_of_scope boxes / all AI boxes; n = boxes
   kpis: Record<string, ApiKpiValue>;
   per_sku: {
     sku_id: string;
@@ -529,7 +533,11 @@ export function createApiClient(getIdToken: TokenGetter) {
 
     saveAudit: (
       auditId: string,
-      body: { verdicts: ApiAuditVerdict[]; missed: { sku_id: string; x: number; y: number }[] }
+      body: {
+        verdicts: ApiAuditVerdict[];
+        missed: { sku_id: string; x: number; y: number }[];
+        misses_checked: boolean;
+      }
     ) =>
       requestWithAuth(`/model/audits/${encodeURIComponent(auditId)}`, getIdToken, {
         method: "PUT",
