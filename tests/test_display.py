@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from milk.cvoutput import Detection
 from milk.display import DisplayCheck, zone_crop
@@ -73,3 +74,26 @@ def test_references_survive_a_restart(tmp_path):
 
 def test_a_zone_partly_outside_the_frame_is_cut_to_the_frame():
     assert zone_crop(np.zeros((100, 200, 3), np.uint8), (0.9, 0.9, 0.5, 0.5)).shape == (10, 20, 3)
+
+
+def _garbage(path):
+    path.write_bytes(b"this is not an npz file")
+
+
+def _missing_key(path):
+    np.savez(path, hists=np.zeros((1, 480), np.float32))
+
+
+def _mismatched(path):
+    np.savez(path, hists=np.zeros((2, 480), np.float32), times=np.array([0.0]))
+
+
+@pytest.mark.parametrize("write_bad_file", [_garbage, _missing_key, _mismatched])
+def test_a_bad_references_file_starts_empty_and_is_replaced(tmp_path, caplog, write_bad_file):
+    path = tmp_path / "refs.npz"
+    write_bad_file(path)
+    d = DisplayCheck(ZONE, refs_path=str(path))
+    assert d.n_refs == 0
+    assert "references" in caplog.text
+    assert d.check(display_img(), cans(3), now=0.0) == (None, True)
+    assert DisplayCheck(ZONE, refs_path=str(path)).n_refs == 1

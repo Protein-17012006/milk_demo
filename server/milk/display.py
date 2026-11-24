@@ -4,6 +4,7 @@ references the worker learns by itself: a capture with enough confident cans ins
 
 from __future__ import annotations
 
+import logging
 import os
 
 import numpy as np
@@ -16,6 +17,8 @@ REF_EVERY_S = 600  # at most one new reference per 10 minutes
 MAX_REFS = 50  # the newest references are kept
 
 H_BINS, S_BINS = 30, 16
+
+log = logging.getLogger("milk.display")
 
 
 def zone_crop(image: np.ndarray, zone: tuple[float, float, float, float]) -> np.ndarray:
@@ -47,9 +50,21 @@ class DisplayCheck:
         self._hists: list[np.ndarray] = []
         self._times: list[float] = []
         if refs_path and os.path.exists(refs_path):
-            with np.load(refs_path) as saved:
-                self._hists = list(saved["hists"])
-                self._times = [float(t) for t in saved["times"]]
+            self._load(refs_path)
+
+    def _load(self, path: str) -> None:
+        """Reads saved references; a corrupt or incomplete file starts the worker with none (and is overwritten
+        by the next reference it learns) instead of stopping it."""
+        try:
+            with np.load(path) as saved:
+                hists = list(saved["hists"])
+                times = [float(t) for t in saved["times"]]
+            if len(hists) != len(times):
+                raise ValueError(f"{len(hists)} histograms but {len(times)} times")
+        except Exception as exc:  # noqa: BLE001 - OSError, ValueError, KeyError, BadZipFile and more
+            log.warning("ignoring display references in %s: %s: %s", path, type(exc).__name__, exc)
+            return
+        self._hists, self._times = hists, times
 
     @property
     def n_refs(self) -> int:
