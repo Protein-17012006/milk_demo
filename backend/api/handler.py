@@ -23,6 +23,7 @@ import boto3
 import shelf
 from audit_scoring import SKIP_REASONS, summarize, validate_labels
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 from common import (
     CAPTURE_LOG_COLUMNS,
     CV_OUTPUT_COLUMNS,
@@ -774,10 +775,17 @@ def _hours(checks: int) -> float:
 
 def _display_statuses(ddb, stores: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One row per camera: does it see the display cabinet, since when, and when it last did."""
+    if not SHELF_TABLE:
+        return []
     rows = []
     for store in stores:
         cond = Key("store_id").eq(store["store_id"]) & Key("key").begins_with("display#")
-        for item in _query_all(ddb.Table(SHELF_TABLE), KeyConditionExpression=cond):
+        try:
+            items = _query_all(ddb.Table(SHELF_TABLE), KeyConditionExpression=cond)
+        except ClientError as exc:  # a decoration of /products: the list must still answer
+            print(json.dumps({"display_status_failed": store["store_id"], "error": repr(exc)}))
+            return []
+        for item in items:
             rows.append(
                 {
                     "camera_id": item.get("camera_id") or item["key"].split("#", 1)[1],

@@ -691,7 +691,6 @@ def test_end_to_end_ingest_review_and_export_with_moto(monkeypatch: pytest.Monke
     monkeypatch.setenv("STORE_LIST_TABLE", "test-store-list")
     monkeypatch.setenv("CORRECTIONS_TABLE", "test-corrections")
     monkeypatch.setenv("USER_PREFS_TABLE", "test-user-prefs")
-    monkeypatch.setenv("SHELF_TABLE", "test-shelf")  # /products lists the cameras that cannot see the display
     monkeypatch.setenv("ANALYTICS_BUCKET", "test-analytics-bucket")
     monkeypatch.setenv("HUB_BUCKET", "test-analytics-bucket")
 
@@ -1368,3 +1367,14 @@ def test_products_list_cameras_that_cannot_see_the_display(monkeypatch: pytest.M
             "last_visible_at": "2026-11-21T14:00:00+07:00",
         }
     ]
+
+
+@mock_aws
+def test_products_still_answer_when_the_display_status_cannot_be_read(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    status, body = _call(api, "GET", "/v1/products", groups="datagent")
+    assert status == 200 and body["items"]
+    for shelf_table in ("", "no-such-table"):  # unset, and a table that does not exist
+        monkeypatch.setattr(api, "SHELF_TABLE", shelf_table)
+        status, body = _call(api, "GET", "/v1/products", groups="datagent")
+        assert status == 200 and body["items"] and body["displays"] == []
