@@ -160,12 +160,12 @@ def _parse_body(event: dict[str, Any]) -> dict[str, Any]:
     return json.loads(raw)
 
 
-def _scan_all(table) -> list[dict[str, Any]]:
+def _scan_all(table, **kwargs) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    resp = table.scan()
+    resp = table.scan(**kwargs)
     items.extend(resp.get("Items", []))
     while "LastEvaluatedKey" in resp:
-        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
+        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"], **kwargs)
         items.extend(resp.get("Items", []))
     return from_dynamodb(items)
 
@@ -630,7 +630,8 @@ def _handle_export_csv(kind: str, event: dict[str, Any], ddb) -> dict[str, Any]:
 
 def _handle_kpi(event: dict[str, Any], ddb) -> dict[str, Any]:
     products, unrecognized_units, total_stores = _load_products_catalog(ddb)
-    captures = _scan_all(ddb.Table(CAPTURES_TABLE))
+    # only the two fields used: the full items (rows, boxes) are ~18 MB and took ~9 s per call to read
+    captures = _scan_all(ddb.Table(CAPTURES_TABLE), ProjectionExpression="store_id, processing_time_ms")
     active_stores = len({c.get("store_id") for c in captures if c.get("store_id")})
 
     # Per A7 (doc p.7): avg_processing_time_ms = mean of one value per capture from capture_log

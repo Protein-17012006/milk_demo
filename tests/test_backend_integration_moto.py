@@ -882,6 +882,26 @@ def test_a_store_without_hours_is_blocked_not_zero(monkeypatch: pytest.MonkeyPat
 
 
 @mock_aws
+def test_kpi_capture_numbers_read_only_store_and_processing_time(monkeypatch: pytest.MonkeyPatch):
+    """/kpi scans captures for two fields only (ProjectionExpression); the numbers must not change."""
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, NOW)
+    captures = _table("test-captures")
+    for i, ms in enumerate((20, 40, 0)):  # 0 = unknown time, left out of the mean
+        captures.put_item(
+            Item={
+                "camera_id": "CAM-S01-A",
+                "capture_id": f"CAP-S01-20261128-11{i}000",
+                "store_id": "DEMO-S01",
+                "processing_time_ms": ms,
+                "rows_json": "[]",
+            }
+        )
+    kpi = _kpi(api)
+    assert (kpi["captures_count"], kpi["active_stores_monitored"], kpi["avg_processing_time_ms"]) == (3, 1, 30)
+
+
+@mock_aws
 def test_oos_now_counts_expected_skus_out_of_stock(monkeypatch: pytest.MonkeyPatch):
     api, _ = _backend(monkeypatch)
     _at(api, monkeypatch, NOW)
