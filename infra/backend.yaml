@@ -383,6 +383,12 @@ Resources:
             Status: Enabled
             Prefix: frames/official/
             ExpirationInDays: 90
+          - Id: expire-shelf-event-frames-90d
+            Status: Enabled
+            Prefix: shelf-events/frames/
+            ExpirationInDays: 90
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
           - Id: expire-temp-uploads-7d
             Status: Enabled
             Prefix: uploads/

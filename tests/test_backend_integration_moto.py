@@ -1529,3 +1529,183 @@ def test_summary_still_answers_when_the_checks_cannot_be_read(monkeypatch: pytes
         monkeypatch.setattr(api, "SHELF_TABLE", shelf_table)
         status, s = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
         assert status == 200 and s["n_audits"] == 1 and s["check_level"]["frames"] == 0
+
+
+# --- Confirming shelf events, with their photos ---
+
+OOS_KEY = f"20261121-1410#{CHEESE}#OOS"
+VERDICT_PATH = "/v1/shelf-events/verdict"
+SOUR = "Slide Sour Cream & Onion 150g"
+
+
+def _framed_cheese_then_empty(ingest) -> None:
+    for hhmmss, units in [("140010", 5), ("140510", 5), ("141010", 0), ("141510", 0)]:
+        _ingest(ingest, "CAM-S01-A", hhmmss, [("cheese145", units)] if units else [], with_frame=True)
+
+
+def _oos_event() -> dict:
+    return _table("test-shelf-events").get_item(Key={"store_id": "DEMO-S01", "event_key": OOS_KEY})["Item"]
+
+
+def _verify(api, verdict="right", event_key=OOS_KEY, groups="field_team") -> tuple[int, dict]:
+    body = {"store_id": "DEMO-S01", "event_key": event_key, "verdict": verdict}
+    return _call(api, "PUT", VERDICT_PATH, groups=groups, body=body)
+
+
+def _bucket_keys() -> set[str]:
+    s3 = boto3.client("s3", region_name="ap-southeast-1")
+    listing = s3.list_objects_v2(Bucket="test-analytics-bucket", Prefix="shelf-events/")
+    return {o["Key"] for o in listing.get("Contents", [])}
+
+
+def _put_event(key: str, kind: str = "OOS") -> None:
+    _table("test-shelf-events").put_item(
+        Item={"store_id": "DEMO-S01", "event_key": key, "type": kind, "sku_id": CHEESE, "at": key.split("#")[0]}
+    )
+
+
+def _put_verdict(key: str, verdict: str, kind: str = "OOS") -> None:
+    _table("test-shelf-events").put_item(
+        Item={"store_id": "DEMO-S01", "event_key": f"verdict#{key}", "verdict": verdict, "type": kind}
+    )
+
+
+@mock_aws
+def test_an_event_copies_its_two_photos(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    _framed_cheese_then_empty(ingest)
+    _tick(ingest)
+    event = _oos_event()
+    assert event["photo_before_key"].startswith("shelf-events/frames/DEMO-S01/")
+    assert event["photo_before_key"].endswith("-before.jpg") and event["photo_after_key"].endswith("-after.jpg")
+    s3 = boto3.client("s3", region_name="ap-southeast-1")
+    before = s3.get_object(Bucket="test-analytics-bucket", Key=event["photo_before_key"])["Body"].read()
+    after = s3.get_object(Bucket="test-analytics-bucket", Key=event["photo_after_key"])["Body"].read()
+    assert (before, after) == (b"jpeg 140510", b"jpeg 141010")
+
+
+@mock_aws
+def test_an_event_without_photos_is_still_written(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    _cheese_then_empty(ingest)
+    _tick(ingest)
+    event = _oos_event()
+    assert "photo_before_key" not in event and "photo_after_key" not in event
+    assert _bucket_keys() == set()
+
+
+@mock_aws
+def test_an_expired_frame_does_not_stop_the_event(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    _framed_cheese_then_empty(ingest)
+    boto3.client("s3", region_name="ap-southeast-1").delete_object(
+        Bucket="test-hub-bucket", Key="frames/CAM-S01-A/2026-11-21/CAM-S01-A_20261121_140510.jpg"
+    )
+    _tick(ingest)
+    event = _oos_event()
+    assert "photo_before_key" not in event and event["photo_after_key"].endswith("-after.jpg")
+
+
+@mock_aws
+def test_recompute_keeps_photos_and_verdicts(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _at(api, monkeypatch, "2026-11-21T14:30:00+07:00")
+    _shelf_plan()
+    _framed_cheese_then_empty(ingest)
+    _tick(ingest)
+    photos = {k: _oos_event()[k] for k in ("photo_before_key", "photo_after_key")}
+    assert _verify(api, "wrong")[0] == 200
+    _shelf_plan(expected=(CHEESE, HOT), shelf_recompute_requested_at="2026-11-21T14:22:30+07:00")
+    _tick(ingest)
+    assert {k: _oos_event()[k] for k in photos} == photos
+    items = _call(api, "GET", "/v1/shelf-events", groups="datagent")[1]["items"]
+    assert [(i["event_key"], i["verdict"]) for i in items] == [(OOS_KEY, "wrong")]
+    assert f"verdict#{OOS_KEY}" in {i["event_key"] for i in _table("test-shelf-events").scan()["Items"]}
+    assert len(_bucket_keys()) == 2
+
+
+@mock_aws
+def test_events_list_never_shows_verdict_items(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _at(api, monkeypatch, "2026-11-21T14:30:00+07:00")
+    _shelf_plan()
+    _cheese_then_empty(ingest)
+    _tick(ingest)
+    items = _call(api, "GET", "/v1/shelf-events", groups="datagent")[1]["items"]
+    assert [i["event_key"] for i in items] == [OOS_KEY] and "verdict" not in items[0]
+    status, body = _verify(api, "unsure")
+    assert (status, body["verdict"]) == (200, "unsure")
+    items = _call(api, "GET", "/v1/shelf-events", groups="datagent")[1]["items"]
+    assert [(i["event_key"], i["verdict"]) for i in items] == [(OOS_KEY, "unsure")]
+    key = {"store_id": "DEMO-S01", "event_key": f"verdict#{OOS_KEY}"}
+    saved = _table("test-shelf-events").get_item(Key=key)["Item"]
+    assert (saved["type"], saved["sku_id"], saved["at"]) == ("OOS", CHEESE, "20261121-1410")
+    assert saved["verified_by"] == "tester@datagent.io" and saved["verified_at"]
+
+
+@mock_aws
+def test_only_the_team_verifies_events(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    amp = f"20261121-1410#{SOUR}#OOS"
+    _table("test-shelf-events").put_item(
+        Item={"store_id": "DEMO-S01", "event_key": amp, "type": "OOS", "sku_id": SOUR, "at": "20261121-1410"}
+    )
+    assert _verify(api, "right", amp, groups="datagent")[0] == 403
+    assert _verify(api, "right", "20261121-1410#Nothing#OOS")[0] == 404
+    assert _verify(api, "right", f"verdict#{amp}")[0] == 404
+    assert _verify(api, "maybe", amp)[0] == 400
+    assert _call(api, "PUT", VERDICT_PATH, body={"store_id": "DEMO-S01", "verdict": "right"})[0] == 400
+    for group in ("field_team", "team_admin"):
+        assert _verify(api, "right", amp, groups=group)[0] == 200
+    saved = _table("test-shelf-events").get_item(Key={"store_id": "DEMO-S01", "event_key": f"verdict#{amp}"})["Item"]
+    assert saved["verdict"] == "right"
+
+
+@mock_aws
+def test_alert_accuracy_ignores_unsure_and_needs_ten(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, "2026-11-21T22:30:00+07:00")
+    for i, verdict in enumerate(["right"] * 6 + ["wrong"] * 3 + ["unsure"]):
+        key = f"20261121-{10 + i:02d}00#{CHEESE}#OOS"
+        _put_event(key)
+        _put_verdict(key, verdict)
+    acc = _kpi(api)["alert_accuracy"]
+    assert (acc["value"], acc["n"], acc["unsure"], acc["blocked_reason"]) == (None, 9, 1, "few_verified")
+    # a verdict whose event is gone counts for nothing
+    _put_verdict(f"20261121-0900#{CHEESE}#OOS", "right")
+    assert _kpi(api)["alert_accuracy"]["n"] == 9
+    last = f"20261121-2000#{CHEESE}#DEPLETED"
+    _put_event(last, "DEPLETED")
+    _put_verdict(last, "right", "DEPLETED")
+    acc = _kpi(api)["alert_accuracy"]
+    assert (acc["value"], acc["n"], acc["unsure"], acc["blocked_reason"]) == (0.7, 10, 1, None)
+    assert acc["by_type"] == {
+        "OOS": {"right": 6, "wrong": 3, "unsure": 1},
+        "DEPLETED": {"right": 1, "wrong": 0, "unsure": 0},
+    }
+
+
+@mock_aws
+def test_photos_route_gives_null_for_a_missing_photo(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    _framed_cheese_then_empty(ingest)
+    _tick(ingest)
+    query = {"store_id": "DEMO-S01", "event_key": OOS_KEY}
+    status, body = _call(api, "GET", "/v1/shelf-events/photos", groups="datagent", query=query)
+    assert status == 200 and "shelf-events/frames/DEMO-S01/" in body["before_url"] and body["after_url"]
+    boto3.client("s3", region_name="ap-southeast-1").delete_object(
+        Bucket="test-analytics-bucket", Key=_oos_event()["photo_before_key"]
+    )
+    status, body = _call(api, "GET", "/v1/shelf-events/photos", groups="datagent", query=query)
+    assert (status, body["before_url"]) == (200, None) and body["after_url"]
+    no_photo = f"20261121-1500#{CHEESE}#OOS"
+    _put_event(no_photo)
+    query = {"store_id": "DEMO-S01", "event_key": no_photo}
+    body = _call(api, "GET", "/v1/shelf-events/photos", groups="datagent", query=query)[1]
+    assert body == {"before_url": None, "after_url": None}
+    query = {"store_id": "DEMO-S01", "event_key": "20261121-1500#nothing#OOS"}
+    assert _call(api, "GET", "/v1/shelf-events/photos", groups="datagent", query=query)[0] == 404

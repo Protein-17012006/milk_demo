@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import { X } from "lucide-react";
-import type { ApiShelfEvent, ApiShelfEventsResponse, ShelfEventType } from "@/lib/api";
+import type { ApiEventPhotos, ApiShelfEvent, ApiShelfEventsResponse, ShelfEventType, ShelfVerdict } from "@/lib/api";
 import { eventLabel, eventText, gapText, oosDurationText, timeAgo } from "@/lib/shelf-ui";
 
 export type ActivityKind = "all" | "alerts" | "restocked";
@@ -14,7 +14,19 @@ interface RecentActivitiesCardProps {
   reloadKey: string;
   /** Shown instead of an empty list when the shelf numbers are blocked (for example, no opening hours). */
   blockedText: string | null;
+  /** "Alerts confirmed right: 7 of 10", from the Dashboard's /kpi call; null when there is none. */
+  accuracyLine: string | null;
+  /** Only team_admin and field_team confirm events; datagent only looks. */
+  canVerify: boolean;
+  loadPhotos: ((storeId: string, eventKey: string) => Promise<ApiEventPhotos>) | null;
+  saveVerdict: ((storeId: string, eventKey: string, verdict: ShelfVerdict) => Promise<unknown>) | null;
 }
+
+const VERDICTS: { id: ShelfVerdict; label: string; active: string }[] = [
+  { id: "right", label: "Right", active: "border-[#2E7D32] bg-[#E8F5E9] text-[#2E7D32]" },
+  { id: "wrong", label: "Wrong", active: "border-[#DC2626] bg-[#FEE2E2] text-[#DC2626]" },
+  { id: "unsure", label: "Unsure", active: "border-[#6B7280] bg-[#F3F4F6] text-[#374151]" },
+];
 
 const BADGE_STYLES: Record<ShelfEventType, string> = {
   OOS: "bg-[#FEE2E2] text-[#DC2626]",
@@ -29,8 +41,16 @@ const FILTER_OPTIONS: { id: ActivityKind; label: string }[] = [
   { id: "restocked", label: "Restocked" },
 ];
 
-function EventRow({ item, now }: { item: ApiShelfEvent; now: Date }) {
+interface RowActions {
+  canVerify: boolean;
+  verdictOf: (item: ApiShelfEvent) => ShelfVerdict | undefined;
+  onVerdict: (item: ApiShelfEvent, verdict: ShelfVerdict) => void;
+  onPhotos: (item: ApiShelfEvent) => void;
+}
+
+function EventRow({ item, now, actions }: { item: ApiShelfEvent; now: Date; actions: RowActions }) {
   const gap = gapText(item);
+  const chosen = actions.verdictOf(item);
   return (
     <article data-shelf-event={item.type} className="flex flex-col gap-[4px] py-[9px]">
       <div className="flex items-center gap-[8px]">
@@ -50,18 +70,119 @@ function EventRow({ item, now }: { item: ApiShelfEvent; now: Date }) {
           {gap}
         </span>
       )}
+      <div className="mt-[2px] flex flex-wrap items-center gap-[6px]">
+        <button
+          type="button"
+          onClick={() => actions.onPhotos(item)}
+          className="rounded-full border border-[#EFF0F6] px-[10px] py-[2px] text-[11px] font-medium text-[#374151] hover:bg-[#F9FAFB] cursor-pointer"
+        >
+          Photos
+        </button>
+        {actions.canVerify &&
+          VERDICTS.map((v) => (
+            <button
+              key={v.id}
+              type="button"
+              aria-pressed={chosen === v.id}
+              onClick={() => actions.onVerdict(item, v.id)}
+              className={`rounded-full border px-[10px] py-[2px] text-[11px] font-medium cursor-pointer ${
+                chosen === v.id ? `${v.active} font-semibold` : "border-[#EFF0F6] bg-white text-[#6B7280] hover:bg-[#F9FAFB]"
+              }`}
+            >
+              {v.label}
+            </button>
+          ))}
+        {!actions.canVerify && chosen && <span className="text-[11px] text-[#9CA3AF]">Confirmed: {chosen}</span>}
+      </div>
     </article>
   );
 }
 
+function PhotoSlot({ title, url }: { title: string; url: string | null | undefined }) {
+  return (
+    <figure className="flex flex-1 flex-col gap-[6px]">
+      <figcaption className="text-[12px] font-semibold text-[#374151]">{title}</figcaption>
+      {url ? (
+        // eslint-disable-next-line @next/next/no-img-element -- a short-lived signed link, not a static asset
+        <img src={url} alt={title} className="w-full rounded-[10px] border border-[#EFF0F6] object-contain" />
+      ) : (
+        <div className="flex aspect-video items-center justify-center rounded-[10px] border border-dashed border-[#E5E7EB] px-2 text-center text-[12px] text-[#9CA3AF]">
+          {url === undefined ? "Loading..." : "Photo no longer kept"}
+        </div>
+      )}
+    </figure>
+  );
+}
+
+function PhotosDialog({ item, photos, onClose }: { item: ApiShelfEvent; photos: ApiEventPhotos | null | undefined; onClose: () => void }) {
+  // photos === null: the links could not be loaded, shown as not kept
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Event photos"
+        className="w-full max-w-[720px] rounded-[18px] border border-[#EFF0F6] bg-white p-5 shadow-[0_12px_36px_rgba(0,0,0,0.16)]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-[15px] font-semibold text-[#111827]">
+            {eventLabel(item.type)} · {item.sku_name}
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close photos"
+            className="flex h-8 w-8 items-center justify-center rounded-full text-[#6B7280] hover:bg-[#F3F4F6] cursor-pointer"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="flex flex-col gap-4 sm:flex-row">
+          <PhotoSlot title="Before" url={photos === null ? null : photos?.before_url} />
+          <PhotoSlot title="At the event" url={photos === null ? null : photos?.after_url} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Shelf events of the Dashboard filters, newest first: out of stock, low stock, depleted, restocked. */
-export function RecentActivitiesCard({ load, reloadKey, blockedText }: RecentActivitiesCardProps) {
+export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLine, canVerify, loadPhotos, saveVerdict }: RecentActivitiesCardProps) {
   const [kind, setKind] = useState<ActivityKind>("all");
   const [items, setItems] = useState<ApiShelfEvent[] | null>(null);
   const [allOpen, setAllOpen] = useState(false);
   const [all, setAll] = useState<ApiShelfEvent[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
+  const [chosen, setChosen] = useState<Record<string, ShelfVerdict>>({});
+  const [photoOf, setPhotoOf] = useState<ApiShelfEvent | null>(null);
+  const [photos, setPhotos] = useState<ApiEventPhotos | null | undefined>(undefined);
   const now = new Date();
+  const idOf = (item: ApiShelfEvent) => `${item.store_id}|${item.event_key}`;
+
+  const actions: RowActions = {
+    canVerify: canVerify && !!saveVerdict,
+    verdictOf: (item) => chosen[idOf(item)] ?? item.verdict,
+    onVerdict: (item, verdict) => {
+      if (!saveVerdict) return;
+      const before = chosen[idOf(item)];
+      setChosen((prev) => ({ ...prev, [idOf(item)]: verdict }));
+      saveVerdict(item.store_id, item.event_key, verdict).catch(() =>
+        setChosen((prev) => {
+          const next = { ...prev };
+          if (before) next[idOf(item)] = before;
+          else delete next[idOf(item)];
+          return next;
+        })
+      );
+    },
+    onPhotos: (item) => {
+      setPhotoOf(item);
+      setPhotos(undefined);
+      if (!loadPhotos) return setPhotos(null);
+      loadPhotos(item.store_id, item.event_key).then(setPhotos, () => setPhotos(null));
+    },
+  };
 
   useEffect(() => {
     if (!load) return;
@@ -94,6 +215,11 @@ export function RecentActivitiesCard({ load, reloadKey, blockedText }: RecentAct
         <p className="mt-[2px] text-[11.5px] leading-[1.4] text-[#9CA3AF]">
           Changes on the shelf that held for two checks in a row (10 minutes), opening hours only.
         </p>
+        {accuracyLine && (
+          <p data-alert-accuracy className="mt-[4px] text-[12px] font-medium leading-[1.4] text-[#374151]">
+            {accuracyLine}
+          </p>
+        )}
         <div className="mt-[8px] flex flex-wrap items-center gap-[8px]">
           {FILTER_OPTIONS.map((opt) => (
             <button
@@ -121,7 +247,7 @@ export function RecentActivitiesCard({ load, reloadKey, blockedText }: RecentAct
         ) : (
           <div className="divide-y divide-[#EFF0F6]">
             {items.map((item) => (
-              <EventRow key={`${item.store_id}|${item.event_key}`} item={item} now={now} />
+              <EventRow key={idOf(item)} item={item} now={now} actions={actions} />
             ))}
           </div>
         )}
@@ -175,7 +301,7 @@ export function RecentActivitiesCard({ load, reloadKey, blockedText }: RecentAct
               {all.length === 0 ? (
                 <p className="py-6 text-center text-[13px] text-[#6B7280]">{empty}</p>
               ) : (
-                all.map((item) => <EventRow key={`${item.store_id}|${item.event_key}`} item={item} now={now} />)
+                all.map((item) => <EventRow key={idOf(item)} item={item} now={now} actions={actions} />)
               )}
             </div>
             {cursor && (
@@ -192,6 +318,7 @@ export function RecentActivitiesCard({ load, reloadKey, blockedText }: RecentAct
           </div>
         </div>
       )}
+      {photoOf && <PhotosDialog item={photoOf} photos={photos} onClose={() => setPhotoOf(null)} />}
     </div>
   );
 }

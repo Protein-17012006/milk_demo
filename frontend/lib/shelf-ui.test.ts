@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ApiShelfEvent } from "./api";
-import { blockedText, coverageText, dashboardQuery, displayBanner, gapText, eventLabel, eventText, oosDurationText, pctChange, ptsChange, timeAgo } from "./shelf-ui.ts";
+import { alertAccuracyText, blockedText, coverageText, dashboardQuery, displayBanner, gapText, eventLabel, eventText, oosDurationText, pctChange, ptsChange, timeAgo } from "./shelf-ui.ts";
 
 function ev(type: ApiShelfEvent["type"], delta: number, levelAfter: number): ApiShelfEvent {
   return {
@@ -120,4 +120,24 @@ test("a camera that never saw the display has no last check to point to", () => 
     displayBanner([{ camera_id: "A", store_id: "DEMO-S01", visible: false, since: "2026-11-23T20:45:00+07:00", last_visible_at: null }]),
     "A cannot see the display since 20:45 — there is no earlier check to show"
   );
+});
+
+test("alert accuracy says how many were right, and the unsure ones apart", () => {
+  assert.equal(
+    alertAccuracyText({ value: 0.7, n: 10, unsure: 1, blocked_reason: null }),
+    "Alerts confirmed right: 7 of 10 (1 unsure)"
+  );
+  assert.equal(alertAccuracyText({ value: 0.8, n: 10, unsure: 0, blocked_reason: null }), "Alerts confirmed right: 8 of 10");
+});
+
+test("alert accuracy asks for more confirmations instead of showing a share", () => {
+  assert.equal(
+    alertAccuracyText({ value: null, blocked_reason: "few_verified", n: 3, unsure: 0 }),
+    "Confirm 7 more alerts to see how often they are right"
+  );
+  assert.equal(
+    alertAccuracyText({ value: null, blocked_reason: "few_verified", n: 9, unsure: 2 }),
+    "Confirm 1 more alert to see how often they are right"
+  );
+  assert.equal(alertAccuracyText(undefined), null);
 });

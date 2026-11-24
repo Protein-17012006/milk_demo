@@ -663,6 +663,8 @@ def _handle_kpi(event: dict[str, Any], ddb) -> dict[str, Any]:
 
 TOP_50_NOTE = "All SKUs: Datagent has not sent a top-50 list yet"
 ALERT_TYPES = {"OOS", "LOW_STOCK", "DEPLETED"}
+ALERT_MIN_VERIFIED = 10
+VERDICTS = {"right", "wrong", "unsure"}
 TREND_METRICS = {"total_stock", "oos", "accuracy", "restock_volume", "osa"}
 
 
@@ -811,6 +813,49 @@ def _coverage(open_stores: list[dict[str, Any]], current: dict[str, Any], days: 
     }
 
 
+def _event_floor(days: int) -> str:
+    return (_now() - timedelta(days=days - 1)).strftime("%Y%m%d") + "-0000"
+
+
+def _events_of(ddb, store_id: str, first: str) -> list[dict[str, Any]]:
+    """A store's shelf events from `first` on. Event keys start with a digit; verdict# items sort after them."""
+    cond = Key("store_id").eq(store_id) & Key("event_key").between(first, "9")
+    return _query_all(ddb.Table(SHELF_EVENTS_TABLE), KeyConditionExpression=cond)
+
+
+def _verdicts_of(ddb, store_id: str) -> dict[str, dict[str, Any]]:
+    """The store's verdicts by the event_key they are about."""
+    cond = Key("store_id").eq(store_id) & Key("event_key").begins_with("verdict#")
+    items = _query_all(ddb.Table(SHELF_EVENTS_TABLE), KeyConditionExpression=cond)
+    return {i["event_key"][len("verdict#") :]: i for i in items}
+
+
+def _alert_accuracy(ddb, stores: list[dict[str, Any]], days: int) -> dict[str, Any]:
+    """How often alerts were confirmed right: right / (right + wrong) over the events still in the range that
+    have a verdict. Unsure is counted apart, not in the share or in the threshold."""
+    by_type: dict[str, dict[str, int]] = {}
+    for store in stores:
+        verdicts = _verdicts_of(ddb, store["store_id"])
+        if not verdicts:
+            continue
+        for item in _events_of(ddb, store["store_id"], _event_floor(days)):
+            verdict = (verdicts.get(item["event_key"]) or {}).get("verdict")
+            if verdict in VERDICTS:
+                counts = by_type.setdefault(item["type"], {"right": 0, "wrong": 0, "unsure": 0})
+                counts[verdict] += 1
+    right = sum(c["right"] for c in by_type.values())
+    wrong = sum(c["wrong"] for c in by_type.values())
+    n = right + wrong
+    enough = n >= ALERT_MIN_VERIFIED
+    return {
+        "value": _r(right / n, 4) if enough else None,
+        "n": n,
+        "unsure": sum(c["unsure"] for c in by_type.values()),
+        "by_type": by_type,
+        "blocked_reason": None if enough else "few_verified",
+    }
+
+
 def _shelf_kpis(ddb, params: dict[str, Any]) -> dict[str, Any]:
     """OSA, restock rate, out-of-stock now and top-50 accuracy for the Dashboard filters (days, store_id,
     category). A number the data cannot give is None with a blocked_reason."""
@@ -846,6 +891,7 @@ def _shelf_kpis(ddb, params: dict[str, Any]) -> dict[str, Any]:
         }
         out["oos_now"] = _oos_now(ddb, open_stores, skus)
         out["coverage"] = _coverage(open_stores, current, days)
+    out["alert_accuracy"] = _alert_accuracy(ddb, stores, days)
     audits = _done_audits(ddb, stores, days)
     value = kpis(audits, [])["sku_identification_accuracy"]["value"] if audits else None
     out["top_50_sku_accuracy"] = {
@@ -900,11 +946,11 @@ def _handle_shelf_events(event: dict[str, Any], ddb) -> dict[str, Any]:
     stores = _stores_for(ddb, params)
     master = {s["sku_id"]: s for s in _scan_all(ddb.Table(SKU_MASTER_TABLE))}
     skus = _category_skus(ddb, params.get("category"))
-    first = (_now() - timedelta(days=days - 1)).strftime("%Y%m%d") + "-0000"
+    first = _event_floor(days)
     items = []
     for store in stores:
-        cond = Key("store_id").eq(store["store_id"]) & Key("event_key").gte(first)
-        for item in _query_all(ddb.Table(SHELF_EVENTS_TABLE), KeyConditionExpression=cond):
+        verdicts = _verdicts_of(ddb, store["store_id"])
+        for item in _events_of(ddb, store["store_id"], first):
             if kind == "alerts" and item["type"] not in ALERT_TYPES:
                 continue
             if kind == "restocked" and item["type"] != "RESTOCKED":
@@ -912,6 +958,8 @@ def _handle_shelf_events(event: dict[str, Any], ddb) -> dict[str, Any]:
             if skus is not None and item["sku_id"] not in skus:
                 continue
             item.pop("expires_at", None)
+            if item["event_key"] in verdicts:
+                item["verdict"] = verdicts[item["event_key"]]["verdict"]
             item["store_name"] = store.get("store_name") or store["store_id"]
             item["sku_name"] = (master.get(item["sku_id"]) or {}).get("sku_name_vi") or item["sku_id"]
             items.append(item)
@@ -922,6 +970,61 @@ def _handle_shelf_events(event: dict[str, Any], ddb) -> dict[str, Any]:
     page = items[:limit]
     next_cursor = f"{page[-1]['event_key']}|{page[-1]['store_id']}" if len(items) > limit else None
     return _json_response(200, {"items": page, "next_cursor": next_cursor}, event)
+
+
+def _find_event(ddb, store_id: str, event_key: str) -> dict[str, Any] | None:
+    if not store_id or not event_key or event_key.startswith("verdict#"):
+        return None
+    item = ddb.Table(SHELF_EVENTS_TABLE).get_item(Key={"store_id": store_id, "event_key": event_key}).get("Item")
+    return from_dynamodb(item) if item else None
+
+
+def _handle_shelf_event_photos(event: dict[str, Any], s3, ddb) -> dict[str, Any]:
+    """Short-lived links to an event's two photos; null for a photo that was never kept or has expired."""
+    params = event.get("queryStringParameters") or {}
+    found = _find_event(ddb, params.get("store_id") or "", params.get("event_key") or "")
+    if not found:
+        return _json_response(404, {"error": "EVENT_NOT_FOUND"}, event)
+    urls = {}
+    for name in ("before", "after"):
+        key = found.get(f"photo_{name}_key") or ""
+        urls[f"{name}_url"] = None
+        if key and _object_exists(s3, key):
+            urls[f"{name}_url"] = _presign_frame(s3, key, ANALYTICS_BUCKET)
+    return _json_response(200, urls, event)
+
+
+def _object_exists(s3, key: str) -> bool:
+    try:
+        s3.head_object(Bucket=ANALYTICS_BUCKET, Key=key)
+    except ClientError:
+        return False
+    return True
+
+
+def _handle_put_shelf_event_verdict(event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
+    """The team says whether a shelf event was right. Body only: event keys hold spaces and '&'."""
+    body = _parse_body(event)
+    store_id, event_key, verdict = body.get("store_id"), body.get("event_key"), body.get("verdict")
+    if not (isinstance(store_id, str) and isinstance(event_key, str) and store_id and event_key):
+        return _json_response(400, {"error": "MISSING_FIELDS", "required": ["store_id", "event_key", "verdict"]}, event)
+    if verdict not in VERDICTS:
+        return _json_response(400, {"error": "INVALID_VERDICT", "allowed": sorted(VERDICTS)}, event)
+    found = _find_event(ddb, store_id, event_key)
+    if not found:
+        return _json_response(404, {"error": "EVENT_NOT_FOUND"}, event)
+    item = {
+        "store_id": store_id,
+        "event_key": f"verdict#{event_key}",
+        "verdict": verdict,
+        "verified_by": user["email"] or user["sub"],
+        "verified_at": datetime.now(ICT).isoformat(timespec="seconds"),
+        "type": found["type"],
+        "sku_id": found["sku_id"],
+        "at": found["at"],
+    }
+    ddb.Table(SHELF_EVENTS_TABLE).put_item(Item=to_dynamodb_safe(item))
+    return _json_response(200, {"event_key": event_key, "verdict": verdict, "verified_by": item["verified_by"]}, event)
 
 
 def _handle_reports_series(event: dict[str, Any], ddb) -> dict[str, Any]:
@@ -1557,6 +1660,15 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
 
         if method == "GET" and route_path == "/shelf-events":
             return _handle_shelf_events(event, ddb)
+
+        if method == "GET" and route_path == "/shelf-events/photos":
+            return _handle_shelf_event_photos(event, s3, ddb)
+
+        if method == "PUT" and route_path == "/shelf-events/verdict":
+            err = _require_groups(user, WRITE_CORRECTION_GROUPS, event)
+            if err:
+                return err
+            return _handle_put_shelf_event_verdict(event, user, ddb)
 
         if method == "GET" and route_path == "/settings":
             return _handle_get_settings(event, user, ddb)

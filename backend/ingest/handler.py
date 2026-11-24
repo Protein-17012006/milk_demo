@@ -12,6 +12,7 @@ Receives captures from:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -727,6 +728,67 @@ def _event_item(store_id: str, event: dict) -> dict:
     )
 
 
+def _head_exists(s3_client, bucket: str, key: str) -> bool:
+    try:
+        s3_client.head_object(Bucket=bucket, Key=key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+    return True
+
+
+def _copy_photo(s3_client, source: dict, dest_key: str) -> str | None:
+    """Copy one check's frame next to the event; the key when the photo is there, None when it cannot be kept
+    (the frame expired, no frame was saved, or S3 refused): the event is still written without that photo."""
+    try:
+        if _head_exists(s3_client, ANALYTICS_BUCKET, dest_key):
+            return dest_key
+        if not (source.get("image_key") and source.get("source_bucket")):
+            return None
+        s3_client.copy_object(
+            Bucket=ANALYTICS_BUCKET,
+            Key=dest_key,
+            CopySource={"Bucket": source["source_bucket"], "Key": source["image_key"]},
+        )
+        return dest_key
+    except ClientError as exc:
+        print(json.dumps({"event_photo_failed": dest_key, "error": repr(exc)}))
+        return None
+
+
+def _event_photos(s3_client, ddb_resource, store_id: str, event: dict[str, Any]) -> dict[str, str]:
+    """Copy the two photos of a shelf event (hub frames expire after 7 days): the check of the event (after) and
+    the last measured check with a frame before it (before). Returns photo_before_key and photo_after_key, each
+    left out when there is no photo. A photo already copied is kept, so a recompute copies nothing twice."""
+    if not ANALYTICS_BUCKET:
+        return {}
+    table = ddb_resource.Table(SHELF_TABLE)
+    digest = hashlib.sha1(event["event_key"].encode("utf-8")).hexdigest()[:16]
+    prefix = f"shelf-events/frames/{store_id}/{digest}"
+    out: dict[str, str] = {}
+    try:
+        after = from_dynamodb(table.get_item(Key={"store_id": store_id, "key": f"check#{event['at']}"}).get("Item"))
+        resp = table.query(
+            KeyConditionExpression=Key("store_id").eq(store_id) & Key("key").lt(f"check#{event['at']}"),
+            ScanIndexForward=False,
+            Limit=24,
+        )
+    except ClientError as exc:
+        print(json.dumps({"event_photo_failed": event["event_key"], "error": repr(exc)}))
+        return {}
+    earlier = [
+        c
+        for c in from_dynamodb(resp.get("Items", []))
+        if str(c["key"]).startswith("check#") and c.get("measurable", True) and c.get("image_key")
+    ]
+    for name, source in (("before", earlier[0] if earlier else {}), ("after", after or {})):
+        key = _copy_photo(s3_client, source, f"{prefix}-{name}.jpg")
+        if key:
+            out[f"photo_{name}_key"] = key
+    return out
+
+
 def _write_rollups(ddb_resource, store_id: str, hours: set[str]) -> None:
     """Rebuild hour# from the hour's checks and events, then day# from the day's hours. SET, so reruns agree."""
     table = ddb_resource.Table(SHELF_TABLE)
@@ -747,12 +809,12 @@ def _write_rollups(ddb_resource, store_id: str, hours: set[str]) -> None:
         table.put_item(Item=to_dynamodb_safe({**item, "expires_at": _expires(start, shelf.ROLLUP_TTL_DAYS)}))
 
 
-def _shelf_store_tick(ddb_resource, store: dict[str, Any], now_utc: datetime) -> int:
+def _shelf_store_tick(s3_client, ddb_resource, store: dict[str, Any], now_utc: datetime) -> int:
     """Work the store's closed buckets after the last one done (at most MAX_BUCKETS_PER_TICK); returns checks made."""
     store_id = store["store_id"]
     flag = store.get("shelf_recompute_requested_at")
     if flag:
-        done = shelf_recompute(ddb_resource, store_id, shelf.RECOMPUTE_DAYS, now_utc)
+        done = shelf_recompute(s3_client, ddb_resource, store_id, shelf.RECOMPUTE_DAYS, now_utc)
         try:
             ddb_resource.Table(STORE_LIST_TABLE).update_item(
                 Key={"store_id": store_id},
@@ -795,6 +857,7 @@ def _shelf_store_tick(ddb_resource, store: dict[str, Any], now_utc: datetime) ->
             events, last_measured = _apply_check(check, store, expected, skus_state, last_measured)
             table.put_item(Item=_check_item(store_id, check))
             for event in events:
+                event.update(_event_photos(s3_client, ddb_resource, store_id, event))
                 events_table.put_item(Item=_event_item(store_id, event))
                 hours.add(event["at"][:11])
             hours.add(bucket[:11])
@@ -829,16 +892,16 @@ def _shelf_store_tick(ddb_resource, store: dict[str, Any], now_utc: datetime) ->
     return made
 
 
-def shelf_tick(ddb_resource, now_utc: datetime) -> dict[str, Any]:
+def shelf_tick(s3_client, ddb_resource, now_utc: datetime) -> dict[str, Any]:
     """Every 5 minutes: each store's new checks, shelf state, events and rollups."""
     stores = _scan_all(ddb_resource.Table(STORE_LIST_TABLE))
     return {
         "action": "shelf_tick",
-        "stores": {s["store_id"]: _shelf_store_tick(ddb_resource, s, now_utc) for s in stores},
+        "stores": {s["store_id"]: _shelf_store_tick(s3_client, ddb_resource, s, now_utc) for s in stores},
     }
 
 
-def shelf_recompute(ddb_resource, store_id: str, days: int, now_utc: datetime) -> dict[str, Any]:
+def shelf_recompute(s3_client, ddb_resource, store_id: str, days: int, now_utc: datetime) -> dict[str, Any]:
     """Rebuild a store's last `days` days with its current shelf plan: checks from captures still kept, older
     checks as stored, then state, events and rollups replayed from scratch."""
     store = from_dynamodb(ddb_resource.Table(STORE_LIST_TABLE).get_item(Key={"store_id": store_id}).get("Item"))
@@ -890,6 +953,7 @@ def shelf_recompute(ddb_resource, store_id: str, days: int, now_utc: datetime) -
             check.update({k: stored[k] for k in display_fields if k in stored})
             events, last_measured = _apply_check(check, store, expected, skus_state, last_measured)
             for event in events:
+                event.update(_event_photos(s3_client, ddb_resource, store_id, event))
                 event_writer.put_item(Item=_event_item(store_id, event))
                 hours.add(event["at"][:11])
             writer.put_item(Item=_check_item(store_id, check))
@@ -905,10 +969,10 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
 
     # 0. Dashboard shelf metrics: EventBridge every 5 minutes, or a recompute run by hand
     if event.get("action") == "shelf_tick":
-        return shelf_tick(ddb_resource, _now_of(event))
+        return shelf_tick(s3_client, ddb_resource, _now_of(event))
     if event.get("action") == "shelf_recompute":
         days = int(event.get("days") or shelf.RECOMPUTE_DAYS)
-        return shelf_recompute(ddb_resource, event["store_id"], days, _now_of(event))
+        return shelf_recompute(s3_client, ddb_resource, event["store_id"], days, _now_of(event))
 
     # 1. EventBridge hourly run: first the Model page's frame to label and hourly health (light queries), then
     #    the official capture of the hour, which scans the whole captures table and may fail as it grows

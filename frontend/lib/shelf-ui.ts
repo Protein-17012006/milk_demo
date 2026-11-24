@@ -3,7 +3,7 @@
  * line a blocked card shows. Definitions: docs/superpowers/specs/2026-11-24-dashboard-shelf-metrics-design.md.
  */
 
-import type { ApiCoverage, ApiDisplayStatus, ApiShelfEvent, BlockedReason, ShelfEventType } from "./api";
+import type { ApiAlertAccuracy, ApiCoverage, ApiDisplayStatus, ApiShelfEvent, BlockedReason, ShelfEventType } from "./api";
 
 export const TIMEFRAMES: { label: string; days: number }[] = [
   { label: "Today", days: 1 },
@@ -13,6 +13,7 @@ export const TIMEFRAMES: { label: string; days: number }[] = [
 ];
 export const DEFAULT_DAYS = 14;
 
+const ALERT_MIN_VERIFIED = 10;
 const MINUS = "−";
 const signed = (n: number) => (n < 0 ? `${MINUS}${Math.abs(n)}` : `+${n}`);
 
@@ -107,6 +108,18 @@ export function gapText(e: { after_gap?: boolean; gap_from?: string; gap_to?: st
 export function coverageText(c: ApiCoverage): string {
   const base = `Measured ${c.measured_hours} h of ${c.open_hours} h open`;
   return c.display_away_hours > 0 ? `${base} · display not in view ${c.display_away_hours} h` : base;
+}
+
+/** Head line of Recent Shelf Activities: how often the alerts the team checked were right. Null without the
+ * number (an older backend). Below 10 confirmed events it says how many more are needed, never a percentage. */
+export function alertAccuracyText(a: (Partial<ApiAlertAccuracy> & { n: number }) | null | undefined): string | null {
+  if (!a) return null;
+  if (a.value == null || a.blocked_reason) {
+    const more = Math.max(1, ALERT_MIN_VERIFIED - a.n);
+    return `Confirm ${more} more ${more === 1 ? "alert" : "alerts"} to see how often they are right`;
+  }
+  const unsure = (a.unsure ?? 0) > 0 ? ` (${a.unsure} unsure)` : "";
+  return `Alerts confirmed right: ${Math.round(a.value * a.n)} of ${a.n}${unsure}`;
 }
 
 /** The time of day "HH:MM" of an ISO timestamp written in UTC+7. */

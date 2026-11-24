@@ -168,12 +168,30 @@ export interface ApiKpiResponse {
   // Hours of the period: measured, open, and open hours in which the camera could not see the display.
   // null when the store has no opening hours (an older backend leaves the field out).
   coverage?: ApiCoverage | null;
+  // How often confirmed alerts were right; value is null (blocked_reason "few_verified") below 10 confirmed events.
+  alert_accuracy?: ApiAlertAccuracy;
   top_50_sku_accuracy?: {
     value: number | null;
     n_frames: number;
     scope_note: string;
     blocked_reason: BlockedReason | null;
   };
+}
+
+export type ShelfVerdict = "right" | "wrong" | "unsure";
+
+export interface ApiAlertAccuracy {
+  value: number | null;
+  n: number; // right + wrong
+  unsure: number;
+  by_type?: Record<string, Record<ShelfVerdict, number>>;
+  blocked_reason: "few_verified" | null;
+}
+
+/** Links (valid 15 minutes) to the two photos of a shelf event; null for a photo that was not kept. */
+export interface ApiEventPhotos {
+  before_url: string | null;
+  after_url: string | null;
 }
 
 export interface ApiCoverage {
@@ -204,6 +222,7 @@ export interface ApiShelfEvent {
   after_gap?: boolean;
   gap_from?: string;
   gap_to?: string;
+  verdict?: ShelfVerdict; // what the team confirmed, once someone has
 }
 
 export interface ApiShelfEventsResponse {
@@ -586,6 +605,19 @@ export function createApiClient(getIdToken: TokenGetter) {
 
     getShelfEvents: (p: DashboardQuery = {}) =>
       requestWithAuth(`/shelf-events${dashboardQuery(p)}`, getIdToken) as Promise<ApiShelfEventsResponse>,
+
+    getShelfEventPhotos: (storeId: string, eventKey: string) =>
+      requestWithAuth(
+        `/shelf-events/photos?store_id=${encodeURIComponent(storeId)}&event_key=${encodeURIComponent(eventKey)}`,
+        getIdToken
+      ) as Promise<ApiEventPhotos>,
+
+    // The event key goes in the body: it holds spaces and "&".
+    saveShelfEventVerdict: (storeId: string, eventKey: string, verdict: ShelfVerdict) =>
+      requestWithAuth("/shelf-events/verdict", getIdToken, {
+        method: "PUT",
+        body: JSON.stringify({ store_id: storeId, event_key: eventKey, verdict }),
+      }) as Promise<{ event_key: string; verdict: ShelfVerdict }>,
 
     getShelfPlan: (storeId: string) =>
       requestWithAuth(`/stores/${encodeURIComponent(storeId)}/shelf-plan`, getIdToken) as Promise<ApiShelfPlan>,
