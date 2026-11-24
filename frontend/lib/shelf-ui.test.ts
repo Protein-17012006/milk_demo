@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ApiShelfEvent } from "./api";
-import { blockedText, dashboardQuery, eventLabel, eventText, pctChange, ptsChange, timeAgo } from "./shelf-ui.ts";
+import { blockedText, dashboardQuery, eventLabel, eventText, oosDurationText, pctChange, ptsChange, timeAgo } from "./shelf-ui.ts";
 
 function ev(type: ApiShelfEvent["type"], delta: number, levelAfter: number): ApiShelfEvent {
   return {
@@ -58,4 +58,11 @@ test("dashboard filters become the API query, leaving out what is not set", () =
   );
   assert.equal(dashboardQuery({ days: 7 }), "?days=7");
   assert.equal(dashboardQuery({}), "");
+});
+
+test("oosDurationText: only a RESTOCKED that ended an out-of-stock says how long; a missing field says nothing", () => {
+  assert.equal(oosDurationText({ duration_min: 80 }), " · out of stock 80 min");
+  assert.equal(oosDurationText({ duration_min: null }), "");
+  // DynamoDB drops empty fields, so OOS events reach the page without duration_min at all
+  assert.equal(oosDurationText({} as { duration_min?: number | null }), "");
 });

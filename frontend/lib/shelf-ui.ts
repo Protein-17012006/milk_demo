@@ -39,6 +39,12 @@ export function eventText(e: Pick<ApiShelfEvent, "type" | "delta" | "level_after
   }
 }
 
+/** " · out of stock 80 min" for a RESTOCKED that ended an out-of-stock; "" otherwise. The API leaves the field out
+ * when it is empty (DynamoDB keeps no nulls), so a missing field counts as none. */
+export function oosDurationText(e: { duration_min?: number | null }): string {
+  return typeof e.duration_min === "number" ? ` · out of stock ${e.duration_min} min` : "";
+}
+
 /** Age of a bucket "YYYYMMDD-HHMM" (UTC+7): "10 min ago", "1 hr ago", "2 days ago". */
 export function timeAgo(at: string, now: Date): string {
   const t = new Date(`${at.slice(0, 4)}-${at.slice(4, 6)}-${at.slice(6, 8)}T${at.slice(9, 11)}:${at.slice(11, 13)}:00+07:00`);

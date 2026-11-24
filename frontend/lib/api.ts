@@ -178,7 +178,7 @@ export interface ApiShelfEvent {
   delta: number;
   level_before: number;
   level_after: number;
-  duration_min: number | null;
+  duration_min?: number | null; // left out when empty: only a RESTOCKED that ended an out-of-stock has it
 }
 
 export interface ApiShelfEventsResponse {

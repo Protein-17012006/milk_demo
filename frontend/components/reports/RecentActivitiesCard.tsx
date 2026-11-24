@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import type { ApiShelfEvent, ApiShelfEventsResponse, ShelfEventType } from "@/lib/api";
-import { eventLabel, eventText, timeAgo } from "@/lib/shelf-ui";
+import { eventLabel, eventText, oosDurationText, timeAgo } from "@/lib/shelf-ui";
 
 export type ActivityKind = "all" | "alerts" | "restocked";
 
@@ -42,7 +42,7 @@ function EventRow({ item, now }: { item: ApiShelfEvent; now: Date }) {
       <span className="text-[12px] leading-[16px] text-[#6B7280]">{item.store_name}</span>
       <span className="text-[12px] font-medium leading-[16px] text-[#374151]">
         {eventText(item)}
-        {item.duration_min !== null ? ` · out of stock ${item.duration_min} min` : ""}
+        {oosDurationText(item)}
       </span>
     </article>
   );
