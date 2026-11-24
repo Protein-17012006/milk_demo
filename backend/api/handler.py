@@ -21,7 +21,16 @@ from typing import Any
 
 import boto3
 import shelf
-from audit_scoring import SKIP_REASONS, by_day, check_level, display_agreement, kpis, summarize, validate_labels
+from audit_scoring import (
+    SKIP_REASONS,
+    by_day,
+    check_level,
+    display_agreement,
+    kpis,
+    sku_reliability,
+    summarize,
+    validate_labels,
+)
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from common import (
@@ -290,6 +299,9 @@ def _handle_get_products(event: dict[str, Any], ddb) -> dict[str, Any]:
     else:
         filtered.sort(key=lambda x: x["unit_count"], reverse=True)
 
+    reliability = _reliability_by_name(ddb, _stores_for(ddb, params))
+    for p in filtered:
+        p["reliability"] = reliability.get(p["sku_id"]) or _no_reliability()
     return _json_response(
         200,
         {
@@ -302,6 +314,43 @@ def _handle_get_products(event: dict[str, Any], ddb) -> dict[str, Any]:
         },
         event,
     )
+
+
+RELIABILITY_DAYS = 14  # one Datagent cycle
+
+
+def _no_reliability() -> dict[str, Any]:
+    """The badge of a SKU no scoring frame has anything on: not enough samples, and no number."""
+    return {
+        "badge": "insufficient",
+        "named_right": None,
+        "found_right": None,
+        "true_units": 0,
+        "frames": 0,
+        "confused_as": None,
+    }
+
+
+def _reliability_by_name(ddb, stores: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Reliability badge per product name from the last RELIABILITY_DAYS days of done scoring frames: one pass per
+    request, computed with the same code as the Model page. `confused_as` is turned from a model label to a
+    product name. A decoration of /products and /shelf-events: when the frames cannot be read, every SKU shows as
+    not enough samples and the lists still answer."""
+    if not AUDITS_TABLE:
+        return {}
+    try:
+        audits = _done_audits(ddb, stores, RELIABILITY_DAYS)
+    except ClientError as exc:
+        print(json.dumps({"reliability_failed": repr(exc)}))
+        return {}
+    if not audits:
+        return {}
+    name_of = _sku_choices(ddb)
+    out = {}
+    for label, row in sku_reliability(audits).items():
+        confused = row["confused_as"]
+        out[name_of.get(label, label)] = {**row, "confused_as": name_of.get(confused, confused) if confused else None}
+    return out
 
 
 def _handle_get_product_detail(sku_id_raw: str, event: dict[str, Any], s3, ddb) -> dict[str, Any]:
@@ -947,6 +996,7 @@ def _handle_shelf_events(event: dict[str, Any], ddb) -> dict[str, Any]:
     master = {s["sku_id"]: s for s in _scan_all(ddb.Table(SKU_MASTER_TABLE))}
     skus = _category_skus(ddb, params.get("category"))
     first = _event_floor(days)
+    reliability = _reliability_by_name(ddb, stores)
     items = []
     for store in stores:
         verdicts = _verdicts_of(ddb, store["store_id"])
@@ -962,6 +1012,9 @@ def _handle_shelf_events(event: dict[str, Any], ddb) -> dict[str, Any]:
                 item["verdict"] = verdicts[item["event_key"]]["verdict"]
             item["store_name"] = store.get("store_name") or store["store_id"]
             item["sku_name"] = (master.get(item["sku_id"]) or {}).get("sku_name_vi") or item["sku_id"]
+            item["badge"] = (reliability.get(item["sku_id"]) or _no_reliability())["badge"]
+            if item["badge"] == "low":
+                item["uncertain"] = True
             items.append(item)
     items.sort(key=lambda e: (e["event_key"], e["store_id"]), reverse=True)
     cursor = params.get("cursor") or ""

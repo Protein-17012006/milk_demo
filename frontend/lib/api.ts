@@ -16,6 +16,18 @@ export class ApiError extends Error {
   }
 }
 
+export type ReliabilityBadge = "high" | "medium" | "low" | "insufficient";
+
+/** How far one SKU can be trusted, from the labelled scoring frames of the last 14 days. */
+export interface ApiReliability {
+  badge: ReliabilityBadge;
+  named_right: number | null; // boxes named this SKU and right / boxes named this SKU
+  found_right: number | null; // boxes named this SKU and right / true cans of it
+  true_units: number; // true cans of it in the frames that had one
+  frames: number; // frames with a true can
+  confused_as: string | null; // product name the model most often gave its true cans
+}
+
 export interface ApiProduct {
   sku_id: string;
   sku_name: string;
@@ -39,6 +51,7 @@ export interface ApiProduct {
   capture_id: string | null;
   capture_timestamp: string | null;
   processing_time_ms: number;
+  reliability?: ApiReliability; // older backends leave it out
 }
 
 export interface ApiProductsResponse {
@@ -223,6 +236,8 @@ export interface ApiShelfEvent {
   gap_from?: string;
   gap_to?: string;
   verdict?: ShelfVerdict; // what the team confirmed, once someone has
+  badge?: ReliabilityBadge; // reliability of the SKU; older backends leave it out
+  uncertain?: true; // set when the badge is "low"
 }
 
 export interface ApiShelfEventsResponse {
@@ -363,6 +378,7 @@ export interface ApiPerSkuRow {
   frames?: number; // frames with a true can
   days?: number; // days of those frames (UTC+7)
   enough?: boolean; // 10 frames, 20 true cans, 2 days
+  badge?: ReliabilityBadge;
 }
 
 export type DayPeriod = "morning" | "afternoon" | "evening";

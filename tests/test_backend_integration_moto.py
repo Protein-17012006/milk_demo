@@ -1784,3 +1784,82 @@ def test_a_network_failure_while_copying_a_photo_does_not_stop_the_tick(monkeypa
     event = _oos_event()
     assert "photo_before_key" not in event and "photo_after_key" not in event
     assert _shelf("state")["last_bucket"] == "20261121-1415"
+
+
+# --- reliability badge per SKU (reliability spec 1.3) ---
+
+
+def _put_cheese_frames(days: tuple[str, ...], per_day: int) -> None:
+    """Scoring frames, done: of 2 boxes named Cheese 1 is right and 1 is not a product; 2 boxes named Hot are really
+    Cheese. So Cheese is named right 1 of 2 and found right 1 of 3."""
+    boxes = [
+        {"box_id": i, "sku_id": sku, "conf": 0.9, "box": [i * 9, 0, 5, 5]}
+        for i, sku in ((1, "cheese145"), (2, "cheese145"), (3, "hot160"), (4, "hot160"))
+    ]
+    verdicts = [
+        {"box_id": 1, "verdict": "correct"},
+        {"box_id": 2, "verdict": "not_product"},
+        {"box_id": 3, "verdict": "wrong_sku", "true_sku_id": "cheese145"},
+        {"box_id": 4, "verdict": "wrong_sku", "true_sku_id": "cheese145"},
+    ]
+    for day in days:
+        for i in range(per_day):
+            _table("test-audits").put_item(
+                Item={
+                    "store_id": "DEMO-S01",
+                    "audit_id": f"AUD-CAM-S01-A-202611{day}-{10 + i:02d}",
+                    "status": "done",
+                    "purpose": "scoring",
+                    "capture_timestamp": f"2026-11-{day}T{10 + i:02d}:10:00+07:00",
+                    "ai_boxes_json": json.dumps(boxes),
+                    "verdicts_json": json.dumps(verdicts),
+                    "missed_json": "[]",
+                }
+            )
+
+
+@mock_aws
+def test_products_carry_reliability(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140000", [("cheese145", 5)])
+    body = _call(api, "GET", "/v1/products", groups="datagent")[1]
+    assert body["items"]
+    for p in body["items"]:  # no scoring frame yet
+        assert p["reliability"] == {
+            "badge": "insufficient",
+            "named_right": None,
+            "found_right": None,
+            "true_units": 0,
+            "frames": 0,
+            "confused_as": None,
+        }
+
+
+@mock_aws
+def test_products_and_events_carry_the_badge_from_14_days_of_scoring_frames(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140000", [("cheese145", 5)])
+    _at(api, monkeypatch, NOW)  # 2026-11-28
+    _put_cheese_frames(("20", "21"), 6)  # 12 frames, 36 true Cheese cans, two days: enough
+    _put_cheese_frames(("01",), 12)  # older than 14 days: left out
+    items = {p["sku_id"]: p for p in _call(api, "GET", "/v1/products", groups="datagent")[1]["items"]}
+    r = items[CHEESE]["reliability"]
+    assert (r["badge"], r["true_units"], r["frames"]) == ("low", 36, 12)
+    assert (r["named_right"], r["found_right"]) == (0.5, pytest.approx(1 / 3))
+    assert r["confused_as"] == HOT
+    for at, sku, kind in [("20261128-1000", CHEESE, "OOS"), ("20261128-1100", HOT, "OOS")]:
+        item = {"type": kind, "sku_id": sku, "at": at, "delta": -5, "level_before": 5, "level_after": 0}
+        _table("test-shelf-events").put_item(Item={"store_id": "DEMO-S01", "event_key": f"{at}#{sku}#{kind}", **item})
+    events = {e["sku_id"]: e for e in _call(api, "GET", "/v1/shelf-events", "datagent")[1]["items"]}
+    assert (events[CHEESE]["badge"], events[CHEESE]["uncertain"]) == ("low", True)
+    assert events[HOT]["badge"] == "insufficient" and "uncertain" not in events[HOT]
+
+
+@mock_aws
+def test_lists_still_answer_when_the_scoring_frames_cannot_be_read(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    for audits_table in ("", "no-such-table"):  # unset, and a table that does not exist
+        monkeypatch.setattr(api, "AUDITS_TABLE", audits_table)
+        body = _call(api, "GET", "/v1/products", groups="datagent")[1]
+        assert body["items"] and {p["reliability"]["badge"] for p in body["items"]} == {"insufficient"}
+        assert _call(api, "GET", "/v1/shelf-events", groups="datagent")[0] == 200

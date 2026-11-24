@@ -1,9 +1,10 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import Image from "next/image";
 import { Check, MoreHorizontal } from "lucide-react";
 import type { SkuProduct } from "@/lib/products-ui";
+import { BADGE_COLORS, badgeLabel, reliabilityText } from "@/lib/reliability-ui";
 
 export function getConfidenceColor(confidence: number): string {
   if (confidence >= 0.7) return "#1A932E";
@@ -40,12 +41,14 @@ export function ProductRow({
 }: ProductRowProps) {
   const barWidthPct = Math.min(100, Math.max(12, Math.round(item.confidence * 100)));
   const barColor = getConfidenceColor(item.confidence);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const reliability = item.reliability;
 
   return (
     <div
       data-sku-row
       data-sku-id={item.id}
-      className={`flex min-h-[72px] items-center rounded-[10px] px-[16px] py-[12px] transition-colors ${
+      className={`rounded-[10px] px-[16px] py-[12px] transition-colors ${
         nested ? "bg-[#FCFCFD]" : "bg-white"
       } ${
         selected
@@ -53,6 +56,7 @@ export function ProductRow({
           : "border border-[#EFF0F6] hover:border-[#D1D5DB]"
       }`}
     >
+      <div className="flex min-h-[48px] items-center">
       {/* Checkbox */}
       <div className="w-[32px] shrink-0 flex items-center">
         <button
@@ -86,13 +90,28 @@ export function ProductRow({
             className="h-full w-full object-cover"
           />
         </div>
-        <button
-          type="button"
-          onClick={onOpenDetails}
-          className="line-clamp-2 text-left text-[13px] font-semibold leading-[18px] text-[#111827] hover:text-[#EE730A] transition-colors cursor-pointer"
-        >
-          {item.name}
-        </button>
+        <div className="flex min-w-0 flex-col items-start gap-[4px]">
+          <button
+            type="button"
+            onClick={onOpenDetails}
+            className="line-clamp-2 text-left text-[13px] font-semibold leading-[18px] text-[#111827] hover:text-[#EE730A] transition-colors cursor-pointer"
+          >
+            {item.name}
+          </button>
+          {reliability && (
+            <button
+              type="button"
+              data-reliability={reliability.badge}
+              aria-expanded={detailsOpen}
+              aria-label={`Reliability of ${item.name}: ${badgeLabel(reliability.badge)}`}
+              title={reliabilityText(reliability)}
+              onClick={() => setDetailsOpen((open) => !open)}
+              className={`rounded-full px-[8px] py-[1px] text-[10.5px] font-semibold leading-tight cursor-pointer ${BADGE_COLORS[reliability.badge]}`}
+            >
+              {badgeLabel(reliability.badge)}
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Category Pills */}
@@ -229,6 +248,12 @@ export function ProductRow({
           </div>
         )}
       </div>
+      </div>
+      {reliability && detailsOpen && (
+        <p data-reliability-details className="mt-[8px] pl-[44px] text-[12px] leading-[16px] text-[#6B7280]">
+          {reliabilityText(reliability)}
+        </p>
+      )}
     </div>
   );
 }

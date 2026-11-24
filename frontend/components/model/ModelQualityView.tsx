@@ -35,6 +35,7 @@ import {
   type Tone,
 } from "@/lib/model-ui";
 import type { HealthMetric } from "@/lib/health-ui";
+import { BADGE_COLORS, badgeLabel, reliabilityText } from "@/lib/reliability-ui";
 import { AuditLabeler } from "./AuditLabeler";
 import { LiveHealth } from "./LiveHealth";
 
@@ -337,7 +338,7 @@ function ValueCell({ text, ci }: { text: string; ci: string }) {
 function PerSkuTable({ rows, nameOf }: { rows: ApiPerSkuRow[]; nameOf: NameOf }) {
   return (
     <div className="overflow-x-auto">
-      <table data-per-sku className="w-full min-w-[680px] text-left text-[13px]">
+      <table data-per-sku className="w-full min-w-[760px] text-left text-[13px]">
         <thead className="text-[11.5px] text-[#6B7280]">
           <tr>
             <th className="py-1 font-medium">SKU</th>
@@ -348,6 +349,7 @@ function PerSkuTable({ rows, nameOf }: { rows: ApiPerSkuRow[]; nameOf: NameOf })
             <th className={NUM_HEAD}>Bias / frame</th>
             <th className={NUM_HEAD}>Missed</th>
             <th className="pl-3 font-medium">Mostly mistaken for</th>
+            <th className="pl-3 font-medium">Reliability</th>
           </tr>
         </thead>
         <tbody>
@@ -377,6 +379,24 @@ function PerSkuTable({ rows, nameOf }: { rows: ApiPerSkuRow[]; nameOf: NameOf })
               <td className={NUM}>{r.missed_units}</td>
               <td className="py-1.5 pl-3 text-[#B91C1C]">
                 {r.confused_as ? `${nameOf(r.confused_as)} (${r.confused_count})` : ""}
+              </td>
+              <td className="py-1.5 pl-3">
+                {r.badge && (
+                  <span
+                    data-reliability={r.badge}
+                    title={reliabilityText({
+                      badge: r.badge,
+                      named_right: r.id_accuracy,
+                      found_right: r.found_right ?? null,
+                      true_units: r.true_units,
+                      frames: r.frames ?? 0,
+                      confused_as: null,
+                    })}
+                    className={`whitespace-nowrap rounded-full px-[8px] py-[1px] text-[10.5px] font-semibold ${BADGE_COLORS[r.badge]}`}
+                  >
+                    {badgeLabel(r.badge)}
+                  </span>
+                )}
               </td>
             </tr>
           ))}

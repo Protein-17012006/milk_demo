@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { ApiEventPhotos, ApiShelfEvent, ApiShelfEventsResponse, ShelfEventType, ShelfVerdict } from "@/lib/api";
+import { BADGE_COLORS, badgeLabel } from "@/lib/reliability-ui";
 import { eventLabel, eventText, gapText, oosDurationText, timeAgo } from "@/lib/shelf-ui";
 
 export type ActivityKind = "all" | "alerts" | "restocked";
@@ -60,6 +61,20 @@ function EventRow({ item, now, actions }: { item: ApiShelfEvent; now: Date; acti
           {eventLabel(item.type)}
         </span>
         <h3 className="truncate text-[13px] font-semibold leading-[18px] text-[#111827]">{item.sku_name}</h3>
+        {item.badge && (
+          <span
+            data-reliability={item.badge}
+            title="Reliability of this SKU, from the labelled frames of the last 14 days"
+            className={`shrink-0 rounded-full px-[8px] py-[1px] text-[10.5px] font-semibold leading-tight ${BADGE_COLORS[item.badge]}`}
+          >
+            {badgeLabel(item.badge)}
+          </span>
+        )}
+        {item.uncertain && (
+          <span data-uncertain className="shrink-0 text-[11px] font-medium italic text-[#DC2626]">
+            uncertain
+          </span>
+        )}
       </div>
       <span className="text-[12px] leading-[16px] text-[#9CA3AF]">{timeAgo(item.at, now)}</span>
       <span className="text-[12px] leading-[16px] text-[#6B7280]">{item.store_name}</span>

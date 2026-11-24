@@ -56,6 +56,9 @@ MISSED = "MISSED"
 
 # "Not enough samples" for a SKU below any of these: frames with a true unit, true units, days of those frames
 MIN_FRAMES, MIN_TRUE_UNITS, MIN_DAYS = 10, 20, 2
+# Reliability badge: both intervals of a SKU (named right, found right) start at or above BADGE_HIGH for "high", or
+# BADGE_MEDIUM for "medium"; below that "low"
+BADGE_HIGH, BADGE_MEDIUM = 0.90, 0.70
 BOOTSTRAP_SAMPLES, BOOTSTRAP_SEED = 400, 20261124
 ICT = timezone(timedelta(hours=7))
 PERIODS = ("morning", "afternoon", "evening")  # ICT hour of the frame: before 12, 12 to 17, from 17
@@ -372,6 +375,7 @@ def _per_sku(audits: list[dict], tallies: list[dict], days: list[str]) -> list[d
     out = []
     for sku in sorted(set(model_units) | set(true_units)):
         top = confused[sku].most_common(1)
+        row = _two_way(tallies, days, sku)
         out.append(
             {
                 "sku_id": sku,
@@ -381,7 +385,8 @@ def _per_sku(audits: list[dict], tallies: list[dict], days: list[str]) -> list[d
                 "missed_units": missed[sku],
                 "confused_as": top[0][0] if top else None,
                 "confused_count": top[0][1] if top else 0,
-                **_two_way(tallies, days, sku),
+                **row,
+                "badge": badge(row),
             }
         )
     return out
@@ -394,21 +399,66 @@ def _sample(tallies: list[dict], days: list[str], sku: str) -> tuple[int, int, i
     return sum(units for units, _ in seen), len(seen), len({day for _, day in seen})
 
 
-def _two_way(tallies: list[dict], days: list[str], sku: str) -> dict:
+def _two_way(tallies: list[dict], days: list[str], sku: str, with_bias: bool = True) -> dict:
     """Found right and the bias per frame of one SKU with their intervals, the interval of named right, and whether
-    there are enough samples to speak of it."""
+    there are enough samples to speak of it. with_bias=False leaves the bias out (its interval costs a resampling)."""
     named, found, bias = (_column(tallies, f"{kind}:{sku}") for kind in ("named_right", "found_right", "bias"))
     true_units, frames, n_days = _sample(tallies, days, sku)
-    return {
+    out = {
         "found_right": _value(found),
         "found_right_ci": ratio_ci(found),
         "id_accuracy_ci": ratio_ci(named),
-        "bias_per_frame": _value(bias),
-        "bias_per_frame_ci": ratio_ci(bias),
         "frames": frames,
         "days": n_days,
         "enough": enough(frames, true_units, n_days),
     }
+    if with_bias:
+        out.update(bias_per_frame=_value(bias), bias_per_frame_ci=ratio_ci(bias))
+    return out
+
+
+def badge(row: dict) -> str:
+    """Reliability of one SKU: "insufficient" below the sample rule or without both intervals; else the lower ends of
+    the intervals of named right and found right decide: both from BADGE_HIGH "high", both from BADGE_MEDIUM
+    "medium", otherwise "low"."""
+    named, found = row.get("id_accuracy_ci"), row.get("found_right_ci")
+    if not row.get("enough") or not named or not found:
+        return "insufficient"
+    low = min(named[0], found[0])
+    return "high" if low >= BADGE_HIGH else "medium" if low >= BADGE_MEDIUM else "low"
+
+
+def _often_read_as(cells: Mapping[str, int], sku: str) -> str | None:
+    """The label the model most often gave to the true cans of `sku` (confusion cells "given|true"), None when it
+    never gave them another label; ties go to the first label in order."""
+    given: Counter = Counter()
+    for key, n in cells.items():
+        label, _, true = key.rpartition("|")
+        if true == sku and label not in (sku, UNRECOGNIZED, MISSED):
+            given[label] += n
+    return min(given, key=lambda lb: (-given[lb], lb)) if given else None
+
+
+def sku_reliability(audits: list[dict]) -> dict[str, dict]:
+    """What the reliability badge of each model label needs, from these frames and nothing more (no KPIs, no bias):
+    {label: {badge, named_right, found_right, true_units, frames, confused_as}}. A number without samples is None;
+    true_units and frames are the sample the badge is judged on."""
+    tallies = [frame_tallies(a) for a in audits]
+    days = [_day_of(a) for a in audits]
+    cells = _confusion(audits)["cells"]
+    skus = sorted({k.split(":", 1)[1] for t in tallies for k in t if k.startswith("found_right:")})
+    out = {}
+    for sku in skus:
+        row = _two_way(tallies, days, sku, with_bias=False)
+        out[sku] = {
+            "badge": badge(row),
+            "named_right": _value(_column(tallies, f"named_right:{sku}")),
+            "found_right": row["found_right"],
+            "true_units": _sample(tallies, days, sku)[0],
+            "frames": row["frames"],
+            "confused_as": _often_read_as(cells, sku),
+        }
+    return out
 
 
 def _confusion(audits: list[dict]) -> dict:

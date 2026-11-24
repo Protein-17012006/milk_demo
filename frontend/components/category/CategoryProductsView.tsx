@@ -200,6 +200,7 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
       mismatchType: "None",
       reviewedAt: null,
     },
+    reliability: p.reliability,
   };
 }
 

@@ -1,6 +1,8 @@
 // Labels and row types for the Products (category) page.
 // Every product row comes from the live API (GET /products); this file holds no shelf data.
 
+import type { ApiReliability } from "./api";
+
 export type PrimaryCategory = "Milk" | "Snack" | "Noodles";
 export type CategoryFilterOption = "All" | PrimaryCategory;
 export type ProductStatus = "Validated" | "Needs Review" | "Low Confidence";
@@ -101,4 +103,6 @@ export interface SkuProduct {
   detailFetchedAt: number | null;
   cvOutput: CvOutputRow;
   audit: SkuAudit;
+  /** Reliability badge from the last 14 days of labelled frames; absent from older backends. */
+  reliability?: ApiReliability;
 }

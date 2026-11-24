@@ -20,6 +20,7 @@ from audit_scoring import (  # noqa: E402
     MIN_DAYS,
     MIN_FRAMES,
     MIN_TRUE_UNITS,
+    badge,
     check_level,
     comparison_rows,
     display_agreement,
@@ -27,6 +28,7 @@ from audit_scoring import (  # noqa: E402
     frame_tallies,
     period_of,
     ratio_ci,
+    sku_reliability,
     summarize,
     validate_labels,
 )
@@ -455,3 +457,73 @@ def test_no_frames_give_no_new_numbers():
     assert s["presence"]["agree"] == {"value": None, "ci": None, "n": 0}
     assert all(p["frames"] == 0 and p["per_sku"] == {} for p in s["by_period"].values())
     assert s["kpis"]["unit_count_mae"]["ci"] is None
+
+
+def _row(enough=True, named=(0.92, 0.97), found=(0.91, 0.99)):
+    return {"enough": enough, "id_accuracy_ci": list(named), "found_right_ci": list(found)}
+
+
+def test_badges():
+    assert badge(_row(enough=False)) == "insufficient"
+    assert badge(_row()) == "high"
+    assert badge(_row(found=(0.72, 0.9))) == "medium"
+    assert badge(_row(named=(0.55, 0.8))) == "low"
+    assert badge({"enough": True, "id_accuracy_ci": None, "found_right_ci": [0.9, 1.0]}) == "insufficient"
+
+
+def _frames_of_cheese(days: tuple[str, ...], per_day: int) -> list[dict]:
+    """Frames of one Cheese story: of 2 boxes named Cheese 1 is right and 1 is not a product; 2 boxes named Hot
+    are really Cheese. True Cheese cans per frame: 3."""
+    out = []
+    for day in days:
+        for i in range(per_day):
+            out.append(
+                {
+                    "store_id": "S1",
+                    "capture_timestamp": f"2026-11-{day}T1{i % 10}:10:00+07:00",
+                    "ai_boxes": [
+                        {"box_id": 1, "sku_id": "cheese145", "conf": 0.9, "box": [0, 0, 5, 5]},
+                        {"box_id": 2, "sku_id": "cheese145", "conf": 0.9, "box": [9, 0, 5, 5]},
+                        {"box_id": 3, "sku_id": "hot160", "conf": 0.9, "box": [18, 0, 5, 5]},
+                        {"box_id": 4, "sku_id": "hot160", "conf": 0.9, "box": [27, 0, 5, 5]},
+                    ],
+                    "verdicts": [
+                        {"box_id": 1, "verdict": "correct"},
+                        {"box_id": 2, "verdict": "not_product"},
+                        {"box_id": 3, "verdict": "wrong_sku", "true_sku_id": "cheese145"},
+                        {"box_id": 4, "verdict": "wrong_sku", "true_sku_id": "cheese145"},
+                    ],
+                    "missed": [],
+                }
+            )
+    return out
+
+
+def test_sku_reliability_counts_and_what_a_sku_is_read_as():
+    audits = _frames_of_cheese(("22", "23"), 6)  # 12 frames, 3 true Cheese cans each = 36
+    rel = sku_reliability(audits)
+    cheese = rel["cheese145"]
+    assert cheese["badge"] == "low"  # found right 1 of 3, named right 1 of 2
+    assert (cheese["true_units"], cheese["frames"]) == (36, 12)
+    assert cheese["found_right"] == pytest.approx(1 / 3) and cheese["named_right"] == 0.5
+    assert cheese["confused_as"] == "hot160"  # its true cans were most often called Hot
+    hot = rel["hot160"]  # never really on the shelf: nothing to be found, so not enough samples
+    assert (hot["badge"], hot["true_units"], hot["frames"], hot["confused_as"]) == ("insufficient", 0, 0, None)
+
+
+def test_sku_reliability_is_insufficient_on_one_day_and_without_audits():
+    one_day = sku_reliability(_frames_of_cheese(("22",), 12))["cheese145"]
+    assert one_day["badge"] == "insufficient" and one_day["true_units"] == 36  # n is still given
+    assert sku_reliability([]) == {}
+
+
+def test_per_sku_rows_carry_a_badge():
+    rows = {r["sku_id"]: r for r in summarize(_frames_of_cheese(("22", "23"), 6), [])["per_sku"]}
+    assert rows["cheese145"]["badge"] == sku_reliability(_frames_of_cheese(("22", "23"), 6))["cheese145"]["badge"]
+
+
+def test_sku_reliability_of_14_days_is_quick():
+    audits = _frames_of_cheese(tuple(f"{d:02d}" for d in range(10, 24)), 16)  # 14 days x 16 frames
+    start = time.perf_counter()
+    sku_reliability(audits)
+    assert time.perf_counter() - start < 1.0
