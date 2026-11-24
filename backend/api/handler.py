@@ -297,6 +297,7 @@ def _handle_get_products(event: dict[str, Any], ddb) -> dict[str, Any]:
             "unrecognized_units": unrecognized_units,
             "stores_total": total_stores,
             "flag_threshold": MILK_FLAG_THRESHOLD,
+            "displays": _display_statuses(ddb, _stores_for(ddb, params)),
         },
         event,
     )
@@ -766,6 +767,42 @@ def _oos_now(ddb, stores: list[dict[str, Any]], skus: set[str] | None) -> dict[s
     return {"count": count, "as_of": as_of, "blocked_reason": None}
 
 
+def _hours(checks: int) -> float:
+    """Hours of that many 5-minute checks, 1 decimal."""
+    return round(checks * shelf.BUCKET_MINUTES / 60, 1)
+
+
+def _display_statuses(ddb, stores: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per camera: does it see the display cabinet, since when, and when it last did."""
+    rows = []
+    for store in stores:
+        cond = Key("store_id").eq(store["store_id"]) & Key("key").begins_with("display#")
+        for item in _query_all(ddb.Table(SHELF_TABLE), KeyConditionExpression=cond):
+            rows.append(
+                {
+                    "camera_id": item.get("camera_id") or item["key"].split("#", 1)[1],
+                    "store_id": store["store_id"],
+                    "visible": item.get("visible", True) is not False,
+                    "since": item.get("since"),
+                    "last_visible_at": item.get("last_visible_at"),
+                }
+            )
+    return sorted(rows, key=lambda r: (r["store_id"], r["camera_id"]))
+
+
+def _coverage(open_stores: list[dict[str, Any]], current: dict[str, Any], days: int) -> dict[str, float]:
+    """Hours measured, hours the display was out of view, and hours the stores were open up to the last closed check."""
+    now = _now()
+    first = (now - timedelta(days=days - 1)).strftime("%Y%m%d") + "-0000"
+    last = shelf.add_buckets(shelf.bucket_of(now.isoformat()), -1)
+    open_checks = sum(shelf.open_buckets(s["open_time"], s["close_time"], first, last) for s in open_stores)
+    return {
+        "measured_hours": _hours(current["store_checks"]),
+        "open_hours": _hours(open_checks),
+        "display_away_hours": _hours(current["unmeasured_checks"]),
+    }
+
+
 def _shelf_kpis(ddb, params: dict[str, Any]) -> dict[str, Any]:
     """OSA, restock rate, out-of-stock now and top-50 accuracy for the Dashboard filters (days, store_id,
     category). A number the data cannot give is None with a blocked_reason."""
@@ -779,6 +816,7 @@ def _shelf_kpis(ddb, params: dict[str, Any]) -> dict[str, Any]:
         out["osa"] = {"value": None, "previous": None, **blocked}
         out["restock_rate"] = {"units_per_day": None, "previous_units_per_day": None, "change_pct": None, **blocked}
         out["oos_now"] = {"count": None, "as_of": None, **blocked}
+        out["coverage"] = None
     else:
         current_keys, previous_keys = _windows(days)
         current = shelf.totals([i for v in _rollups_by_key(ddb, open_stores, current_keys).values() for i in v], skus)
@@ -799,6 +837,7 @@ def _shelf_kpis(ddb, params: dict[str, Any]) -> dict[str, Any]:
             "blocked_reason": reason,
         }
         out["oos_now"] = _oos_now(ddb, open_stores, skus)
+        out["coverage"] = _coverage(open_stores, current, days)
     audits = _done_audits(ddb, stores, days)
     value = summarize(audits, [])["kpis"]["sku_identification_accuracy"]["value"] if audits else None
     out["top_50_sku_accuracy"] = {
@@ -825,7 +864,7 @@ def _handle_reports_trends(event: dict[str, Any], ddb) -> dict[str, Any]:
             d["day"]: d["overall_identification_accuracy"]
             for d in summarize(_done_audits(ddb, stores, days), [])["by_day"]
         }
-        points = [{"t": date, "value": by_day.get(date)} for date in dates]
+        points = [{"t": date, "value": by_day.get(date), "unmeasured_hours": None} for date in dates]
     else:
         skus = _category_skus(ddb, params.get("category"))
         by_key = _rollups_by_key(ddb, _with_hours(stores), keys)
@@ -840,7 +879,7 @@ def _handle_reports_trends(event: dict[str, Any], ddb) -> dict[str, Any]:
                     "oos": t["oos_started"],
                     "restock_volume": t["restock_units"],
                 }[metric]
-            points.append({"t": _point_label(key), "value": value})
+            points.append({"t": _point_label(key), "value": value, "unmeasured_hours": _hours(t["unmeasured_checks"])})
     return _json_response(200, {"metric": metric, "days": days, "points": points}, event)
 
 
@@ -898,6 +937,7 @@ def _handle_reports_series(event: dict[str, Any], ddb) -> dict[str, Any]:
                     "avg_units": _r(t["avg_total_units"], 1),
                     "max_units": max(int(i.get("max_total", 0)) for i in items),
                     "checks": t["store_checks"],
+                    "unmeasured_hours": _hours(t["unmeasured_checks"]),
                 }
             )
     return _json_response(200, {"series": series}, event)

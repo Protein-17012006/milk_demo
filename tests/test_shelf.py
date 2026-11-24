@@ -17,6 +17,7 @@ from shelf import (  # noqa: E402
     gap_between,
     is_open,
     merge,
+    open_buckets,
     rollup,
     step_state,
     totals,
@@ -330,3 +331,11 @@ def test_unmeasured_open_checks_are_counted_apart():
     r = rollup([c], [])
     assert (r["checks"], r["unmeasured_checks"], "A" in r["skus"]) == (0, 1, False)
     assert totals([r])["unmeasured_checks"] == 1
+
+
+def test_open_buckets_counts_five_minute_checks_inside_the_hours():
+    assert open_buckets("08:00", "20:30", "20261123-0000", "20261123-2355") == 150
+    assert open_buckets("08:00", "20:30", "20261123-0800", "20261123-0810") == 3
+    assert open_buckets(None, None, "20261123-0000", "20261123-2355") == 0
+    assert open_buckets("08:00", "20:30", "20261123-0000", "20261124-2355") == 300  # two days
+    assert open_buckets("08:00", "20:30", "20261124-0000", "20261123-2355") == 0  # last before first

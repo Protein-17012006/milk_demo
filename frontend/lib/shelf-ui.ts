@@ -3,7 +3,7 @@
  * line a blocked card shows. Definitions: docs/superpowers/specs/2026-11-24-dashboard-shelf-metrics-design.md.
  */
 
-import type { ApiShelfEvent, BlockedReason, ShelfEventType } from "./api";
+import type { ApiCoverage, ApiDisplayStatus, ApiShelfEvent, BlockedReason, ShelfEventType } from "./api";
 
 export const TIMEFRAMES: { label: string; days: number }[] = [
   { label: "Today", days: 1 },
@@ -87,6 +87,44 @@ export function blockedText(reason: BlockedReason | string, storeName?: string):
     default:
       return "No data yet";
   }
+}
+
+/** "20:30" for the end of bucket "YYYYMMDD-HHMM" (its start plus 5 minutes). */
+function bucketEnd(bucket: string): string {
+  const total = Number(bucket.slice(9, 11)) * 60 + Number(bucket.slice(11, 13)) + 5;
+  const h = Math.floor(total / 60) % 24;
+  return `${String(h).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+/** "between 20:30 and 08:45 (not measured)" for an event that came after a gap, from the end of the last measured
+ * check before it to the start of the first one after; null for an event with no gap. */
+export function gapText(e: { after_gap?: boolean; gap_from?: string; gap_to?: string }): string | null {
+  if (!e.after_gap || !e.gap_from || !e.gap_to) return null;
+  return `between ${bucketEnd(e.gap_from)} and ${e.gap_to.slice(9, 11)}:${e.gap_to.slice(11, 13)} (not measured)`;
+}
+
+/** "Measured 9.5 h of 12.5 h open · display not in view 1 h"; the second part only when the display was away. */
+export function coverageText(c: ApiCoverage): string {
+  const base = `Measured ${c.measured_hours} h of ${c.open_hours} h open`;
+  return c.display_away_hours > 0 ? `${base} · display not in view ${c.display_away_hours} h` : base;
+}
+
+/** The time of day "HH:MM" of an ISO timestamp written in UTC+7. */
+const clock = (iso: string) => iso.slice(11, 16);
+
+/** One line for each camera that cannot see the display; null when every camera does. After captures out of order
+ * `since` can come before `last_visible_at`, so the line starts at the later of the two. */
+export function displayBanner(displays: ApiDisplayStatus[]): string | null {
+  const lines = displays
+    .filter((d) => !d.visible)
+    .map((d) => {
+      const last = d.last_visible_at;
+      const since = d.since && last && last > d.since ? last : (d.since ?? last);
+      const from = since ? ` since ${clock(since)}` : "";
+      const tail = last ? `numbers below are from the last check at ${clock(last)}` : "there is no earlier check to show";
+      return `${d.camera_id} cannot see the display${from} — ${tail}`;
+    });
+  return lines.length ? lines.join("\n") : null;
 }
 
 export interface DashboardQuery {

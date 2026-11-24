@@ -16,6 +16,7 @@ import { useAuth } from "@/lib/auth";
 import {
   createApiClient,
   type ApiProduct,
+  type ApiDisplayStatus,
   type ApiReviewQueueItem,
   type ApiStore,
 } from "@/lib/api";
@@ -37,6 +38,7 @@ import { ProductRow } from "./ProductRow";
 import { ProductGroupRow } from "./ProductGroupRow";
 import { ReviewBanner, ReviewQueueDialog } from "./ReviewQueue";
 import { groupProducts, groupSelection, type ProductGroup } from "@/lib/product-groups";
+import { displayBanner } from "@/lib/shelf-ui";
 
 interface ToolbarDropdownProps<T extends string> {
   label: string;
@@ -211,6 +213,7 @@ export function CategoryProductsView() {
   const [unrecognizedCount, setUnrecognizedCount] = useState<number | null>(null);
   const [liveStores, setLiveStores] = useState<ApiStore[] | null>(null);
   const [liveQueue, setLiveQueue] = useState<ApiReviewQueueItem[] | null>(null);
+  const [displays, setDisplays] = useState<ApiDisplayStatus[]>([]);
   const [localSearch, setLocalSearch] = useState("");
   const [storeFilter, setStoreFilter] = useState<string>(ALL_STORES_LABEL);
   const [categoryFilter, setCategoryFilter] =
@@ -240,6 +243,7 @@ export function CategoryProductsView() {
       setLiveMode(false);
       setLiveStores(null);
       setLiveQueue(null);
+      setDisplays([]);
       setProducts([]);
       setUnrecognizedCount(null);
       setStoreFilter(ALL_STORES_LABEL);
@@ -256,6 +260,7 @@ export function CategoryProductsView() {
       setProducts(mapped);
       setLiveStores(storeRes.items);
       setLiveQueue(queueRes.items);
+      setDisplays(prodRes.displays ?? []);
       setUnrecognizedCount(prodRes.unrecognized_units);
       if (!background) {
         setStoreFilter(`${ALL_STORES_LABEL} (${storeRes.total})`);
@@ -279,6 +284,8 @@ export function CategoryProductsView() {
     }, LIVE_REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [isApproved, loadLiveData]);
+
+  const displayLine = useMemo(() => displayBanner(displays), [displays]);
 
   const storeDropdownOptions = useMemo(() => {
     if (!liveStores) return [ALL_STORES_LABEL];
@@ -743,6 +750,17 @@ export function CategoryProductsView() {
             />
           </div>
         </section>
+
+        {/* Cameras that cannot see the display: the numbers below are from the last check that did (live only) */}
+        {displayLine && (
+          <p
+            data-display-banner
+            role="status"
+            className="mt-[12px] whitespace-pre-line rounded-[10px] border border-[#FDE68A] bg-[#FFFBEB] px-[14px] py-[10px] text-[12.5px] leading-[1.45] text-[#92400E]"
+          >
+            {displayLine}
+          </p>
+        )}
 
         {/* Review queue: doubtful readings waiting for a person (live only) */}
         {liveQueue !== null && (

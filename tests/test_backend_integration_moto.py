@@ -691,6 +691,7 @@ def test_end_to_end_ingest_review_and_export_with_moto(monkeypatch: pytest.Monke
     monkeypatch.setenv("STORE_LIST_TABLE", "test-store-list")
     monkeypatch.setenv("CORRECTIONS_TABLE", "test-corrections")
     monkeypatch.setenv("USER_PREFS_TABLE", "test-user-prefs")
+    monkeypatch.setenv("SHELF_TABLE", "test-shelf")  # /products lists the cameras that cannot see the display
     monkeypatch.setenv("ANALYTICS_BUCKET", "test-analytics-bucket")
     monkeypatch.setenv("HUB_BUCKET", "test-analytics-bucket")
 
@@ -1180,7 +1181,9 @@ def test_series_reads_day_rollups(monkeypatch: pytest.MonkeyPatch):
     _put_shelf("day#20261127", **_rollup_item(2, 2, 0, units_sum=8, max_total=7))
     status, body = _call(api, "GET", "/v1/reports/series", groups="datagent")
     assert status == 200
-    assert body["series"] == [{"date": "2026-11-27", "avg_units": 4.0, "max_units": 7, "checks": 2}]
+    assert body["series"] == [
+        {"date": "2026-11-27", "avg_units": 4.0, "max_units": 7, "checks": 2, "unmeasured_hours": 0.0}
+    ]
 
 
 # --- Reliability: checks without the display are not measured, gaps (spec 2026-11-24-reliability 1.1c) ---
@@ -1308,3 +1311,60 @@ def test_a_recompute_replays_measured_checks_and_gaps_from_stored_checks(monkeyp
         False,
         "20261121-1505",
     )
+
+
+@mock_aws
+def test_kpi_says_how_many_hours_were_measured(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, NOW)  # 28/11 12:00, open 06:00-22:00: checks 06:00..11:55 are closed = 72 checks
+    _shelf_plan()
+    _put_shelf("hour#20261128-09", **_rollup_item(6, 6, 0), unmeasured_checks=2)
+    coverage = _kpi(api, days="1")["coverage"]
+    assert coverage == {"measured_hours": 0.5, "open_hours": 6.0, "display_away_hours": 0.2}
+    # an old rollup without unmeasured_checks counts none
+    _put_shelf("day#20261127", **_rollup_item(12, 12, 0))
+    coverage = _kpi(api, days="2")["coverage"]
+    assert coverage["measured_hours"] == 1.0 and coverage["display_away_hours"] == 0.0
+    assert coverage["open_hours"] == 22.0  # all of 27/11 (192 checks) plus 72 today
+
+
+@mock_aws
+def test_kpi_coverage_is_null_when_the_store_has_no_hours(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, NOW)
+    assert _kpi(api)["coverage"] is None
+
+
+@mock_aws
+def test_trends_and_series_say_how_many_hours_were_not_measured(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, NOW)
+    _shelf_plan()
+    _put_shelf("day#20261127", **_rollup_item(10, 8, 6, units_sum=40), unmeasured_checks=4)
+    _put_shelf("hour#20261128-09", **_rollup_item(4, 4, 2, units_sum=12), unmeasured_checks=6)
+    query = {"metric": "osa", "days": "7"}
+    points = _call(api, "GET", "/v1/reports/trends", groups="datagent", query=query)[1]["points"]
+    assert {p["t"]: p["unmeasured_hours"] for p in points}["2026-11-27"] == 0.3  # 4 x 5 min = 0.33 h
+    query = {"metric": "osa", "days": "1"}
+    points = _call(api, "GET", "/v1/reports/trends", groups="datagent", query=query)[1]["points"]
+    assert {p["t"]: p["unmeasured_hours"] for p in points}["20261128-09"] == 0.5
+    series = _call(api, "GET", "/v1/reports/series", groups="datagent")[1]["series"]
+    assert series[0]["unmeasured_hours"] == 0.3
+
+
+@mock_aws
+def test_products_list_cameras_that_cannot_see_the_display(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140000", [("cheese145", 5)])
+    _ingest(ingest, "CAM-S01-A", "140500", [], display_visible=False)
+    status, body = _call(api, "GET", "/v1/products", groups="datagent")
+    assert status == 200
+    assert body["displays"] == [
+        {
+            "camera_id": "CAM-S01-A",
+            "store_id": "DEMO-S01",
+            "visible": False,
+            "since": "2026-11-21T14:05:00+07:00",
+            "last_visible_at": "2026-11-21T14:00:00+07:00",
+        }
+    ]

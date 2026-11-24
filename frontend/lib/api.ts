@@ -47,6 +47,16 @@ export interface ApiProductsResponse {
   unrecognized_units: number;
   stores_total: number;
   flag_threshold: number;
+  displays?: ApiDisplayStatus[]; // one per camera; older backends leave it out
+}
+
+/** Whether a camera sees the display cabinet. `since` is when the current state began (ISO, UTC+7). */
+export interface ApiDisplayStatus {
+  camera_id: string;
+  store_id: string;
+  visible: boolean;
+  since: string | null;
+  last_visible_at: string | null;
 }
 
 export interface ApiProductDetail {
@@ -155,12 +165,21 @@ export interface ApiKpiResponse {
     blocked_reason: BlockedReason | null;
   };
   oos_now?: { count: number | null; as_of: string | null; blocked_reason: BlockedReason | null };
+  // Hours of the period: measured, open, and open hours in which the camera could not see the display.
+  // null when the store has no opening hours (an older backend leaves the field out).
+  coverage?: ApiCoverage | null;
   top_50_sku_accuracy?: {
     value: number | null;
     n_frames: number;
     scope_note: string;
     blocked_reason: BlockedReason | null;
   };
+}
+
+export interface ApiCoverage {
+  measured_hours: number;
+  open_hours: number;
+  display_away_hours: number;
 }
 
 export type BlockedReason = "no_hours" | "no_expected" | "no_checks" | "no_previous" | "no_labels";
@@ -180,6 +199,11 @@ export interface ApiShelfEvent {
   level_before: number;
   level_after: number;
   duration_min?: number | null; // left out when empty: only a RESTOCKED that ended an out-of-stock has it
+  // Set when the shelf was not seen for a while before this change: buckets of the last measured check before the
+  // gap and of the first one after it.
+  after_gap?: boolean;
+  gap_from?: string;
+  gap_to?: string;
 }
 
 export interface ApiShelfEventsResponse {
@@ -191,6 +215,7 @@ export interface ApiShelfEventsResponse {
 export interface ApiTrendPoint {
   t: string;
   value: number | null;
+  unmeasured_hours?: number | null; // hours of this point in which the display was out of view
 }
 
 export interface ApiTrendsResponse {
@@ -216,6 +241,7 @@ export interface ApiReportsSeriesPoint {
   avg_units: number;
   max_units: number;
   checks: number;
+  unmeasured_hours?: number;
 }
 
 export interface ApiReportsSeriesResponse {

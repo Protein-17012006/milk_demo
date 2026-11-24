@@ -60,6 +60,26 @@ def is_open(bucket: str, open_time: str | None, close_time: str | None) -> bool:
     return open_time <= f"{bucket[9:11]}:{bucket[11:13]}" < close_time
 
 
+def open_buckets(open_time: str | None, close_time: str | None, first: str, last: str) -> int:
+    """How many 5-minute checks fall inside the opening hours, from bucket first to bucket last, both included.
+    A store without hours has none."""
+    if not open_time or not close_time:
+        return 0
+    open_min = int(open_time[:2]) * 60 + int(open_time[3:5])
+    close_min = int(close_time[:2]) * 60 + int(close_time[3:5])
+    first_day, last_day = bucket_time(first).date(), bucket_time(last).date()
+    first_min = int(first[9:11]) * 60 + int(first[11:13])
+    last_min = int(last[9:11]) * 60 + int(last[11:13])
+    total, day = 0, first_day
+    while day <= last_day:
+        lo = max(open_min, first_min if day == first_day else 0)
+        hi = min(close_min - 1, last_min if day == last_day else 24 * 60 - 1)
+        if hi >= lo:
+            total += hi // BUCKET_MINUTES - -(-lo // BUCKET_MINUTES) + 1  # multiples of 5 in [lo, hi]
+        day += timedelta(days=1)
+    return total
+
+
 def _rows(item: dict) -> list[dict]:
     raw = item.get("rows_json")
     if not raw:

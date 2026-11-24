@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import type { ApiShelfEvent, ApiShelfEventsResponse, ShelfEventType } from "@/lib/api";
-import { eventLabel, eventText, oosDurationText, timeAgo } from "@/lib/shelf-ui";
+import { eventLabel, eventText, gapText, oosDurationText, timeAgo } from "@/lib/shelf-ui";
 
 export type ActivityKind = "all" | "alerts" | "restocked";
 
@@ -30,6 +30,7 @@ const FILTER_OPTIONS: { id: ActivityKind; label: string }[] = [
 ];
 
 function EventRow({ item, now }: { item: ApiShelfEvent; now: Date }) {
+  const gap = gapText(item);
   return (
     <article data-shelf-event={item.type} className="flex flex-col gap-[4px] py-[9px]">
       <div className="flex items-center gap-[8px]">
@@ -44,6 +45,11 @@ function EventRow({ item, now }: { item: ApiShelfEvent; now: Date }) {
         {eventText(item)}
         {oosDurationText(item)}
       </span>
+      {gap && (
+        <span data-shelf-event-gap className="text-[12px] leading-[16px] text-[#9CA3AF]">
+          {gap}
+        </span>
+      )}
     </article>
   );
 }

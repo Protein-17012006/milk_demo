@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ApiShelfEvent } from "./api";
-import { blockedText, dashboardQuery, eventLabel, eventText, oosDurationText, pctChange, ptsChange, timeAgo } from "./shelf-ui.ts";
+import { blockedText, coverageText, dashboardQuery, displayBanner, gapText, eventLabel, eventText, oosDurationText, pctChange, ptsChange, timeAgo } from "./shelf-ui.ts";
 
 function ev(type: ApiShelfEvent["type"], delta: number, levelAfter: number): ApiShelfEvent {
   return {
@@ -65,4 +65,59 @@ test("oosDurationText: only a RESTOCKED that ended an out-of-stock says how long
   assert.equal(oosDurationText({ duration_min: null }), "");
   // DynamoDB drops empty fields, so OOS events reach the page without duration_min at all
   assert.equal(oosDurationText({} as { duration_min?: number | null }), "");
+});
+
+test("an event after a gap says when the shelf was not seen", () => {
+  assert.equal(
+    gapText({ after_gap: true, gap_from: "20261123-2025", gap_to: "20261124-0845" }),
+    "between 20:30 and 08:45 (not measured)"
+  );
+  assert.equal(gapText({}), null);
+  assert.equal(gapText({ after_gap: true }), null); // no buckets: say nothing rather than guess
+});
+
+test("coverage text", () => {
+  assert.equal(
+    coverageText({ measured_hours: 9.5, open_hours: 12.5, display_away_hours: 1 }),
+    "Measured 9.5 h of 12.5 h open · display not in view 1 h"
+  );
+  assert.equal(
+    coverageText({ measured_hours: 12.5, open_hours: 12.5, display_away_hours: 0 }),
+    "Measured 12.5 h of 12.5 h open"
+  );
+});
+
+test("a banner for each camera that cannot see the display", () => {
+  assert.equal(
+    displayBanner([{ camera_id: "CAM-S01-A", store_id: "DEMO-S01", visible: false, since: "2026-11-23T20:45:10+07:00", last_visible_at: "2026-11-23T20:40:05+07:00" }]),
+    "CAM-S01-A cannot see the display since 20:45 — numbers below are from the last check at 20:40"
+  );
+  assert.equal(displayBanner([]), null);
+  assert.equal(
+    displayBanner([{ camera_id: "CAM-S01-A", store_id: "DEMO-S01", visible: true, since: "2026-11-23T20:45:10+07:00", last_visible_at: "2026-11-23T20:45:10+07:00" }]),
+    null
+  );
+});
+
+test("the banner never says it cannot see since before the last time it saw", () => {
+  // captures out of order: since 14:10 but last seen 14:12
+  assert.equal(
+    displayBanner([{ camera_id: "CAM-S01-A", store_id: "DEMO-S01", visible: false, since: "2026-11-21T14:10:00+07:00", last_visible_at: "2026-11-21T14:12:00+07:00" }]),
+    "CAM-S01-A cannot see the display since 14:12 — numbers below are from the last check at 14:12"
+  );
+});
+
+test("several cameras that cannot see the display get a line each", () => {
+  const a = { store_id: "DEMO-S01", visible: false, since: "2026-11-23T20:45:00+07:00", last_visible_at: "2026-11-23T20:40:00+07:00" };
+  assert.equal(
+    displayBanner([{ camera_id: "A", ...a }, { camera_id: "B", ...a }]),
+    "A cannot see the display since 20:45 — numbers below are from the last check at 20:40\nB cannot see the display since 20:45 — numbers below are from the last check at 20:40"
+  );
+});
+
+test("a camera that never saw the display has no last check to point to", () => {
+  assert.equal(
+    displayBanner([{ camera_id: "A", store_id: "DEMO-S01", visible: false, since: "2026-11-23T20:45:00+07:00", last_visible_at: null }]),
+    "A cannot see the display since 20:45 — there is no earlier check to show"
+  );
 });
