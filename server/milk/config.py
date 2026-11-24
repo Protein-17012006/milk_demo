@@ -141,7 +141,7 @@ def load(env_file: str | None = None) -> Settings:
         display_max_w=int(_env("MILK_DISPLAY_MAX_W", "1920")),
         # The glass cabinet, as fractions of the frame; unset = the worker does not check whether it is in view
         display_zone=_roi(_env("MILK_DISPLAY_ZONE"), "MILK_DISPLAY_ZONE"),
-        display_min=float(_env("MILK_DISPLAY_MIN", "0.5")),  # histogram correlation below this = cabinet not in view
+        display_min=float(_env("MILK_DISPLAY_MIN", "0.6")),  # display score below this = cabinet not in view
         display_refs=_env("MILK_DISPLAY_REFS"),  # .npz where the learnt references are kept across restarts
         smooth_window=int(_env("MILK_SMOOTH_WINDOW", "3")),
         flag_threshold=float(_env("MILK_FLAG_THRESHOLD", "0.70")),

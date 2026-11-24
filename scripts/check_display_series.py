@@ -129,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--to", dest="end", required=True)
     ap.add_argument("--every-min", type=int, default=10)
     ap.add_argument("--zone", required=True, help="x,y,w,h as fractions, like MILK_DISPLAY_ZONE")
-    ap.add_argument("--min", dest="min_score", type=float, default=0.5, help="like MILK_DISPLAY_MIN")
+    ap.add_argument("--min", dest="min_score", type=float, default=0.6, help="like MILK_DISPLAY_MIN")
     ap.add_argument("--hidden", action="append", default=[], metavar="START/END")
     ap.add_argument("--skip", action="append", default=[], metavar="START/END")
     ap.add_argument("--table", default="milk-backend-development-captures")

@@ -133,14 +133,22 @@ backend không tính khung "không thấy tủ" là 0.
 
 ```
 MILK_DISPLAY_ZONE=0.336,0.083,0.242,0.361                           # x,y,w,h theo tỉ lệ khung, như MILK_ROI
-MILK_DISPLAY_MIN=0.5                                                # dưới mức này thì coi là không thấy tủ
+MILK_DISPLAY_MIN=0.6                                                # dưới mức này thì coi là không thấy tủ
 MILK_DISPLAY_REFS=C:/Users/huyho/Datagent/display_refs_CAM-S01-A.npz  # nơi giữ các mẫu đã học, để khởi động lại không mất
 ```
 
-- **Giá trị cho CAM-S01-A:** `MILK_DISPLAY_ZONE` và `MILK_DISPLAY_REFS` như trên. `MILK_DISPLAY_MIN` để mặc định 0,5.
+- **Giá trị cho CAM-S01-A:** `MILK_DISPLAY_ZONE` và `MILK_DISPLAY_REFS` như trên. `MILK_DISPLAY_MIN` để mặc định 0,6.
 - **Không đặt `MILK_DISPLAY_ZONE`:** worker chạy như trước và ghi `display_score = null`, `display_visible = true`.
 - **Mẫu:**
   - Khung có ít nhất 3 hộp độ tin cậy từ 0,8 trở lên, tâm nằm trong vùng tủ, thì thành một mẫu.
   - Tối đa một mẫu mỗi 10 phút, giữ 50 mẫu mới nhất.
   - Chưa có mẫu nào thì `display_score = null` và coi là thấy tủ.
-- **Điểm:** tương quan histogram màu (hue × saturation) lớn nhất so với các mẫu, làm tròn 3 chữ số.
+- **Điểm:** độ giống với mẫu giống nhất, từ 0 đến 1, làm tròn 3 chữ số.
+  - Vùng tủ được thu nhỏ còn rộng 192 px rồi chia 4 phần (2 × 2). Mỗi phần được so về màu (histogram
+    hue × saturation, sau khi cân bằng trắng kiểu gray-world) và về hình (histogram hướng cạnh).
+  - Điểm là trung bình của màu và hình. Một mình màu, hay một mình hình, chỉ được tối đa 0,5, nên phải giống cả hai
+    mới đạt 0,6.
+  - Vì sao không chỉ so màu: tối 23/11, sau khi cất tủ, chỗ đó còn giỏ trái cây, bánh kẹo và gói snack đỏ. So màu cả
+    vùng cho các khung đó 0,53–0,73, cao hơn chính tủ lúc 08:45 sáng 24/11 (0,69, vì tủ đặt lệch). Cách mới, trên
+    chuỗi thật 23–24/11: có tủ từ 0,72 trở lên, tủ đã cất từ 0,51 trở xuống.
+- **File mẫu cũ:** file của bản chỉ so màu, hoặc file hỏng, bị bỏ qua. Worker bắt đầu với 0 mẫu và học lại.
