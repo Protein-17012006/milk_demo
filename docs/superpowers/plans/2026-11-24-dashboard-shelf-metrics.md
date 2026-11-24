@@ -134,40 +134,58 @@ def test_bucket_is_the_five_minutes_the_capture_falls_in():
     assert bucket_of("2026-11-23T14:10:00+07:00") == "20261123-1410"
     assert bucket_of("2026-11-23T07:02:00+00:00") == "20261123-1400"  # UTC in, ICT out
 
+
 def test_add_buckets_crosses_midnight():
     assert add_buckets("20261123-2355", 1) == "20261124-0000"
+
 
 def test_open_hours_include_open_and_exclude_close():
     assert is_open("20261123-0600", "06:00", "22:00") and is_open("20261123-2155", "06:00", "22:00")
     assert not is_open("20261123-0555", "06:00", "22:00") and not is_open("20261123-2200", "06:00", "22:00")
     assert not is_open("20261123-1200", None, None)
 
+
 def test_valid_hours():
     assert valid_hours("06:00", "22:00") and valid_hours("00:00", "23:59")
     for bad in [("22:00", "06:00"), ("06:00", "06:00"), ("25:00", "26:00"), ("6:00", "22:00"), ("06:00", "")]:
         assert not valid_hours(*bad)
 
+
 def test_check_counts_are_the_median_per_camera_summed_over_cameras():
-    caps = [cap("CAM-A", "2026-11-23T14:05:10+07:00", {"Slide Cheese 145g": 3}),
-            cap("CAM-A", "2026-11-23T14:06:10+07:00", {"Slide Cheese 145g": 5}),
-            cap("CAM-A", "2026-11-23T14:07:10+07:00", {"Slide Cheese 145g": 4}),
-            cap("CAM-B", "2026-11-23T14:06:30+07:00", {"Slide Cheese 145g": 2})]
+    caps = [
+        cap("CAM-A", "2026-11-23T14:05:10+07:00", {"Slide Cheese 145g": 3}),
+        cap("CAM-A", "2026-11-23T14:06:10+07:00", {"Slide Cheese 145g": 5}),
+        cap("CAM-A", "2026-11-23T14:07:10+07:00", {"Slide Cheese 145g": 4}),
+        cap("CAM-B", "2026-11-23T14:06:30+07:00", {"Slide Cheese 145g": 2}),
+    ]
     check = build_check("20261123-1405", caps)
     assert check["counts"] == {"Slide Cheese 145g": 6} and check["captures"] == 4
     assert check["cameras"] == ["CAM-A", "CAM-B"]
 
+
 def test_a_sku_missing_from_a_capture_counts_zero_there():
-    caps = [cap("CAM-A", t, c) for t, c in [("2026-11-23T14:05:10+07:00", {"X": 4}),
-            ("2026-11-23T14:06:10+07:00", {}), ("2026-11-23T14:07:10+07:00", {})]]
+    caps = [
+        cap("CAM-A", t, c)
+        for t, c in [
+            ("2026-11-23T14:05:10+07:00", {"X": 4}),
+            ("2026-11-23T14:06:10+07:00", {}),
+            ("2026-11-23T14:07:10+07:00", {}),
+        ]
+    ]
     assert build_check("20261123-1405", caps)["counts"] == {"X": 0}
+
 
 def test_unrecognized_rows_are_left_out():
     # a row with sku_id None (UNRECOGNIZED) adds nothing
     ...  # build one capture with rows_json [{"sku_id": None, "unit_count": 3, ...}]
     assert build_check("20261123-1405", caps)["counts"] == {}
 
+
 def test_confident_skus_need_one_box_at_070():
-    boxes = [{"sku_id": "hot160", "conf": 0.69, "box": [0, 0, 5, 5]}, {"sku_id": "cheese145", "conf": 0.70, "box": [9, 0, 5, 5]}]
+    boxes = [
+        {"sku_id": "hot160", "conf": 0.69, "box": [0, 0, 5, 5]},
+        {"sku_id": "cheese145", "conf": 0.70, "box": [9, 0, 5, 5]},
+    ]
     caps = [cap("CAM-A", "2026-11-23T14:05:10+07:00", {"Slide Hot & Spicy 160g": 1, "Slide Cheese 145g": 1}, boxes)]
     assert build_check("20261123-1405", caps)["confident_skus"] == ["Slide Cheese 145g"]
 ```
@@ -201,30 +219,45 @@ def test_confident_skus_need_one_box_at_070():
 
 ```python
 def test_first_two_equal_checks_set_the_level_without_an_event():
-    events, st = walk([3, 3]); assert events == [] and (st["L"], st["status"]) == (3, "IN_STOCK")
-    events, st = walk([0, 0]); assert events == [] and (st["L"], st["status"]) == (0, "OOS")
+    events, st = walk([3, 3])
+    assert events == [] and (st["L"], st["status"]) == (3, "IN_STOCK")
+    events, st = walk([0, 0])
+    assert events == [] and (st["L"], st["status"]) == (0, "OOS")
+
 
 def test_two_zero_checks_make_an_out_of_stock():
     events, _ = walk([5, 5, 0, 0])
-    assert events == [{"type": "OOS", "at": "20261123-1410", "delta": -5, "level_before": 5, "level_after": 0, "duration_min": None}]
+    assert events == [
+        {"type": "OOS", "at": "20261123-1410", "delta": -5, "level_before": 5, "level_after": 0, "duration_min": None}
+    ]
+
 
 def test_one_hidden_check_is_not_an_event():
     assert walk([5, 5, 0, 5, 5])[0] == []
 
+
 def test_low_stock_wins_over_depleted():
     assert [(e["type"], e["delta"], e["level_after"]) for e in walk([8, 8, 2, 2])[0]] == [("LOW_STOCK", -6, 2)]
 
+
 def test_depleted_needs_a_drop_of_three():
-    events, st = walk([8, 8, 6, 6]); assert events == [] and st["L"] == 6
+    events, st = walk([8, 8, 6, 6])
+    assert events == [] and st["L"] == 6
     assert [(e["type"], e["delta"], e["level_after"]) for e in walk([12, 12, 8, 8])[0]] == [("DEPLETED", -4, 8)]
 
+
 def test_restocked_needs_a_rise_of_two():
-    events, st = walk([8, 8, 9, 9]); assert events == [] and st["L"] == 9
+    events, st = walk([8, 8, 9, 9])
+    assert events == [] and st["L"] == 9
     assert [(e["type"], e["delta"], e["level_after"]) for e in walk([8, 8, 24, 24])[0]] == [("RESTOCKED", 16, 24)]
+
 
 def test_restock_after_out_of_stock_carries_its_open_minutes():
     events, _ = walk([5, 5, 0, 0, 0, 0, 6, 6])
-    assert [(e["type"], e["at"], e["duration_min"]) for e in events] == [("OOS", "20261123-1410", None), ("RESTOCKED", "20261123-1430", 20)]
+    assert [(e["type"], e["at"], e["duration_min"]) for e in events] == [
+        ("OOS", "20261123-1410", None),
+        ("RESTOCKED", "20261123-1430", 20),
+    ]
 ```
 
 - [ ] **Step 2:** Chạy test. Mong đợi: FAIL vì `step_state` chưa có.
@@ -264,29 +297,79 @@ def test_restock_after_out_of_stock_carries_its_open_minutes():
 
 ```python
 def test_only_open_checks_of_expected_skus_count():
-    open_c = {"bucket": "20261123-1400", "counts": {"A": 3, "C": 9}, "open": True, "expected": ["A", "B"], "confident_skus": []}  # B not seen
-    shut_c = {"bucket": "20261123-1405", "counts": {"A": 5}, "open": False, "expected": ["A", "B"], "confident_skus": ["C"]}
+    open_c = {
+        "bucket": "20261123-1400",
+        "counts": {"A": 3, "C": 9},
+        "open": True,
+        "expected": ["A", "B"],
+        "confident_skus": [],
+    }  # B not seen
+    shut_c = {
+        "bucket": "20261123-1405",
+        "counts": {"A": 5},
+        "open": False,
+        "expected": ["A", "B"],
+        "confident_skus": ["C"],
+    }
     r = rollup([open_c, shut_c], [])
     assert r["checks"] == 1 and r["max_total"] == 3 and r["confident_skus"] == ["C"]
-    assert r["skus"]["A"] == {"checks": 1, "available": 1, "units_sum": 3, "oos_started": 0, "restock_units": 0, "restock_events": 0}
+    assert r["skus"]["A"] == {
+        "checks": 1,
+        "available": 1,
+        "units_sum": 3,
+        "oos_started": 0,
+        "restock_units": 0,
+        "restock_events": 0,
+    }
     assert r["skus"]["B"]["available"] == 0 and "C" not in r["skus"]
 
-def test_events_feed_out_of_stock_and_restock_numbers():
-    ev = [{"sku_id": "A", "type": "OOS", "delta": -5}, {"sku_id": "A", "type": "RESTOCKED", "delta": 6},
-          {"sku_id": "B", "type": "RESTOCKED", "delta": 2}]
-    r = rollup([], ev)
-    assert (r["skus"]["A"]["oos_started"], r["skus"]["A"]["restock_units"], r["skus"]["B"]["restock_events"]) == (1, 6, 1)
 
-def test_merge_adds_hours_into_a_day():
-    ...  # two hour rollups: checks 12 and 10, max_total 9 and 14 → checks 22, max_total 14
+def test_events_feed_out_of_stock_and_restock_numbers():
+    ev = [
+        {"sku_id": "A", "type": "OOS", "delta": -5},
+        {"sku_id": "A", "type": "RESTOCKED", "delta": 6},
+        {"sku_id": "B", "type": "RESTOCKED", "delta": 2},
+    ]
+    r = rollup([], ev)
+    assert (r["skus"]["A"]["oos_started"], r["skus"]["A"]["restock_units"], r["skus"]["B"]["restock_events"]) == (
+        1,
+        6,
+        1,
+    )
+
+
+def test_merge_adds_hours_into_a_day(): ...  # two hour rollups: checks 12 and 10, max_total 9 and 14 → checks 22, max_total 14
+
 
 def test_osa_is_available_over_counted_checks_and_filters_by_sku():
-    r = {"checks": 2, "max_total": 7, "confident_skus": [], "skus": {
-        "A": {"checks": 2, "available": 2, "units_sum": 7, "oos_started": 0, "restock_units": 0, "restock_events": 0},
-        "B": {"checks": 2, "available": 1, "units_sum": 1, "oos_started": 1, "restock_units": 0, "restock_events": 0}}}
-    t = totals([r]); assert (t["osa"], t["avg_total_units"]) == (0.75, 4.0)
+    r = {
+        "checks": 2,
+        "max_total": 7,
+        "confident_skus": [],
+        "skus": {
+            "A": {
+                "checks": 2,
+                "available": 2,
+                "units_sum": 7,
+                "oos_started": 0,
+                "restock_units": 0,
+                "restock_events": 0,
+            },
+            "B": {
+                "checks": 2,
+                "available": 1,
+                "units_sum": 1,
+                "oos_started": 1,
+                "restock_units": 0,
+                "restock_events": 0,
+            },
+        },
+    }
+    t = totals([r])
+    assert (t["osa"], t["avg_total_units"]) == (0.75, 4.0)
     assert totals([r], {"B"})["osa"] == 0.5
     assert totals([])["osa"] is None
+
 
 def test_change_pct():
     assert change_pct(13.4, 10.0) == 34.0
