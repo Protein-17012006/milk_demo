@@ -101,7 +101,7 @@ def _normalize_record(raw: dict[str, Any], source_bucket: str = "") -> dict[str,
 def ingest_capture(
     record: dict[str, Any], s3_client=None, ddb_resource=None, write_analytics: bool = False
 ) -> dict[str, Any]:
-    """Validate, deduplicate, map alias, write captures/latest_stock/review_queue."""
+    """Validate, deduplicate, map alias, write captures/latest_stock/review_queue and the camera's display status."""
     errors = validate_capture_payload(record)
     if errors:
         raise ValueError(f"Invalid capture payload: {'; '.join(errors)}")
@@ -178,9 +178,12 @@ def ingest_capture(
             return {"status": "duplicate_skipped", "capture_id": capture_id}
         raise
 
-    # Step 4: Update latest_stock (per store_id + sku_id) with lower-median smoothing of last 3 captures
+    # Step 4: Update latest_stock (per store_id + sku_id) with lower-median smoothing of last 3 captures. A capture
+    # that cannot see the display is kept above but says nothing about the shelf: latest_stock and the review queue
+    # stay as the last capture that saw the display left them.
+    sees_display = shelf.sees_display(record)
     seen_skus: set[str] = set()
-    for row in mapped_rows:
+    for row in mapped_rows if sees_display else []:
         sku_key = row["sku_id"] or UNRECOGNIZED
         seen_skus.add(sku_key)
 
@@ -247,7 +250,13 @@ def ingest_capture(
                 )
             )
 
-    _count_down_missing(stock_tbl, store_id, camera_id, capture_ts, seen_skus)
+    if sees_display:
+        _count_down_missing(stock_tbl, store_id, camera_id, capture_ts, seen_skus)
+
+    # Step 6: Whether the camera sees the display, for the website (after the shelf numbers: a retry of this
+    # message is skipped as a duplicate, so a failure here must not cost the capture its stock update)
+    if SHELF_TABLE:
+        _record_display(ddb_resource.Table(SHELF_TABLE), store_id, camera_id, capture_ts, sees_display)
 
     if write_analytics and ANALYTICS_BUCKET:
         _write_official_to_s3(s3_client, record, mapped_rows)
@@ -258,6 +267,41 @@ def ingest_capture(
         "skus_updated": len(seen_skus),
         "flagged_rows": record["flagged_rows"],
     }
+
+
+def _record_display(table, store_id: str, camera_id: str, capture_ts: str, visible: bool) -> None:
+    """Item display#<camera_id> of the shelf table: whether the camera sees the display (visible), since when
+    (since), the newest capture that saw it (last_visible_at) and the newest capture applied (updated_at).
+
+    SQS and hub re-sends can deliver an older capture after a newer one, so every update is conditional on
+    updated_at: an older capture never moves the status back, it can only move last_visible_at on."""
+    key = {"store_id": store_id, "key": f"display#{camera_id}"}
+    seen = ", last_visible_at = :ts" if visible else ""
+    newer = {":ts": capture_ts, ":v": visible}
+    updates = [
+        # the same status as now: only the times move on
+        ("SET updated_at = :ts" + seen, "visible = :v AND updated_at < :ts", newer),
+        # the camera's first capture, or the status flips: since starts here
+        (
+            "SET camera_id = :camera, visible = :v, since = :ts, updated_at = :ts" + seen,
+            "attribute_not_exists(updated_at) OR (visible <> :v AND updated_at < :ts)",
+            {**newer, ":camera": camera_id},
+        ),
+    ]
+    if visible:  # older than the status, it can still be the newest capture that saw the display
+        newest_seen = (
+            "attribute_exists(updated_at) AND (attribute_not_exists(last_visible_at) OR last_visible_at < :ts)"
+        )
+        updates.append(("SET last_visible_at = :ts", newest_seen, {":ts": capture_ts}))
+    for update, condition, values in updates:
+        try:
+            table.update_item(
+                Key=key, UpdateExpression=update, ConditionExpression=condition, ExpressionAttributeValues=values
+            )
+            return
+        except ClientError as exc:  # not this case (or a newer capture is in): try the next one
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
 
 
 def _count_down_missing(stock_tbl, store_id: str, camera_id: str, capture_ts: str, seen_skus: set[str]) -> None:
@@ -647,18 +691,25 @@ def _expected_skus(ddb_resource, store: dict[str, Any], now_utc: datetime) -> li
     return sorted({sku for day in days for sku in day.get("confident_skus") or []})
 
 
-def _apply_check(check: dict, store: dict, expected: list[str], skus_state: dict) -> list[dict[str, Any]]:
-    """Mark the check open or not, record the list it was counted against, and step each expected SKU's state."""
+def _apply_check(
+    check: dict, store: dict, expected: list[str], skus_state: dict, last_measured: str | None
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Mark the check open or not and record the list it was counted against. An open, measured check with a list
+    steps each expected SKU's state, with the gap since the last measured check if there is one; any other check
+    leaves the state alone. Returns the events and the last measured bucket. Checks stored before measurable
+    existed were measured."""
     check["open"] = shelf.is_open(check["bucket"], store.get("open_time"), store.get("close_time"))
     check["expected"] = expected
+    if not (check["open"] and check.get("measurable", True) and expected):
+        return [], last_measured
+    gap = shelf.gap_between(last_measured, check["bucket"])
     events = []
-    if check["open"] and expected:
-        for sku in expected:
-            state, event = shelf.step_state(skus_state.get(sku), int(check["counts"].get(sku, 0)), check["bucket"])
-            skus_state[sku] = state
-            if event is not None:
-                events.append({**event, "sku_id": sku, "event_key": f"{event['at']}#{sku}#{event['type']}"})
-    return events
+    for sku in expected:
+        state, event = shelf.step_state(skus_state.get(sku), int(check["counts"].get(sku, 0)), check["bucket"], gap)
+        skus_state[sku] = state
+        if event is not None:
+            events.append({**event, "sku_id": sku, "event_key": f"{event['at']}#{sku}#{event['type']}"})
+    return events, check["bucket"]
 
 
 def _expires(start: datetime, days: int) -> int:
@@ -733,6 +784,7 @@ def _shelf_store_tick(ddb_resource, store: dict[str, Any], now_utc: datetime) ->
     by_bucket = _captures_by_bucket(ddb_resource, cameras, first, last)
     expected = _expected_skus(ddb_resource, store, now_utc)
     skus_state = dict((state_item or {}).get("skus") or {})
+    last_measured = (state_item or {}).get("last_measured_bucket")
     events_table = ddb_resource.Table(SHELF_EVENTS_TABLE)
     hours: set[str] = set()
     made = 0
@@ -740,7 +792,7 @@ def _shelf_store_tick(ddb_resource, store: dict[str, Any], now_utc: datetime) ->
     while bucket <= last:
         if by_bucket.get(bucket):
             check = shelf.build_check(bucket, by_bucket[bucket])
-            events = _apply_check(check, store, expected, skus_state)
+            events, last_measured = _apply_check(check, store, expected, skus_state, last_measured)
             table.put_item(Item=_check_item(store_id, check))
             for event in events:
                 events_table.put_item(Item=_event_item(store_id, event))
@@ -749,7 +801,15 @@ def _shelf_store_tick(ddb_resource, store: dict[str, Any], now_utc: datetime) ->
             made += 1
         bucket = shelf.add_buckets(bucket, 1)
 
-    state = to_dynamodb_safe({"store_id": store_id, "key": "state", "last_bucket": last, "skus": skus_state})
+    state = to_dynamodb_safe(
+        {
+            "store_id": store_id,
+            "key": "state",
+            "last_bucket": last,
+            "last_measured_bucket": last_measured,
+            "skus": skus_state,
+        }
+    )
     try:  # only one run moves a store's state on; an overlapping run stops here
         if state_item:
             table.put_item(
@@ -819,18 +879,23 @@ def shelf_recompute(ddb_resource, store_id: str, days: int, now_utc: datetime) -
         expected = sorted({s for b, c in checks.items() if b >= suggest_from for s in c.get("confident_skus") or []})
 
     skus_state: dict[str, Any] = {}
+    last_measured: str | None = None
     hours: set[str] = set()
+    # what a check knew of the display; checks stored before the display check have none of these
+    display_fields = ("captures_visible", "measurable", "unmeasured_reason", "image_key", "source_bucket")
     with table.batch_writer() as writer, events_table.batch_writer() as event_writer:
         for bucket in sorted(checks):
-            check = {k: checks[bucket][k] for k in ("bucket", "counts", "captures", "cameras", "confident_skus")}
-            for event in _apply_check(check, store, expected, skus_state):
+            stored = checks[bucket]
+            check = {k: stored[k] for k in ("bucket", "counts", "captures", "cameras", "confident_skus")}
+            check.update({k: stored[k] for k in display_fields if k in stored})
+            events, last_measured = _apply_check(check, store, expected, skus_state, last_measured)
+            for event in events:
                 event_writer.put_item(Item=_event_item(store_id, event))
                 hours.add(event["at"][:11])
             writer.put_item(Item=_check_item(store_id, check))
             hours.add(bucket[:11])
-    table.put_item(
-        Item=to_dynamodb_safe({"store_id": store_id, "key": "state", "last_bucket": last, "skus": skus_state})
-    )
+    state = {"store_id": store_id, "key": "state", "last_bucket": last, "last_measured_bucket": last_measured}
+    table.put_item(Item=to_dynamodb_safe({**state, "skus": skus_state}))
     _write_rollups(ddb_resource, store_id, hours)
     return {"action": "shelf_recompute", "store_id": store_id, "checks": len(checks), "hours": len(hours)}
 

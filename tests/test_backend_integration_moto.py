@@ -1181,3 +1181,130 @@ def test_series_reads_day_rollups(monkeypatch: pytest.MonkeyPatch):
     status, body = _call(api, "GET", "/v1/reports/series", groups="datagent")
     assert status == 200
     assert body["series"] == [{"date": "2026-11-27", "avg_units": 4.0, "max_units": 7, "checks": 2}]
+
+
+# --- Reliability: checks without the display are not measured, gaps (spec 2026-11-24-reliability 1.1c) ---
+
+
+@mock_aws
+def test_a_capture_without_the_display_leaves_the_shelf_numbers(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140000", [("cheese145", 5)])
+    _ingest(ingest, "CAM-S01-A", "140500", [], display_visible=False)
+    assert _units(api)[CHEESE] == 5
+    status = _shelf("display#CAM-S01-A")
+    assert (status["visible"], status["since"]) == (False, "2026-11-21T14:05:00+07:00")
+
+
+@mock_aws
+def test_a_record_without_display_fields_still_updates_the_shelf_numbers(monkeypatch: pytest.MonkeyPatch):
+    # workers older than the display check send neither field: their captures see the display, as before
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140000", [("cheese145", 5), ("hot160", 2)])
+    _ingest(ingest, "CAM-S01-A", "140500", [("cheese145", 4)])
+    units = _units(api)
+    assert (units[CHEESE], units[HOT]) == (4, 0)  # updated, and a SKU the capture no longer shows counts down
+    status = _shelf("display#CAM-S01-A")
+    assert (status["visible"], status["since"], status["last_visible_at"]) == (
+        True,
+        "2026-11-21T14:00:00+07:00",
+        "2026-11-21T14:05:00+07:00",
+    )
+
+
+@mock_aws
+def test_a_late_older_capture_does_not_turn_the_display_status_back(monkeypatch: pytest.MonkeyPatch):
+    # SQS and hub re-sends do not keep order: the status follows the newest capture applied
+    _, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140500", [("cheese145", 5)], display_visible=True)
+    _ingest(ingest, "CAM-S01-A", "140000", [], display_visible=False)
+    status = _shelf("display#CAM-S01-A")
+    assert (status["visible"], status["since"], status["updated_at"]) == (
+        True,
+        "2026-11-21T14:05:00+07:00",
+        "2026-11-21T14:05:00+07:00",
+    )
+    _ingest(ingest, "CAM-S01-A", "141000", [], display_visible=False)
+    _ingest(ingest, "CAM-S01-A", "140700", [("cheese145", 5)], display_visible=True)  # late, but it saw the display
+    status = _shelf("display#CAM-S01-A")
+    assert (status["visible"], status["since"], status["last_visible_at"], status["updated_at"]) == (
+        False,
+        "2026-11-21T14:10:00+07:00",
+        "2026-11-21T14:07:00+07:00",
+        "2026-11-21T14:10:00+07:00",
+    )
+
+
+@mock_aws
+def test_checks_without_the_display_make_no_out_of_stock(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    for hhmmss, units, seen in [("140010", 5, True), ("140510", 5, True), ("141010", 0, False), ("141510", 0, False)]:
+        _ingest(ingest, "CAM-S01-A", hhmmss, [("cheese145", units)] if units else [], display_visible=seen)
+    _tick(ingest)
+    assert _event_keys() == [] and _shelf("hour#20261121-14")["unmeasured_checks"] == 2
+    assert _shelf("check#20261121-1410")["unmeasured_reason"] == "display_not_visible"
+    assert "unmeasured_reason" not in _shelf("check#20261121-1405")
+
+
+@mock_aws
+def test_events_after_a_gap_are_marked(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    for hhmmss, units in [("140010", 5), ("140510", 5), ("150010", 0), ("150510", 0)]:
+        _ingest(ingest, "CAM-S01-A", hhmmss, [("cheese145", units)] if units else [])
+    _tick(ingest, now="2026-11-21T15:12:00+07:00")
+    event = _table("test-shelf-events").get_item(
+        Key={"store_id": "DEMO-S01", "event_key": f"20261121-1500#{CHEESE}#OOS"}
+    )["Item"]
+    assert (event["after_gap"], event["gap_from"], event["gap_to"]) == (True, "20261121-1405", "20261121-1500")
+
+
+@mock_aws
+def test_shelf_state_and_gaps_carry_over_between_ticks(monkeypatch: pytest.MonkeyPatch):
+    # one check per tick: the level not set yet, the last measured check and the gap all go through the state item
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    for hhmmss, units in [("140010", 5), ("140510", 5), ("150010", 0), ("150510", 0)]:
+        _ingest(ingest, "CAM-S01-A", hhmmss, [("cheese145", units)] if units else [])
+    for hhmmss in ("140730", "141230", "150730", "151230"):
+        _tick(ingest, now=f"2026-11-21T{hhmmss[:2]}:{hhmmss[2:4]}:{hhmmss[4:]}+07:00")
+    assert _event_keys() == [f"20261121-1500#{CHEESE}#OOS"]
+    event = _table("test-shelf-events").get_item(
+        Key={"store_id": "DEMO-S01", "event_key": f"20261121-1500#{CHEESE}#OOS"}
+    )["Item"]
+    assert (event["after_gap"], event["gap_from"], event["gap_to"]) == (True, "20261121-1405", "20261121-1500")
+
+
+@mock_aws
+def test_a_recompute_replays_measured_checks_and_gaps_from_stored_checks(monkeypatch: pytest.MonkeyPatch):
+    # days whose captures have expired are replayed from their check# items; items stored before this change have
+    # no measurable field and count as measured
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    for minute, units, measurable in [
+        ("1400", 5, None),
+        ("1405", 5, None),
+        ("1410", 0, False),
+        ("1415", 0, False),
+        ("1500", 0, True),
+        ("1505", 0, True),
+    ]:
+        fields = {"bucket": f"20261121-{minute}", "counts": {CHEESE: units}, "captures": 1, "cameras": ["CAM-S01-A"]}
+        if measurable is not None:
+            fields["measurable"] = measurable
+        if measurable is False:
+            fields["unmeasured_reason"] = "display_not_visible"
+        _put_shelf(f"check#20261121-{minute}", **fields, confident_skus=[])
+    ingest.lambda_handler({"action": "shelf_recompute", "store_id": "DEMO-S01", "now": "2026-11-21T15:12:00+07:00"})
+    assert _event_keys() == [f"20261121-1500#{CHEESE}#OOS"]
+    event = _table("test-shelf-events").get_item(
+        Key={"store_id": "DEMO-S01", "event_key": f"20261121-1500#{CHEESE}#OOS"}
+    )["Item"]
+    assert (event["after_gap"], event["gap_from"], event["gap_to"]) == (True, "20261121-1405", "20261121-1500")
+    hour = _shelf("hour#20261121-14")
+    assert (hour["checks"], hour["unmeasured_checks"]) == (2, 2)
+    assert (_shelf("check#20261121-1410")["measurable"], _shelf("state")["last_measured_bucket"]) == (
+        False,
+        "20261121-1505",
+    )
