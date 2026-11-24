@@ -490,8 +490,10 @@ def captures_in_hour(ddb_resource, camera_id: str, store_code: str, hour: str) -
 def _write_frame_audit(
     s3_client, table, audit_id: str, purpose: str, pick: dict[str, Any], camera_id: str
 ) -> str | None:
-    """Copies the picked capture's frame to the analytics bucket and writes a pending audit of that purpose.
-    Returns the audit id, or None when the audit already exists."""
+    """Copies the picked capture's frame to the analytics bucket and writes a pending audit of that purpose, with
+    what the worker's display check said of the capture: display_visible, and display_score when the check had one
+    (the Model page's display check counts only the frames it judged). Returns the audit id, or None when the audit
+    already exists."""
     filename = pick.get("image_filename") or pick["image_key"].rsplit("/", 1)[-1]
     image_key = f"audits/frames/{camera_id}/{pick['capture_timestamp'][:10]}/{filename}"
     s3_client.copy_object(
@@ -511,6 +513,7 @@ def _write_frame_audit(
                     "model_version": pick.get("model_version") or "unknown",
                     "pipeline": pick.get("pipeline", ""),
                     "display_visible": pick.get("display_visible", True) is not False,
+                    **({"display_score": pick["display_score"]} if pick.get("display_score") is not None else {}),
                     "status": "pending",
                     "sampled_at": datetime.now(ICT).isoformat(timespec="seconds"),
                     "ai_boxes_json": json.dumps(capture_boxes(pick), separators=(",", ":")),

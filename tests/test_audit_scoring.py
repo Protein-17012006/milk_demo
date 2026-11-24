@@ -262,14 +262,34 @@ def test_enough_needs_ten_frames_twenty_cans_and_two_days():
 
 
 def test_display_agreement():
-    audits = [
-        {"status": "done", "display_visible": True},
-        {"status": "done", "display_visible": False},  # labeller saw the display, the check said no
-        {"status": "skipped", "skip_reason": "display_away", "display_visible": False},
-        {"status": "skipped", "skip_reason": "blurry", "display_visible": True},  # not about the display: left out
+    seen = {"status": "done", "display_visible": True, "display_score": 0.91}
+    away = {"status": "skipped", "skip_reason": "display_away", "display_visible": False, "display_score": 0.21}
+    judged = [
+        *[seen] * 7,
+        {**seen, "display_score": 1},  # a score of exactly 1 reads back from DynamoDB as an int
+        {"status": "done", "display_visible": False, "display_score": 0.42},  # the labeller saw it, the check said no
+        *[away] * 2,
+        {"status": "skipped", "skip_reason": "display_away", "display_visible": True, "display_score": 0.77},
+        {"status": "skipped", "skip_reason": "display_away", "display_visible": False},  # only a check says False
     ]
-    d = display_agreement(audits)
-    assert (d["agree"]["value"], d["agree"]["n"], d["false_not_visible"], d["false_visible"]) == (2 / 3, 3, 1, 0)
+    unjudged = [
+        {"status": "done"},  # before the display check existed
+        {"status": "done", "display_visible": True},  # 24/11 13:50-19:03: True copied from an old worker's capture
+        {"status": "skipped", "skip_reason": "display_away", "display_visible": True},  # no reference learnt yet
+        {"status": "skipped", "skip_reason": "blurry", "display_visible": False, "display_score": 0.3},  # not about it
+        {"status": "pending", "display_visible": True, "display_score": 0.9},  # not labelled yet
+    ]
+    d = display_agreement(judged + unjudged)
+    # 13 judged frames: 8 + 2 + 1 agree; 1 wrongly "not in view" (0.42), 1 wrongly "in view" (0.77)
+    assert (d["agree"]["value"], d["agree"]["n"], d["false_not_visible"], d["false_visible"]) == (11 / 13, 13, 1, 1)
+    assert d["agree"]["ci"][0] <= 11 / 13 <= d["agree"]["ci"][1]
+
+
+def test_display_agreement_needs_ten_judged_frames():
+    seen = {"status": "done", "display_visible": True, "display_score": 0.91}
+    d = display_agreement([seen] * (MIN_FRAMES - 1) + [{"status": "done"}] * 5)
+    assert d == {"agree": {"value": None, "ci": None, "n": 9}, "false_not_visible": 0, "false_visible": 0}
+    assert display_agreement([seen] * MIN_FRAMES)["agree"]["value"] == 1.0
 
 
 def test_summary_of_300_frames_takes_under_three_seconds():
@@ -429,9 +449,9 @@ def test_check_level_without_checks_has_no_numbers():
     }
 
 
-def test_display_agreement_takes_old_frames_as_seeing_the_display():
+def test_display_agreement_leaves_out_frames_from_before_the_check():
     d = display_agreement([{"status": "done"}, {"status": "skipped", "skip_reason": "display_away"}])
-    assert (d["agree"]["value"], d["false_not_visible"], d["false_visible"]) == (0.5, 0, 1)
+    assert d == {"agree": {"value": None, "ci": None, "n": 0}, "false_not_visible": 0, "false_visible": 0}
     assert display_agreement([{"status": "pending"}])["agree"] == {"value": None, "ci": None, "n": 0}
 
 

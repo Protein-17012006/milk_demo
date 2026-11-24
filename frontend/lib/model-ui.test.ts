@@ -115,3 +115,11 @@ test("the display check line counts both ways it can be wrong", () => {
     "Display check: Not enough samples (n = 0 scoring frames)"
   );
 });
+
+test("under 10 frames judged by the check, the display check gives its n instead of a share", () => {
+  // GET /model/summary sends a null share and the n of judged frames below 10; the wrong counts wait for a share
+  assert.equal(
+    displayCheckText({ agree: { value: null, ci: null, n: 7 }, false_not_visible: 1, false_visible: 0 }),
+    "Display check: Not enough samples (n = 7 scoring frames)"
+  );
+});

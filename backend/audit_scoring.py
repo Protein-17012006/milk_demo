@@ -28,6 +28,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache, wraps
+from numbers import Number
 from operator import itemgetter
 
 VERDICTS = ("correct", "wrong_sku", "not_product", "out_of_scope")
@@ -620,17 +621,32 @@ def check_level(pairs: list[tuple[dict, dict[str, int]]], expected: Expected = N
     }
 
 
+def judged_by_display_check(audit: dict) -> bool:
+    """Whether the worker's display check judged this frame: the audit carries the capture's display_score, or
+    display_visible False (only a check that ran says False). Frames from before the check, frames whose True was
+    copied from an older worker's capture (24/11 13:50-19:03) and frames taken before the worker had learnt the
+    display carry neither, and say nothing about the check."""
+    score = audit.get("display_score")
+    return (isinstance(score, Number) and not isinstance(score, bool)) or audit.get("display_visible") is False
+
+
 @_frees_draws
 def display_agreement(audits: list[dict]) -> dict:
-    """The worker's display check against the labellers on scoring frames: a labelled frame saw the display, one
-    skipped as display_away did not; frames skipped for other reasons say nothing about it. A frame without
-    display_visible (before the check existed) counts as seen by the check."""
+    """The worker's display check against the labellers on the scoring frames it judged: a labelled frame saw the
+    display, one skipped as display_away did not; frames skipped for other reasons say nothing about it. Below
+    MIN_FRAMES judged frames the agreement is None, with its n."""
     pairs = []  # (the labeller saw the display, the check said it was in view)
     for a in audits:
-        if a.get("status") == "done" or (a.get("status") == "skipped" and a.get("skip_reason") == "display_away"):
-            pairs.append((a.get("status") == "done", a.get("display_visible", True) is not False))
+        labelled = a.get("status") == "done"
+        away = a.get("status") == "skipped" and a.get("skip_reason") == "display_away"
+        if (labelled or away) and judged_by_display_check(a):
+            pairs.append((labelled, a.get("display_visible", True) is not False))
+    if len(pairs) < MIN_FRAMES:
+        agree = {"value": None, "ci": None, "n": len(pairs)}
+    else:
+        agree = _stat([(int(seen == said), 1) for seen, said in pairs])
     return {
-        "agree": _stat([(int(seen == said), 1) for seen, said in pairs]),
+        "agree": agree,
         "false_not_visible": sum(seen and not said for seen, said in pairs),
         "false_visible": sum(said and not seen for seen, said in pairs),
     }

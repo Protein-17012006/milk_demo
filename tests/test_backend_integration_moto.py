@@ -7,6 +7,7 @@ import json
 import random
 import sys
 import urllib.parse
+from decimal import Decimal
 from pathlib import Path
 
 import boto3
@@ -124,10 +125,12 @@ def _ingest(
     model_version=None,
     with_frame: bool = False,
     display_visible: bool | None = None,
+    display_score: float | None = None,
 ) -> None:
     """Ingest one hub result of store DEMO-S01 taken on 21/11 at hhmmss (may carry a -2 suffix); counts are
     (model label, units). with_frame puts a fake frame in the hub bucket, as the hub does. display_visible sets
-    the worker's field (False also sets a low display_score); None leaves it out, as old workers did."""
+    the worker's field (False also sets a low display_score); None leaves it out, as old workers did. display_score
+    sets the worker's score, as a worker that has learnt the display sends it."""
     capture_id = f"CAP-S01-20261121-{hhmmss}"
     ts = f"2026-11-21T{hhmmss[:2]}:{hhmmss[2:4]}:{hhmmss[4:6]}+07:00"
     image = f"{camera_id}_20261121_{hhmmss}.jpg"
@@ -178,6 +181,8 @@ def _ingest(
         record["display_visible"] = display_visible
         if not display_visible:
             record["display_score"] = 0.2
+    if display_score is not None:
+        record["display_score"] = display_score
     normalized = ingest._normalize_record(record, source_bucket="test-hub-bucket")
     assert ingest.ingest_capture(normalized)["status"] == "ingested"
 
@@ -435,6 +440,21 @@ def test_frames_outside_opening_hours_are_not_sampled(monkeypatch: pytest.Monkey
     _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)], with_frame=True)
     ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
     assert _audits() == {}
+
+
+@mock_aws
+def test_a_frame_to_label_keeps_the_display_score_of_its_capture(monkeypatch: pytest.MonkeyPatch):
+    # the Model page's display check counts only frames the worker's check judged, so the score goes on the audit
+    _, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140700", [("hot160", 2)], with_frame=True, display_visible=True, display_score=0.91)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    audit = _audits()[AUDIT_14]
+    assert (audit["display_visible"], audit["display_score"]) == (True, Decimal("0.91"))
+    # no score on the capture (an older worker, or none learnt yet): none on the audit either
+    _ingest(ingest, "CAM-S01-A", "150700", [("hot160", 2)], with_frame=True)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-15"})
+    audit = _audits()["AUD-CAM-S01-A-20261121-15"]
+    assert audit["display_visible"] is True and "display_score" not in audit
 
 
 @mock_aws
@@ -1414,7 +1434,7 @@ def test_summary_has_presence_periods_check_level_and_display_check(monkeypatch:
     check = _shelf("check#20261121-1405")
     assert (check["counts"], check["measurable"], check["cameras"]) == ({HOT: 3, CHEESE: 3}, True, ["CAM-S01-A"])
     # a second scoring frame, 15:07: the worker said the display was in view, the labeller skipped it as away
-    _ingest(ingest, "CAM-S01-A", "150700", [("hot160", 2)], with_frame=True, display_visible=True)
+    _ingest(ingest, "CAM-S01-A", "150700", [("hot160", 2)], with_frame=True, display_visible=True, display_score=0.88)
     ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-15"})
     assert _call(api, "POST", f"/v1/model/audits/{AUDIT_15}/skip", body={"reason": "display_away"})[0] == 200
 
@@ -1448,8 +1468,9 @@ def test_summary_has_presence_periods_check_level_and_display_check(monkeypatch:
     assert (c["count_mae"]["value"], c["count_mae"]["n"]) == (pytest.approx(4 / 3), 3)
     assert (c["count_bias"]["value"], c["count_bias"]["n"]) == (pytest.approx(2 / 3), 3)
     assert c["presence_agree"] == {"value": 0.75, "ci": None, "n": 4}
+    # only 15:07 was judged by the check (14:07's capture has no display fields): 1 frame, under 10, no share
     assert s["display_check"] == {
-        "agree": {"value": 0.5, "ci": [0.0, 1.0], "n": 2},
+        "agree": {"value": None, "ci": None, "n": 1},
         "false_not_visible": 0,
         "false_visible": 1,
     }
