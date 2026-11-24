@@ -1635,6 +1635,20 @@ def _put_verdict(key: str, verdict: str, kind: str = "OOS") -> None:
     )
 
 
+def _s3_calls(monkeypatch: pytest.MonkeyPatch, ingest) -> list[str]:
+    """The S3 operations (HeadObject, CopyObject, ...) the ingest Lambda calls from now on, in order."""
+    calls: list[str] = []
+    real = ingest._aws_clients
+
+    def counted(*args, **kwargs):
+        s3, ddb = real(*args, **kwargs)
+        s3.meta.events.register("before-call.s3", lambda model, **_: calls.append(model.name))
+        return s3, ddb
+
+    monkeypatch.setattr(ingest, "_aws_clients", counted)
+    return calls
+
+
 @mock_aws
 def test_an_event_copies_its_two_photos(monkeypatch: pytest.MonkeyPatch):
     _, ingest = _backend(monkeypatch)
@@ -1684,12 +1698,72 @@ def test_recompute_keeps_photos_and_verdicts(monkeypatch: pytest.MonkeyPatch):
     photos = {k: _oos_event()[k] for k in ("photo_before_key", "photo_after_key")}
     assert _verify(api, "wrong")[0] == 200
     _shelf_plan(expected=(CHEESE, HOT), shelf_recompute_requested_at="2026-11-21T14:22:30+07:00")
+    s3_calls = _s3_calls(monkeypatch, ingest)
     _tick(ingest)
+    assert s3_calls == []  # the event came back with both photos known: no HeadObject, no CopyObject
     assert {k: _oos_event()[k] for k in photos} == photos
     items = _call(api, "GET", "/v1/shelf-events", groups="datagent")[1]["items"]
     assert [(i["event_key"], i["verdict"]) for i in items] == [(OOS_KEY, "wrong")]
     assert f"verdict#{OOS_KEY}" in {i["event_key"] for i in _table("test-shelf-events").scan()["Items"]}
     assert len(_bucket_keys()) == 2
+
+
+@mock_aws
+def test_a_recompute_takes_the_photos_from_the_checks_it_writes(monkeypatch: pytest.MonkeyPatch):
+    # the recompute writes its check items in a batch, so until the batch is sent the table holds the old items:
+    # here, checks an older tick stored before they kept a frame
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    _framed_cheese_then_empty(ingest)
+    for minute, units in [("1400", 5), ("1405", 5), ("1410", 0), ("1415", 0)]:
+        fields = {"bucket": f"20261121-{minute}", "counts": {CHEESE: units}, "captures": 1, "cameras": ["CAM-S01-A"]}
+        _put_shelf(f"check#20261121-{minute}", **fields, confident_skus=[])
+    ingest.lambda_handler({"action": "shelf_recompute", "store_id": "DEMO-S01", "now": "2026-11-21T14:22:00+07:00"})
+    event = _oos_event()
+    s3 = boto3.client("s3", region_name="ap-southeast-1")
+    read = lambda k: s3.get_object(Bucket="test-analytics-bucket", Key=event[k])["Body"].read()  # noqa: E731
+    # after: check 14:10 as this run rebuilt it from the captures; before: check 14:05, the same way
+    assert (read("photo_before_key"), read("photo_after_key")) == (b"jpeg 140510", b"jpeg 141010")
+    assert _shelf("check#20261121-1410")["image_key"].endswith("_141010.jpg")
+
+
+@mock_aws
+def test_a_recompute_copies_nothing_for_events_older_than_the_hub_frames(monkeypatch: pytest.MonkeyPatch):
+    # the hub keeps frames CAPTURE_TTL_DAYS (7) days; moto keeps them, the real bucket would have deleted them
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    s3 = boto3.client("s3", region_name="ap-southeast-1")
+    for minute, units in [("1400", 5), ("1405", 5), ("1410", 0), ("1415", 0)]:
+        frame = f"frames/CAM-S01-A/2026-11-21/{minute}.jpg"
+        s3.put_object(Bucket="test-hub-bucket", Key=frame, Body=b"jpeg")
+        fields = {"bucket": f"20261121-{minute}", "counts": {CHEESE: units}, "captures": 1, "cameras": ["CAM-S01-A"]}
+        framed = {"image_key": frame, "source_bucket": "test-hub-bucket"}
+        _put_shelf(f"check#20261121-{minute}", **fields, **framed, confident_skus=[])
+    s3_calls = _s3_calls(monkeypatch, ingest)
+    ingest.lambda_handler({"action": "shelf_recompute", "store_id": "DEMO-S01", "now": "2026-11-29T14:22:00+07:00"})
+    event = _oos_event()  # 8 days old: still written, without photos
+    assert "photo_before_key" not in event and "photo_after_key" not in event
+    assert s3_calls == []
+
+
+@mock_aws
+def test_shelf_runs_copy_photos_with_short_s3_timeouts(monkeypatch: pytest.MonkeyPatch):
+    # the ingest Lambda has 60 s: a hung S3 call must not eat the tick
+    _, ingest = _backend(monkeypatch)
+    made = []
+    real = ingest._aws_clients
+
+    def spy(*args, **kwargs):
+        clients = real(*args, **kwargs)
+        made.append(clients[0])
+        return clients
+
+    monkeypatch.setattr(ingest, "_aws_clients", spy)
+    for event in ({"action": "shelf_tick", "now": NOW}, {"action": "shelf_recompute", "store_id": "DEMO-S01"}):
+        ingest.lambda_handler(event)
+        config = made[-1].meta.config
+        # retries max_attempts 2: the first try and two retries
+        assert (config.connect_timeout, config.read_timeout, config.retries["total_max_attempts"]) == (3, 10, 3)
 
 
 @mock_aws
@@ -1860,7 +1934,7 @@ def test_a_network_failure_while_copying_a_photo_does_not_stop_the_tick(monkeypa
             raise ReadTimeoutError(endpoint_url="https://s3.test")
 
     monkeypatch.setattr(
-        ingest, "_aws_clients", lambda: (Flaky(), boto3.resource("dynamodb", region_name="ap-southeast-1"))
+        ingest, "_aws_clients", lambda *_: (Flaky(), boto3.resource("dynamodb", region_name="ap-southeast-1"))
     )
     _tick(ingest)
     event = _oos_event()
