@@ -181,7 +181,9 @@ def build(
     for part in ("train", "val"):
         for image in sorted((synth_dir / "images" / part).glob("*.jpg")):
             label = synth_dir / "labels" / part / f"{image.stem}.txt"
-            _link_or_copy(image, out / "images" / part / f"synth_{image.name}")
+            _link_or_copy(
+                image.resolve(), out / "images" / part / f"synth_{image.name}"
+            )  # the file, not a symlink to it
             lines = []
             for line in label.read_text().splitlines() if label.is_file() else []:
                 cls, rest = line.split(maxsplit=1)
