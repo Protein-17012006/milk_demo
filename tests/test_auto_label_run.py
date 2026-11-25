@@ -80,3 +80,11 @@ def test_config_classes_come_from_the_file_not_the_code(tmp_path):
     (tmp_path / "c.json").write_text(json.dumps(cfg))
     g = load_group(tmp_path / "c.json", "slide")
     assert g["classes"] == ["x", "y"] and g["region"] == (1, 2, 3, 4) and g["prompts"]["keyframes"] == ["K"]
+
+
+def test_the_detector_window_is_native_size_and_holds_the_region():
+    from training.store_view.auto_label_run import window_around
+
+    assert window_around((760, 0, 1200, 320)) == (760, 0, 2040, 1280)
+    assert window_around((880, 120, 1520, 720)) == (880, 120, 2160, 1400)
+    assert window_around((2400, 1300, 2500, 1400)) == (1280, 160, 2560, 1440)  # pushed back inside the frame

@@ -163,6 +163,27 @@ def _prompts(group: dict, prompts_from: Path, paths: dict[str, Path]):
     return images, boxes
 
 
+def window_around(region: tuple[int, int, int, int], size: tuple[int, int] = FRAME_SIZE, side: int = 1280):
+    """A side x side window of the frame, at native size, starting at the region's corner and pushed back inside."""
+    x0 = max(0, min(region[0], size[0] - side))
+    y0 = max(0, min(region[1], size[1] - side))
+    return (x0, y0, x0 + side, y0 + side)
+
+
+def _detector_boxes(model, image, group: dict, conf: float = 0.1) -> list[Proposal]:
+    """The group's classes found by a store-view detector on a native-size window around the region."""
+    from training.store_view.proposers import in_region
+
+    wx0, wy0, wx1, wy1 = window_around(group["region"], (image.shape[1], image.shape[0]))
+    r = model.predict(image[wy0:wy1, wx0:wx1], imgsz=wx1 - wx0, conf=conf, verbose=False)[0]
+    out = []
+    for (bx0, by0, bx1, by1), c, k in zip(r.boxes.xyxy.tolist(), r.boxes.conf.tolist(), r.boxes.cls.tolist(), strict=True):
+        p = Proposal("B", (bx0 + wx0, by0 + wy0, bx1 - bx0, by1 - by0), float(c), None)
+        if model.names[int(k)] in group["classes"] and in_region(p.box, group["region"]):
+            out.append(p)
+    return out
+
+
 def _draft(args) -> None:
     import cv2
 
@@ -171,13 +192,21 @@ def _draft(args) -> None:
 
     group = load_group(args.config, args.group)
     paths = _paths(args.frames)
-    images, boxes = _prompts(group, args.prompts_from, paths)
-    sources = Sources(None, str(args.yoloe), images, boxes, group["region"])
+    if args.detector:  # a group that has a detector of its own (TH): its boxes beat YOLOE's visual prompts
+        from ultralytics import YOLO
+
+        model = YOLO(str(args.detector))
+
+        def find(image):
+            return _detector_boxes(model, image, group)
+    else:
+        images, boxes = _prompts(group, args.prompts_from, paths)
+        find = Sources(None, str(args.yoloe), images, boxes, group["region"]).frame
     args.out.mkdir(parents=True, exist_ok=True)
     x0, y0, x1, y1 = group["region"]
     for cid in args.keyframes:
         image = cv2.imread(str(paths[cid]))
-        found = sources.frame(image)
+        found = find(image)
         (args.out / f"{cid}.json").write_text(json.dumps([[*p.box, p.conf] for p in found]), encoding="utf-8")
         sheet = image.copy()
         for p in found:
@@ -213,8 +242,11 @@ def main(argv: list[str] | None = None) -> None:
     g.add_argument("--proposals", type=Path, required=True)
     g.add_argument("--truth", type=Path, required=True)
     d = sub.add_parser("draft-keyframes")
-    for name in ("--config", "--frames", "--prompts-from", "--yoloe", "--out"):
+    for name in ("--config", "--frames", "--out"):
         d.add_argument(name, type=Path, required=True)
+    d.add_argument("--prompts-from", type=Path, help="truth.json or keyframes.json (YOLOE drafts)")
+    d.add_argument("--yoloe", type=Path)
+    d.add_argument("--detector", type=Path, help="the group's own detector (TH: best_store_v1.pt) instead of YOLOE")
     d.add_argument("--group", required=True)
     d.add_argument("--keyframes", nargs="+", required=True)
     d.add_argument("--check-labels", type=Path)

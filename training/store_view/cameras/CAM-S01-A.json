@@ -2,14 +2,45 @@
  "camera": "CAM-S01-A",
  "groups": {
   "slide": {
-   "region": [880, 120, 1520, 720],
-   "classes": ["cheese145", "hot160", "original145", "sourcream150"],
-   "prompts": {"source": "truth", "keyframes": ["CAP-S01-20261123-151304-2"]}
+   "region": [
+    880,
+    120,
+    1520,
+    720
+   ],
+   "classes": [
+    "cheese145",
+    "hot160",
+    "original145",
+    "sourcream150"
+   ],
+   "prompts": {
+    "source": "truth",
+    "keyframes": [
+     "CAP-S01-20261123-151304-2"
+    ]
+   }
   },
   "th": {
-   "region": [760, 0, 1200, 320],
-   "classes": ["th_true_milk"],
-   "prompts": {"source": "keyframes", "keyframes": []}
+   "region": [
+    760,
+    0,
+    1200,
+    320
+   ],
+   "classes": [
+    "th_true_milk"
+   ],
+   "prompts": {
+    "source": "keyframes",
+    "keyframes": [
+     "CAP-S01-20261123-130053",
+     "CAP-S01-20261123-174007-2",
+     "CAP-S01-20261124-133509",
+     "CAP-S01-20261124-154516-4",
+     "CAP-S01-20261124-194027-2"
+    ]
+   }
   }
  }
 }
