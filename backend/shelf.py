@@ -1,6 +1,7 @@
 """Shelf metrics for the Dashboard: 5-minute checks, opening hours, shelf state and events, hour and day rollups.
 
-Spec: docs/superpowers/specs/2026-11-24-dashboard-shelf-metrics-design.md. Nothing here touches AWS.
+Spec: docs/superpowers/specs/2026-11-24-dashboard-shelf-metrics-design.md, and 2026-11-24-reliability-design.md 1.1c
+(checks without the display are not measured, gaps). Nothing here touches AWS.
 A bucket is a 5-minute slot in ICT (UTC+7), named by its first minute: YYYYMMDD-HHMM.
 """
 
@@ -27,6 +28,7 @@ RECOMPUTE_DAYS = 15
 SUGGEST_DAYS = 7
 CHECK_TTL_DAYS = 15
 ROLLUP_TTL_DAYS = 90
+GAP_MINUTES = 30  # two measured checks further apart than this have a gap between them: the shelf was not seen
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
@@ -58,6 +60,26 @@ def is_open(bucket: str, open_time: str | None, close_time: str | None) -> bool:
     return open_time <= f"{bucket[9:11]}:{bucket[11:13]}" < close_time
 
 
+def open_buckets(open_time: str | None, close_time: str | None, first: str, last: str) -> int:
+    """How many 5-minute checks fall inside the opening hours, from bucket first to bucket last, both included.
+    A store without hours has none."""
+    if not open_time or not close_time:
+        return 0
+    open_min = int(open_time[:2]) * 60 + int(open_time[3:5])
+    close_min = int(close_time[:2]) * 60 + int(close_time[3:5])
+    first_day, last_day = bucket_time(first).date(), bucket_time(last).date()
+    first_min = int(first[9:11]) * 60 + int(first[11:13])
+    last_min = int(last[9:11]) * 60 + int(last[11:13])
+    total, day = 0, first_day
+    while day <= last_day:
+        lo = max(open_min, first_min if day == first_day else 0)
+        hi = min(close_min - 1, last_min if day == last_day else 24 * 60 - 1)
+        if hi >= lo:
+            total += hi // BUCKET_MINUTES - -(-lo // BUCKET_MINUTES) + 1  # multiples of 5 in [lo, hi]
+        day += timedelta(days=1)
+    return total
+
+
 def _rows(item: dict) -> list[dict]:
     raw = item.get("rows_json")
     if not raw:
@@ -65,13 +87,24 @@ def _rows(item: dict) -> list[dict]:
     return json.loads(raw) if isinstance(raw, str) else list(raw)
 
 
+def sees_display(capture: dict) -> bool:
+    """Whether the worker saw the display in this capture; captures from before the display check carry no
+    display_visible and saw it."""
+    return capture.get("display_visible", True) is not False
+
+
 def build_check(bucket: str, captures: list[dict]) -> dict[str, Any]:
-    """One check of a store: per SKU, the lower median of each camera's captures (a SKU missing from a capture
-    counts 0 there), summed over cameras. Unrecognized rows are left out. confident_skus: SKUs with one box at
-    CONFIDENT or more."""
+    """One check of a store, from the captures that see the display: per SKU, the lower median of each camera's
+    captures (a SKU missing from a capture counts 0 there), summed over cameras. Unrecognized rows are left out.
+    confident_skus: SKUs with one box at CONFIDENT or more.
+
+    The check is measurable when at least half of its captures see the display; otherwise it says why. image_key
+    and source_bucket are the frame of the first capture (by capture_id) that sees the display and has one, for
+    event photos."""
+    seeing = [item for item in captures if sees_display(item)]
     per_camera: dict[str, list[dict[str, int]]] = defaultdict(list)
     confident: set[str] = set()
-    for item in captures:
+    for item in seeing:
         units: dict[str, int] = defaultdict(int)
         for row in _rows(item):
             if row.get("sku_id"):
@@ -85,13 +118,29 @@ def build_check(bucket: str, captures: list[dict]) -> dict[str, Any]:
     for caps in per_camera.values():
         for sku in {s for c in caps for s in c}:
             counts[sku] += lower_median([c.get(sku, 0) for c in caps])
-    return {
+    framed = sorted((item for item in seeing if item.get("image_key")), key=lambda item: str(item["capture_id"]))
+    measurable = bool(seeing) and 2 * len(seeing) >= len(captures)
+    check = {
         "bucket": bucket,
         "counts": dict(counts),
         "captures": len(captures),
-        "cameras": sorted(per_camera),
+        "captures_visible": len(seeing),
+        "measurable": measurable,
+        "cameras": sorted({str(item.get("camera_id", "")) for item in captures}),
         "confident_skus": sorted(confident),
+        "image_key": framed[0]["image_key"] if framed else None,
+        "source_bucket": (framed[0].get("source_bucket") or None) if framed else None,
     }
+    if not measurable:
+        check["unmeasured_reason"] = "display_not_visible"
+    return check
+
+
+def gap_between(last_measured: str | None, bucket: str) -> tuple[str, str] | None:
+    """(last_measured, bucket) when these two measured checks are more than GAP_MINUTES apart, else None."""
+    if last_measured is None or bucket_time(bucket) - bucket_time(last_measured) <= timedelta(minutes=GAP_MINUTES):
+        return None
+    return last_measured, bucket
 
 
 def status_of(level: int) -> str:
@@ -112,18 +161,31 @@ def _event(kind: str, at: str, before: int, after: int, duration_min: int | None
     }
 
 
-def step_state(state: dict | None, units: int, bucket: str) -> tuple[dict, dict | None]:
-    """Apply one counted check of one SKU to its shelf state.
+_NEW_STATE = {
+    "L": None,
+    "status": None,
+    "since": None,
+    "prev": None,
+    "prev_bucket": None,
+    "oos_checks": 0,
+    "prev_gap": None,
+}
+
+
+def step_state(
+    state: dict | None, units: int, bucket: str, gap: tuple[str, str] | None = None
+) -> tuple[dict, dict | None]:
+    """Apply one measured check of one SKU to its shelf state.
 
     A change needs two checks in a row: x1 is the previous check, x2 this one. A check makes at most one event,
     tried in the order OOS, LOW_STOCK, DEPLETED, RESTOCKED, and the event is timed at x1. With no event and
     x1 == x2, the level follows x2 (shoppers taking single units). oos_checks counts checks spent out of stock,
-    so a RESTOCKED that ends one carries its minutes."""
-    s = (
-        dict(state)
-        if state
-        else {"L": None, "status": None, "since": None, "prev": None, "prev_bucket": None, "oos_checks": 0}
-    )
+    so a RESTOCKED that ends one carries its minutes.
+
+    gap is the gap right before this check (gap_between), if any; the state keeps it as prev_gap. An event timed at
+    a check right after a gap carries after_gap, gap_from and gap_to: the change happened somewhere in that gap.
+    A state read back from DynamoDB lacks the fields that were None."""
+    s = {**_NEW_STATE, **(state or {})}
     x1, x2, at, level = s["prev"], int(units), s["prev_bucket"], s["L"]
     event = None
     new_level = level
@@ -146,12 +208,15 @@ def step_state(state: dict | None, units: int, bucket: str) -> tuple[dict, dict 
             new_level = x2
         if event is not None:
             new_level = event["level_after"]
+            if s["prev_gap"]:
+                gap_from, gap_to = s["prev_gap"]
+                event.update(after_gap=True, gap_from=gap_from, gap_to=gap_to)
     if new_level is not None and status_of(new_level) != s["status"]:
         s["status"], s["since"] = status_of(new_level), at
         s["oos_checks"] = 2 if s["status"] == "OOS" else 0
     elif event is None and s["status"] == "OOS":
         s["oos_checks"] += 1
-    s["L"], s["prev"], s["prev_bucket"] = new_level, x2, bucket
+    s["L"], s["prev"], s["prev_bucket"], s["prev_gap"] = new_level, x2, bucket, list(gap) if gap else None
     return s, event
 
 
@@ -162,9 +227,12 @@ def _blank() -> dict[str, int]:
     return dict.fromkeys(SKU_FIELDS, 0)
 
 
-def _result(checks: int, max_total: int, confident: set[str], skus: dict[str, dict[str, int]]) -> dict[str, Any]:
+def _result(
+    checks: int, unmeasured: int, max_total: int, confident: set[str], skus: dict[str, dict[str, int]]
+) -> dict[str, Any]:
     return {
         "checks": checks,
+        "unmeasured_checks": unmeasured,
         "max_total": max_total,
         "confident_skus": sorted(confident),
         "skus": {sku: dict(row) for sku, row in skus.items()},
@@ -172,15 +240,19 @@ def _result(checks: int, max_total: int, confident: set[str], skus: dict[str, di
 
 
 def rollup(checks: list[dict], events: list[dict]) -> dict[str, Any]:
-    """Sum of one hour: counted checks (open, with expected SKUs) per SKU, the store's largest total in one check,
-    SKUs seen confidently in any check, and the hour's OOS and RESTOCKED events. An expected SKU missing from a
-    check's counts is a check without stock."""
+    """Sum of one hour: counted checks (open, measurable, with expected SKUs) per SKU, the store's largest total in
+    one check, SKUs seen confidently in any check, and the hour's OOS and RESTOCKED events. An expected SKU missing
+    from a check's counts is a check without stock. unmeasured_checks: open checks with expected SKUs that could not
+    be measured; checks stored before measurable existed were measured."""
     skus: dict[str, dict[str, int]] = defaultdict(_blank)
-    counted, max_total, confident = 0, 0, set()
+    counted, unmeasured, max_total, confident = 0, 0, 0, set()
     for check in checks:
         confident.update(check.get("confident_skus") or [])
         expected = check.get("expected") or []
         if not check.get("open") or not expected:
+            continue
+        if not check.get("measurable", True):
+            unmeasured += 1
             continue
         counted += 1
         total = 0
@@ -199,26 +271,27 @@ def rollup(checks: list[dict], events: list[dict]) -> dict[str, Any]:
         elif event["type"] == "RESTOCKED":
             row["restock_units"] += int(event["delta"])
             row["restock_events"] += 1
-    return _result(counted, max_total, confident, skus)
+    return _result(counted, unmeasured, max_total, confident, skus)
 
 
 def merge(rollups: list[dict]) -> dict[str, Any]:
     """Hours into a day (or days into a period): counts add, max_total is the largest, confident SKUs unite."""
     skus: dict[str, dict[str, int]] = defaultdict(_blank)
-    counted, max_total, confident = 0, 0, set()
+    counted, unmeasured, max_total, confident = 0, 0, 0, set()
     for r in rollups:
         counted += int(r.get("checks", 0))
+        unmeasured += int(r.get("unmeasured_checks", 0))
         max_total = max(max_total, int(r.get("max_total", 0)))
         confident.update(r.get("confident_skus") or [])
         for sku, row in (r.get("skus") or {}).items():
             for field in SKU_FIELDS:
                 skus[sku][field] += int(row.get(field, 0))
-    return _result(counted, max_total, confident, skus)
+    return _result(counted, unmeasured, max_total, confident, skus)
 
 
 def totals(rollups: list[dict], skus: set[str] | None = None) -> dict[str, Any]:
     """Numbers of a period, optionally for some SKUs only (a category). osa and avg_total_units are None when
-    nothing was counted."""
+    nothing was counted. store_checks and unmeasured_checks are the store's checks, whatever the SKUs."""
     merged = merge(rollups)
     rows = [row for sku, row in merged["skus"].items() if skus is None or sku in skus]
     sums = {field: sum(row[field] for row in rows) for field in SKU_FIELDS}
@@ -231,6 +304,7 @@ def totals(rollups: list[dict], skus: set[str] | None = None) -> dict[str, Any]:
         "restock_events": sums["restock_events"],
         "oos_started": sums["oos_started"],
         "store_checks": store_checks,
+        "unmeasured_checks": merged["unmeasured_checks"],
         "avg_total_units": sums["units_sum"] / store_checks if store_checks else None,
     }
 

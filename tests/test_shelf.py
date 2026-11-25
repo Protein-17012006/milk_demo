@@ -14,8 +14,10 @@ from shelf import (  # noqa: E402
     bucket_of,
     build_check,
     change_pct,
+    gap_between,
     is_open,
     merge,
+    open_buckets,
     rollup,
     step_state,
     totals,
@@ -23,8 +25,17 @@ from shelf import (  # noqa: E402
 )
 
 
-def cap(camera: str, ts: str, counts: dict[str, int], boxes: list[dict] | None = None) -> dict:
-    """One item of the captures table: rows_json as ingest writes it (sku_id = product name), detections_json if boxes."""
+def cap(
+    camera: str,
+    ts: str,
+    counts: dict[str, int],
+    boxes: list[dict] | None = None,
+    visible: bool | None = None,
+    image_key: str = "",
+) -> dict:
+    """One item of the captures table: rows_json as ingest writes it (sku_id = product name), detections_json if boxes.
+    visible sets display_visible (None leaves it out, as for captures from before the display check); image_key is
+    "" for a capture without a frame, as ingest writes it."""
     rows = [
         {
             "sku_id": name,
@@ -35,13 +46,17 @@ def cap(camera: str, ts: str, counts: dict[str, int], boxes: list[dict] | None =
         }
         for name, n in counts.items()
     ]
-    return {
+    item = {
         "camera_id": camera,
         "capture_id": f"CAP-S01-{ts[:4]}{ts[5:7]}{ts[8:10]}-{ts[11:13]}{ts[14:16]}{ts[17:19]}",
         "capture_timestamp": ts,
+        "image_key": image_key,
         "rows_json": json.dumps(rows),
         "detections_json": json.dumps(boxes) if boxes is not None else None,
     }
+    if visible is not None:
+        item["display_visible"] = visible
+    return item
 
 
 # --- Task 1: checks and opening hours ---
@@ -229,3 +244,98 @@ def test_osa_is_available_over_counted_checks_and_filters_by_sku():
 def test_change_pct():
     assert change_pct(13.4, 10.0) == 34.0
     assert change_pct(5, 0) is None and change_pct(5, None) is None and change_pct(None, 5) is None
+
+
+# --- Reliability: checks without the display are not measured, gaps between measured checks ---
+
+
+def test_a_check_counts_only_captures_that_see_the_display():
+    caps = [
+        cap("CAM-A", "2026-11-23T14:05:10+07:00", {"X": 4}),
+        cap("CAM-A", "2026-11-23T14:06:10+07:00", {}, visible=False),
+        cap("CAM-A", "2026-11-23T14:07:10+07:00", {"X": 4}),
+    ]
+    c = build_check("20261123-1405", caps)
+    assert (c["counts"], c["captures_visible"], c["measurable"]) == ({"X": 4}, 2, True)
+
+
+def test_a_check_mostly_without_the_display_is_not_measurable():
+    caps = [cap("CAM-A", f"2026-11-23T14:0{m}:10+07:00", {}, visible=m == 5) for m in (5, 6, 7)]
+    assert build_check("20261123-1405", caps)["measurable"] is False
+
+
+def test_old_captures_without_the_field_see_the_display():
+    assert build_check("20261123-1405", [cap("CAM-A", "2026-11-23T14:05:10+07:00", {"X": 1})])["measurable"]
+
+
+def test_a_check_keeps_one_frame_for_event_photos():
+    caps = [
+        cap("CAM-A", "2026-11-23T14:06:10+07:00", {"X": 1}, image_key="frames/b.jpg"),
+        cap("CAM-A", "2026-11-23T14:05:10+07:00", {"X": 1}, visible=False, image_key="frames/a.jpg"),
+    ]
+    assert build_check("20261123-1405", caps)["image_key"] == "frames/b.jpg"
+
+
+def test_a_check_without_the_display_says_why():
+    hidden = build_check("20261123-1405", [cap("CAM-A", "2026-11-23T14:05:10+07:00", {"X": 3}, visible=False)])
+    assert (hidden["counts"], hidden["unmeasured_reason"]) == ({}, "display_not_visible")
+    assert "unmeasured_reason" not in build_check("20261123-1405", [cap("CAM-A", "2026-11-23T14:05:10+07:00", {})])
+
+
+def test_gap_between():
+    assert gap_between("20261123-1400", "20261123-1430") is None
+    assert gap_between("20261123-1400", "20261123-1435") == ("20261123-1400", "20261123-1435")
+    assert gap_between(None, "20261123-1435") is None
+
+
+def test_an_event_right_after_a_gap_says_so():
+    st, events = None, []
+    for bucket, units, gap in [
+        ("20261123-2020", 5, None),
+        ("20261123-2025", 5, None),
+        ("20261124-0845", 0, ("20261123-2025", "20261124-0845")),
+        ("20261124-0850", 0, None),
+    ]:
+        st, e = step_state(st, units, bucket, gap)
+        events += [e] if e else []
+    assert events == [
+        {
+            "type": "OOS",
+            "at": "20261124-0845",
+            "delta": -5,
+            "level_before": 5,
+            "level_after": 0,
+            "duration_min": None,
+            "after_gap": True,
+            "gap_from": "20261123-2025",
+            "gap_to": "20261124-0845",
+        }
+    ]
+
+
+def test_a_state_stored_without_its_empty_fields_still_steps():
+    # DynamoDB keeps no None: a state read back has no L, status, since or prev_gap until they are set
+    st, event = step_state({"prev": 5, "prev_bucket": "20261123-1400", "oos_checks": 0}, 5, "20261123-1405")
+    assert event is None and (st["L"], st["status"], st["since"]) == (5, "IN_STOCK", "20261123-1400")
+
+
+def test_unmeasured_open_checks_are_counted_apart():
+    c = {
+        "bucket": "20261123-1400",
+        "counts": {"A": 0},
+        "open": True,
+        "measurable": False,
+        "expected": ["A"],
+        "confident_skus": [],
+    }
+    r = rollup([c], [])
+    assert (r["checks"], r["unmeasured_checks"], "A" in r["skus"]) == (0, 1, False)
+    assert totals([r])["unmeasured_checks"] == 1
+
+
+def test_open_buckets_counts_five_minute_checks_inside_the_hours():
+    assert open_buckets("08:00", "20:30", "20261123-0000", "20261123-2355") == 150
+    assert open_buckets("08:00", "20:30", "20261123-0800", "20261123-0810") == 3
+    assert open_buckets(None, None, "20261123-0000", "20261123-2355") == 0
+    assert open_buckets("08:00", "20:30", "20261123-0000", "20261124-2355") == 300  # two days
+    assert open_buckets("08:00", "20:30", "20261124-0000", "20261123-2355") == 0  # last before first

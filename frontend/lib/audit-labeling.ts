@@ -5,9 +5,12 @@
  *   correct      named box: one unit of that SKU; UNRECOGNIZED box: goods outside the catalogue
  *   wrong_sku    one unit of another catalogue SKU (trueSku)
  *   not_product  not a catalogue SKU (named box) / not goods at all (UNRECOGNIZED box)
+ *   out_of_scope a real can that rule A does not count; the box is dropped from every number
  */
 
-export type Verdict = "correct" | "wrong_sku" | "not_product";
+import type { ApiAuditListItem } from "./api";
+
+export type Verdict = "correct" | "wrong_sku" | "not_product" | "out_of_scope";
 
 export interface BoxLabel {
   verdict: Verdict | null;
@@ -25,9 +28,9 @@ export interface MissedPoint {
   y: number;
 }
 
-const CYCLE: (Verdict | null)[] = [null, "correct", "wrong_sku", "not_product"];
+const CYCLE: (Verdict | null)[] = [null, "correct", "wrong_sku", "not_product", "out_of_scope"];
 
-/** The verdict after one more click on a box: unlabelled → correct → wrong SKU → not a product → unlabelled. */
+/** The verdict after one more click on a box: unlabelled → correct → wrong SKU → not our SKU → out of scope → unlabelled. */
 export function nextVerdict(verdict: Verdict | null): Verdict | null {
   return CYCLE[(CYCLE.indexOf(verdict) + 1) % CYCLE.length];
 }
@@ -44,8 +47,9 @@ export function totalsBySku(
     out[sku][key] += 1;
   };
   for (const box of aiBoxes) {
-    if (box.sku_id) bump(box.sku_id, "model");
     const label = labels[box.box_id];
+    if (label?.verdict === "out_of_scope") continue; // counts neither for the model nor for the truth
+    if (box.sku_id) bump(box.sku_id, "model");
     if (!label) continue;
     if (label.verdict === "correct" && box.sku_id) bump(box.sku_id, "truth");
     else if (label.verdict === "wrong_sku" && label.trueSku) bump(label.trueSku, "truth");
@@ -54,8 +58,9 @@ export function totalsBySku(
   return out;
 }
 
-/** Save needs a verdict on every box, and the right SKU on every box marked wrong. */
-export function canSave(aiBoxes: AuditBox[], labels: Record<number, BoxLabel>): boolean {
+/** Save needs a verdict on every box, the right SKU on every box marked wrong, and the missed-cans check ticked. */
+export function canSave(aiBoxes: AuditBox[], labels: Record<number, BoxLabel>, missesChecked: boolean): boolean {
+  if (!missesChecked) return false;
   return aiBoxes.every((box) => {
     const label = labels[box.box_id];
     if (!label?.verdict) return false;
@@ -63,13 +68,30 @@ export function canSave(aiBoxes: AuditBox[], labels: Record<number, BoxLabel>): 
   });
 }
 
-/** Body of PUT /model/audits/{id}: verdicts by box, missed points rounded to whole frame pixels. */
+/** What relabelQueue reads of an item of GET /model/audits. */
+export type RelabelCandidate = Pick<
+  ApiAuditListItem,
+  "audit_id" | "capture_timestamp" | "purpose" | "status" | "label_rule"
+>;
+
+/** The frames "Relabel them" opens in the labeller: done scoring frames labelled before rule A (label_rule is not
+ * "A"), oldest first. GET /model/audits?old_rule=1 lists only these; the filter keeps the labeller to them anyway.
+ * The labeller loads each frame's saved verdicts, and Save stores it under rule A. */
+export function relabelQueue(items: RelabelCandidate[]): string[] {
+  return items
+    .filter((a) => a.status === "done" && a.purpose === "scoring" && a.label_rule !== "A")
+    .sort((a, b) => a.capture_timestamp.localeCompare(b.capture_timestamp))
+    .map((a) => a.audit_id);
+}
+
+/** Body of PUT /model/audits/{id}: verdicts by box, missed points rounded to whole frame pixels, check ticked. */
 export function toPayload(
   labels: Record<number, BoxLabel>,
   missed: MissedPoint[]
 ): {
   verdicts: { box_id: number; verdict: Verdict; true_sku_id?: string }[];
   missed: MissedPoint[];
+  misses_checked: true;
 } {
   const verdicts = Object.entries(labels)
     .filter(([, label]) => label.verdict !== null)
@@ -82,5 +104,6 @@ export function toPayload(
   return {
     verdicts,
     missed: missed.map((p) => ({ sku_id: p.sku_id, x: Math.round(p.x), y: Math.round(p.y) })),
+    misses_checked: true,
   };
 }

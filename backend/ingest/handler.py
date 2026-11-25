@@ -12,18 +12,22 @@ Receives captures from:
 
 from __future__ import annotations
 
+import hashlib
+import heapq
 import json
 import os
 import random
 import time
 from collections import defaultdict
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import boto3
 import shelf
 from boto3.dynamodb.conditions import Key
-from botocore.exceptions import ClientError
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
 from common import (
     UNRECOGNIZED,
     floor_two_decimals,
@@ -49,10 +53,12 @@ HEALTH_TTL_DAYS = 90
 SHELF_TABLE = os.environ.get("SHELF_TABLE", "")
 SHELF_EVENTS_TABLE = os.environ.get("SHELF_EVENTS_TABLE", "")
 STORE_LIST_TABLE = os.environ.get("STORE_LIST_TABLE", "")
+# The shelf tick and the recompute copy event photos inside this Lambda's 60 s: a hung S3 call gives up fast
+PHOTO_S3_CONFIG = Config(connect_timeout=3, read_timeout=10, retries={"max_attempts": 2})
 
 
-def _aws_clients():
-    s3 = boto3.client("s3", region_name=REGION)
+def _aws_clients(s3_config: Config | None = None):
+    s3 = boto3.client("s3", region_name=REGION, config=s3_config)
     ddb = boto3.resource("dynamodb", region_name=REGION)
     return s3, ddb
 
@@ -70,6 +76,7 @@ def _normalize_record(raw: dict[str, Any], source_bucket: str = "") -> dict[str,
             json.loads(raw["detections_json"]) if isinstance(raw["detections_json"], str) else raw["detections_json"]
         )
 
+    display_score = raw.get("display_score")
     record = {
         "capture_id": raw.get("capture_id") or (log or {}).get("capture_id", ""),
         "store_id": raw.get("store_id") or (log or {}).get("store_id", ""),
@@ -86,6 +93,9 @@ def _normalize_record(raw: dict[str, Any], source_bucket: str = "") -> dict[str,
         "faces_blurred": int(raw.get("faces_blurred") or 0),
         "pipeline": raw.get("pipeline", "long"),
         "model_version": raw.get("model_version") or "unknown",
+        # what the worker saw of the display: old workers send neither, which means "visible"
+        "display_score": float(display_score) if display_score is not None else None,
+        "display_visible": bool(raw.get("display_visible", True)),
         "detections": from_dynamodb(detections) if detections is not None else None,
         "counts": from_dynamodb(raw.get("counts") or {}),
         "rows": from_dynamodb(rows or []),
@@ -97,7 +107,7 @@ def _normalize_record(raw: dict[str, Any], source_bucket: str = "") -> dict[str,
 def ingest_capture(
     record: dict[str, Any], s3_client=None, ddb_resource=None, write_analytics: bool = False
 ) -> dict[str, Any]:
-    """Validate, deduplicate, map alias, write captures/latest_stock/review_queue."""
+    """Validate, deduplicate, map alias, write captures/latest_stock/review_queue and the camera's display status."""
     errors = validate_capture_payload(record)
     if errors:
         raise ValueError(f"Invalid capture payload: {'; '.join(errors)}")
@@ -151,6 +161,8 @@ def ingest_capture(
             "faces_blurred": record["faces_blurred"],
             "pipeline": record["pipeline"],
             "model_version": record.get("model_version") or "unknown",
+            "display_visible": record.get("display_visible", True),
+            **({"display_score": record["display_score"]} if record.get("display_score") is not None else {}),
             "detections_json": (
                 json.dumps(record["detections"], separators=(",", ":"))
                 if record.get("detections") is not None
@@ -172,9 +184,12 @@ def ingest_capture(
             return {"status": "duplicate_skipped", "capture_id": capture_id}
         raise
 
-    # Step 4: Update latest_stock (per store_id + sku_id) with lower-median smoothing of last 3 captures
+    # Step 4: Update latest_stock (per store_id + sku_id) with lower-median smoothing of last 3 captures. A capture
+    # that cannot see the display is kept above but says nothing about the shelf: latest_stock and the review queue
+    # stay as the last capture that saw the display left them.
+    sees_display = shelf.sees_display(record)
     seen_skus: set[str] = set()
-    for row in mapped_rows:
+    for row in mapped_rows if sees_display else []:
         sku_key = row["sku_id"] or UNRECOGNIZED
         seen_skus.add(sku_key)
 
@@ -241,7 +256,13 @@ def ingest_capture(
                 )
             )
 
-    _count_down_missing(stock_tbl, store_id, camera_id, capture_ts, seen_skus)
+    if sees_display:
+        _count_down_missing(stock_tbl, store_id, camera_id, capture_ts, seen_skus)
+
+    # Step 6: Whether the camera sees the display, for the website (after the shelf numbers: a retry of this
+    # message is skipped as a duplicate, so a failure here must not cost the capture its stock update)
+    if SHELF_TABLE:
+        _record_display(ddb_resource.Table(SHELF_TABLE), store_id, camera_id, capture_ts, sees_display)
 
     if write_analytics and ANALYTICS_BUCKET:
         _write_official_to_s3(s3_client, record, mapped_rows)
@@ -252,6 +273,41 @@ def ingest_capture(
         "skus_updated": len(seen_skus),
         "flagged_rows": record["flagged_rows"],
     }
+
+
+def _record_display(table, store_id: str, camera_id: str, capture_ts: str, visible: bool) -> None:
+    """Item display#<camera_id> of the shelf table: whether the camera sees the display (visible), since when
+    (since), the newest capture that saw it (last_visible_at) and the newest capture applied (updated_at).
+
+    SQS and hub re-sends can deliver an older capture after a newer one, so every update is conditional on
+    updated_at: an older capture never moves the status back, it can only move last_visible_at on."""
+    key = {"store_id": store_id, "key": f"display#{camera_id}"}
+    seen = ", last_visible_at = :ts" if visible else ""
+    newer = {":ts": capture_ts, ":v": visible}
+    updates = [
+        # the same status as now: only the times move on
+        ("SET updated_at = :ts" + seen, "visible = :v AND updated_at < :ts", newer),
+        # the camera's first capture, or the status flips: since starts here
+        (
+            "SET camera_id = :camera, visible = :v, since = :ts, updated_at = :ts" + seen,
+            "attribute_not_exists(updated_at) OR (visible <> :v AND updated_at < :ts)",
+            {**newer, ":camera": camera_id},
+        ),
+    ]
+    if visible:  # older than the status, it can still be the newest capture that saw the display
+        newest_seen = (
+            "attribute_exists(updated_at) AND (attribute_not_exists(last_visible_at) OR last_visible_at < :ts)"
+        )
+        updates.append(("SET last_visible_at = :ts", newest_seen, {":ts": capture_ts}))
+    for update, condition, values in updates:
+        try:
+            table.update_item(
+                Key=key, UpdateExpression=update, ConditionExpression=condition, ExpressionAttributeValues=values
+            )
+            return
+        except ClientError as exc:  # not this case (or a newer capture is in): try the next one
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
 
 
 def _count_down_missing(stock_tbl, store_id: str, camera_id: str, capture_ts: str, seen_skus: set[str]) -> None:
@@ -436,20 +492,13 @@ def captures_in_hour(ddb_resource, camera_id: str, store_code: str, hour: str) -
     return from_dynamodb(items)
 
 
-def sample_audit(
-    s3_client, ddb_resource, camera_id: str, items: list[dict[str, Any]], hour: str, rng: random.Random
+def _write_frame_audit(
+    s3_client, table, audit_id: str, purpose: str, pick: dict[str, Any], camera_id: str
 ) -> str | None:
-    """Picks one capture with a frame at random, copies the frame to the analytics bucket and writes a
-    pending audit. Returns the audit id, or None when the hour has no frame or already has its audit."""
-    with_frame = sorted((it for it in items if it.get("image_key")), key=lambda it: it["capture_id"])
-    if not with_frame:
-        return None
-    table = ddb_resource.Table(AUDITS_TABLE)
-    store_id = with_frame[0]["store_id"]
-    audit_id = f"AUD-{camera_id}-{hour}"
-    if table.get_item(Key={"store_id": store_id, "audit_id": audit_id}).get("Item"):
-        return None
-    pick = rng.choice(with_frame)
+    """Copies the picked capture's frame to the analytics bucket and writes a pending audit of that purpose, with
+    what the worker's display check said of the capture: display_visible, and display_score when the check had one
+    (the Model page's display check counts only the frames it judged). Returns the audit id, or None when the audit
+    already exists."""
     filename = pick.get("image_filename") or pick["image_key"].rsplit("/", 1)[-1]
     image_key = f"audits/frames/{camera_id}/{pick['capture_timestamp'][:10]}/{filename}"
     s3_client.copy_object(
@@ -459,14 +508,17 @@ def sample_audit(
         table.put_item(
             Item=to_dynamodb_safe(
                 {
-                    "store_id": store_id,
+                    "store_id": pick["store_id"],
                     "audit_id": audit_id,
+                    "purpose": purpose,
                     "camera_id": camera_id,
                     "capture_id": pick["capture_id"],
                     "capture_timestamp": pick["capture_timestamp"],
                     "image_key": image_key,
                     "model_version": pick.get("model_version") or "unknown",
                     "pipeline": pick.get("pipeline", ""),
+                    "display_visible": pick.get("display_visible", True) is not False,
+                    **({"display_score": pick["display_score"]} if pick.get("display_score") is not None else {}),
                     "status": "pending",
                     "sampled_at": datetime.now(ICT).isoformat(timespec="seconds"),
                     "ai_boxes_json": json.dumps(capture_boxes(pick), separators=(",", ":")),
@@ -481,6 +533,52 @@ def sample_audit(
             return None
         raise
     return audit_id
+
+
+def sample_frames(
+    s3_client,
+    ddb_resource,
+    camera_id: str,
+    items: list[dict[str, Any]],
+    hour: str,
+    rng: random.Random,
+    store: dict[str, Any] | None,
+) -> list[str]:
+    """Picks, for one camera-hour, a scoring frame (AUD-, any capture with a frame) and a training frame
+    (TRN-, a different capture whose worker saw the display). Frames outside the store's opening hours are not
+    sampled. Returns the audit ids created now (0, 1 or 2); an existing audit is left alone."""
+    with_frame = sorted((it for it in items if it.get("image_key")), key=lambda it: it["capture_id"])
+    if store and store.get("open_time") and store.get("close_time"):
+        with_frame = [
+            it
+            for it in with_frame
+            if shelf.is_open(shelf.bucket_of(it["capture_timestamp"]), store["open_time"], store["close_time"])
+        ]
+    if not with_frame:
+        return []
+    table = ddb_resource.Table(AUDITS_TABLE)
+    store_id = with_frame[0]["store_id"]
+    scoring_id, training_id = f"AUD-{camera_id}-{hour}", f"TRN-{camera_id}-{hour}"
+    created: list[str] = []
+
+    scoring = table.get_item(Key={"store_id": store_id, "audit_id": scoring_id}).get("Item")
+    if scoring:
+        scoring_capture = scoring.get("capture_id")
+    else:
+        pick = rng.choice(with_frame)
+        scoring_capture = pick["capture_id"]
+        if _write_frame_audit(s3_client, table, scoring_id, "scoring", pick, camera_id):
+            created.append(scoring_id)
+
+    if not table.get_item(Key={"store_id": store_id, "audit_id": training_id}).get("Item"):
+        seeing = [
+            it for it in with_frame if it.get("display_visible") is not False and it["capture_id"] != scoring_capture
+        ]
+        if seeing:
+            pick = rng.choice(seeing)
+            if _write_frame_audit(s3_client, table, training_id, "training", pick, camera_id):
+                created.append(training_id)
+    return created
 
 
 def record_health(ddb_resource, camera_id: str, hour: str, items: list[dict[str, Any]]) -> None:
@@ -509,9 +607,10 @@ def _run_hour(s3_client, ddb_resource, hour: str, rng: random.Random, sample: bo
             record_health(ddb_resource, camera_id, hour, items)
             health += 1
             if sample:
-                audit_id = sample_audit(s3_client, ddb_resource, camera_id, items, hour, rng)
-                if audit_id:
-                    audits.append(audit_id)
+                store = from_dynamodb(
+                    ddb_resource.Table(STORE_LIST_TABLE).get_item(Key={"store_id": items[0]["store_id"]}).get("Item")
+                )
+                audits.extend(sample_frames(s3_client, ddb_resource, camera_id, items, hour, rng, store))
         except Exception as exc:  # noqa: BLE001 - one camera failing must not stop the others
             print(json.dumps({"model_page_hour_failed": camera_id, "hour": hour, "error": repr(exc)}))
     return {"hour": hour, "audits": audits, "health_items": health}
@@ -601,18 +700,25 @@ def _expected_skus(ddb_resource, store: dict[str, Any], now_utc: datetime) -> li
     return sorted({sku for day in days for sku in day.get("confident_skus") or []})
 
 
-def _apply_check(check: dict, store: dict, expected: list[str], skus_state: dict) -> list[dict[str, Any]]:
-    """Mark the check open or not, record the list it was counted against, and step each expected SKU's state."""
+def _apply_check(
+    check: dict, store: dict, expected: list[str], skus_state: dict, last_measured: str | None
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Mark the check open or not and record the list it was counted against. An open, measured check with a list
+    steps each expected SKU's state, with the gap since the last measured check if there is one; any other check
+    leaves the state alone. Returns the events and the last measured bucket. Checks stored before measurable
+    existed were measured."""
     check["open"] = shelf.is_open(check["bucket"], store.get("open_time"), store.get("close_time"))
     check["expected"] = expected
+    if not (check["open"] and check.get("measurable", True) and expected):
+        return [], last_measured
+    gap = shelf.gap_between(last_measured, check["bucket"])
     events = []
-    if check["open"] and expected:
-        for sku in expected:
-            state, event = shelf.step_state(skus_state.get(sku), int(check["counts"].get(sku, 0)), check["bucket"])
-            skus_state[sku] = state
-            if event is not None:
-                events.append({**event, "sku_id": sku, "event_key": f"{event['at']}#{sku}#{event['type']}"})
-    return events
+    for sku in expected:
+        state, event = shelf.step_state(skus_state.get(sku), int(check["counts"].get(sku, 0)), check["bucket"], gap)
+        skus_state[sku] = state
+        if event is not None:
+            events.append({**event, "sku_id": sku, "event_key": f"{event['at']}#{sku}#{event['type']}"})
+    return events, check["bucket"]
 
 
 def _expires(start: datetime, days: int) -> int:
@@ -628,6 +734,109 @@ def _event_item(store_id: str, event: dict) -> dict:
     return to_dynamodb_safe(
         {**event, "store_id": store_id, "expires_at": _expires(shelf.bucket_time(event["at"]), shelf.ROLLUP_TTL_DAYS)}
     )
+
+
+def _head_exists(s3_client, bucket: str, key: str) -> bool:
+    try:
+        s3_client.head_object(Bucket=bucket, Key=key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+    return True
+
+
+def _copy_photo(s3_client, source: dict, dest_key: str) -> str | None:
+    """Copy one check's frame next to the event; the key when the photo is there, None when it cannot be kept
+    (the frame expired, no frame was saved, or S3 refused): the event is still written without that photo."""
+    try:
+        if _head_exists(s3_client, ANALYTICS_BUCKET, dest_key):
+            return dest_key
+        if not (source.get("image_key") and source.get("source_bucket")):
+            return None
+        s3_client.copy_object(
+            Bucket=ANALYTICS_BUCKET,
+            Key=dest_key,
+            CopySource={"Bucket": source["source_bucket"], "Key": source["image_key"]},
+        )
+        return dest_key
+    except (ClientError, BotoCoreError) as exc:  # a timeout or a dropped connection too: no photo, the tick goes on
+        print(json.dumps({"event_photo_failed": dest_key, "error": repr(exc)}))
+        return None
+
+
+BEFORE_LOOKBACK = 24  # checks looked through for a "before" photo: two hours of 5-minute checks
+PHOTO_KEYS = ("photo_before_key", "photo_after_key")
+
+Checks = Mapping[str, dict[str, Any]]  # a recompute's checks by bucket, as it replays them
+
+
+def _gives_before_photo(check: dict[str, Any]) -> bool:
+    """An open, measured check with a frame (old items without the open or measurable field were both)."""
+    return bool(check.get("measurable", True) and check.get("open", True) and check.get("image_key"))
+
+
+def _before_check(table, store_id: str, event: dict[str, Any], checks: Checks | None = None) -> dict[str, Any] | None:
+    """The check the event's "before" photo comes from. After a gap that is the last measured check before it
+    (gap_from, where level_before was read), when it kept a frame; otherwise the newest open, measured check with a
+    frame among the BEFORE_LOOKBACK checks before that point. checks: the recompute's checks, read instead of the
+    stored items; None reads the stored items (the tick)."""
+    bound = event["at"]
+    if event.get("after_gap") and event.get("gap_from"):
+        bound = event["gap_from"]
+        if checks is not None:
+            exact = checks.get(bound)
+        else:
+            exact = from_dynamodb(table.get_item(Key={"store_id": store_id, "key": f"check#{bound}"}).get("Item"))
+        if exact and exact.get("image_key"):
+            return exact
+    if checks is not None:
+        earlier = [checks[b] for b in heapq.nlargest(BEFORE_LOOKBACK, (b for b in checks if b < bound))]
+    else:
+        resp = table.query(
+            KeyConditionExpression=Key("store_id").eq(store_id) & Key("key").lt(f"check#{bound}"),
+            ScanIndexForward=False,
+            Limit=BEFORE_LOOKBACK,
+        )
+        earlier = [c for c in from_dynamodb(resp.get("Items", [])) if str(c["key"]).startswith("check#")]
+    return next((c for c in earlier if _gives_before_photo(c)), None)
+
+
+def _event_photos(
+    s3_client, ddb_resource, store_id: str, event: dict[str, Any], checks: Checks | None = None
+) -> dict[str, str]:
+    """Copy the photos a shelf event does not have yet (hub frames expire after 7 days): the check of the event
+    (after) and the last measured check with a frame before it (before). Returns photo_before_key and
+    photo_after_key of the photos copied now, or found already copied, each left out when there is no photo.
+
+    checks: the recompute's checks by bucket. It writes its check items in a batch, so until the batch is sent the
+    table holds the old items (or none) and the photos must come from the checks it is replaying. None reads the
+    stored items, which the tick has just written."""
+    wanted = [name for name in ("before", "after") if not event.get(f"photo_{name}_key")]
+    if not ANALYTICS_BUCKET or not wanted:
+        return {}
+    table = ddb_resource.Table(SHELF_TABLE)
+    digest = hashlib.sha1(event["event_key"].encode("utf-8")).hexdigest()[:16]
+    prefix = f"shelf-events/frames/{store_id}/{digest}"
+    sources: dict[str, dict[str, Any] | None] = {}
+    try:
+        if "after" in wanted:
+            if checks is not None:
+                sources["after"] = checks.get(event["at"])
+            else:
+                item = table.get_item(Key={"store_id": store_id, "key": f"check#{event['at']}"}).get("Item")
+                sources["after"] = from_dynamodb(item)
+        if "before" in wanted:
+            sources["before"] = _before_check(table, store_id, event, checks)
+    except (ClientError, BotoCoreError) as exc:
+        print(json.dumps({"event_photo_failed": event["event_key"], "error": repr(exc)}))
+        return {}
+    out: dict[str, str] = {}
+    for name in wanted:
+        key = _copy_photo(s3_client, sources[name] or {}, f"{prefix}-{name}.jpg")
+        if key:
+            out[f"photo_{name}_key"] = key
+    return out
 
 
 def _write_rollups(ddb_resource, store_id: str, hours: set[str]) -> None:
@@ -650,12 +859,12 @@ def _write_rollups(ddb_resource, store_id: str, hours: set[str]) -> None:
         table.put_item(Item=to_dynamodb_safe({**item, "expires_at": _expires(start, shelf.ROLLUP_TTL_DAYS)}))
 
 
-def _shelf_store_tick(ddb_resource, store: dict[str, Any], now_utc: datetime) -> int:
+def _shelf_store_tick(s3_client, ddb_resource, store: dict[str, Any], now_utc: datetime) -> int:
     """Work the store's closed buckets after the last one done (at most MAX_BUCKETS_PER_TICK); returns checks made."""
     store_id = store["store_id"]
     flag = store.get("shelf_recompute_requested_at")
     if flag:
-        done = shelf_recompute(ddb_resource, store_id, shelf.RECOMPUTE_DAYS, now_utc)
+        done = shelf_recompute(s3_client, ddb_resource, store_id, shelf.RECOMPUTE_DAYS, now_utc)
         try:
             ddb_resource.Table(STORE_LIST_TABLE).update_item(
                 Key={"store_id": store_id},
@@ -687,6 +896,7 @@ def _shelf_store_tick(ddb_resource, store: dict[str, Any], now_utc: datetime) ->
     by_bucket = _captures_by_bucket(ddb_resource, cameras, first, last)
     expected = _expected_skus(ddb_resource, store, now_utc)
     skus_state = dict((state_item or {}).get("skus") or {})
+    last_measured = (state_item or {}).get("last_measured_bucket")
     events_table = ddb_resource.Table(SHELF_EVENTS_TABLE)
     hours: set[str] = set()
     made = 0
@@ -694,16 +904,25 @@ def _shelf_store_tick(ddb_resource, store: dict[str, Any], now_utc: datetime) ->
     while bucket <= last:
         if by_bucket.get(bucket):
             check = shelf.build_check(bucket, by_bucket[bucket])
-            events = _apply_check(check, store, expected, skus_state)
+            events, last_measured = _apply_check(check, store, expected, skus_state, last_measured)
             table.put_item(Item=_check_item(store_id, check))
             for event in events:
+                event.update(_event_photos(s3_client, ddb_resource, store_id, event))
                 events_table.put_item(Item=_event_item(store_id, event))
                 hours.add(event["at"][:11])
             hours.add(bucket[:11])
             made += 1
         bucket = shelf.add_buckets(bucket, 1)
 
-    state = to_dynamodb_safe({"store_id": store_id, "key": "state", "last_bucket": last, "skus": skus_state})
+    state = to_dynamodb_safe(
+        {
+            "store_id": store_id,
+            "key": "state",
+            "last_bucket": last,
+            "last_measured_bucket": last_measured,
+            "skus": skus_state,
+        }
+    )
     try:  # only one run moves a store's state on; an overlapping run stops here
         if state_item:
             table.put_item(
@@ -723,18 +942,22 @@ def _shelf_store_tick(ddb_resource, store: dict[str, Any], now_utc: datetime) ->
     return made
 
 
-def shelf_tick(ddb_resource, now_utc: datetime) -> dict[str, Any]:
+def shelf_tick(s3_client, ddb_resource, now_utc: datetime) -> dict[str, Any]:
     """Every 5 minutes: each store's new checks, shelf state, events and rollups."""
     stores = _scan_all(ddb_resource.Table(STORE_LIST_TABLE))
     return {
         "action": "shelf_tick",
-        "stores": {s["store_id"]: _shelf_store_tick(ddb_resource, s, now_utc) for s in stores},
+        "stores": {s["store_id"]: _shelf_store_tick(s3_client, ddb_resource, s, now_utc) for s in stores},
     }
 
 
-def shelf_recompute(ddb_resource, store_id: str, days: int, now_utc: datetime) -> dict[str, Any]:
+def shelf_recompute(s3_client, ddb_resource, store_id: str, days: int, now_utc: datetime) -> dict[str, Any]:
     """Rebuild a store's last `days` days with its current shelf plan: checks from captures still kept, older
-    checks as stored, then state, events and rollups replayed from scratch."""
+    checks as stored, then state, events and rollups replayed from scratch.
+
+    An event that comes back with the same key keeps the photo keys it had, with no S3 call. A missing photo is
+    copied from the checks being replayed, and only for events newer than the hub keeps frames (CAPTURE_TTL_DAYS):
+    older frames are gone, and the 60 s Lambda must not spend its time on them."""
     store = from_dynamodb(ddb_resource.Table(STORE_LIST_TABLE).get_item(Key={"store_id": store_id}).get("Item"))
     store = store or {"store_id": store_id}
     table = ddb_resource.Table(SHELF_TABLE)
@@ -759,6 +982,8 @@ def shelf_recompute(ddb_resource, store_id: str, days: int, now_utc: datetime) -
     old_events = _query_all(
         events_table, KeyConditionExpression=Key("store_id").eq(store_id) & Key("event_key").between(first, f"{last}~")
     )
+    kept_photos = {e["event_key"]: {k: e[k] for k in PHOTO_KEYS if e.get(k)} for e in old_events}
+    frames_from = shelf.bucket_of((now_utc - timedelta(days=CAPTURE_TTL_DAYS)).isoformat())
     with table.batch_writer() as writer:
         for item in [*stale, {"key": "state"}]:
             writer.delete_item(Key={"store_id": store_id, "key": item["key"]})
@@ -773,31 +998,42 @@ def shelf_recompute(ddb_resource, store_id: str, days: int, now_utc: datetime) -
         expected = sorted({s for b, c in checks.items() if b >= suggest_from for s in c.get("confident_skus") or []})
 
     skus_state: dict[str, Any] = {}
+    last_measured: str | None = None
     hours: set[str] = set()
+    replayed: dict[str, dict[str, Any]] = {}  # the checks as this run writes them, for the event photos
+    # what a check knew of the display; checks stored before the display check have none of these
+    display_fields = ("captures_visible", "measurable", "unmeasured_reason", "image_key", "source_bucket")
     with table.batch_writer() as writer, events_table.batch_writer() as event_writer:
         for bucket in sorted(checks):
-            check = {k: checks[bucket][k] for k in ("bucket", "counts", "captures", "cameras", "confident_skus")}
-            for event in _apply_check(check, store, expected, skus_state):
+            stored = checks[bucket]
+            check = {k: stored[k] for k in ("bucket", "counts", "captures", "cameras", "confident_skus")}
+            check.update({k: stored[k] for k in display_fields if k in stored})
+            events, last_measured = _apply_check(check, store, expected, skus_state, last_measured)
+            replayed[bucket] = check
+            for event in events:
+                event.update(kept_photos.get(event["event_key"], {}))
+                if event["at"] >= frames_from:
+                    event.update(_event_photos(s3_client, ddb_resource, store_id, event, replayed))
                 event_writer.put_item(Item=_event_item(store_id, event))
                 hours.add(event["at"][:11])
             writer.put_item(Item=_check_item(store_id, check))
             hours.add(bucket[:11])
-    table.put_item(
-        Item=to_dynamodb_safe({"store_id": store_id, "key": "state", "last_bucket": last, "skus": skus_state})
-    )
+    state = {"store_id": store_id, "key": "state", "last_bucket": last, "last_measured_bucket": last_measured}
+    table.put_item(Item=to_dynamodb_safe({**state, "skus": skus_state}))
     _write_rollups(ddb_resource, store_id, hours)
     return {"action": "shelf_recompute", "store_id": store_id, "checks": len(checks), "hours": len(hours)}
 
 
 def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
-    s3_client, ddb_resource = _aws_clients()
+    shelf_run = event.get("action") in ("shelf_tick", "shelf_recompute")  # these copy event photos
+    s3_client, ddb_resource = _aws_clients(PHOTO_S3_CONFIG if shelf_run else None)
 
     # 0. Dashboard shelf metrics: EventBridge every 5 minutes, or a recompute run by hand
     if event.get("action") == "shelf_tick":
-        return shelf_tick(ddb_resource, _now_of(event))
+        return shelf_tick(s3_client, ddb_resource, _now_of(event))
     if event.get("action") == "shelf_recompute":
         days = int(event.get("days") or shelf.RECOMPUTE_DAYS)
-        return shelf_recompute(ddb_resource, event["store_id"], days, _now_of(event))
+        return shelf_recompute(s3_client, ddb_resource, event["store_id"], days, _now_of(event))
 
     # 1. EventBridge hourly run: first the Model page's frame to label and hourly health (light queries), then
     #    the official capture of the hour, which scans the whole captures table and may fail as it grows

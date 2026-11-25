@@ -4,6 +4,7 @@ import React, { useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Box, CircleDollarSign, Filter, Repeat } from "lucide-react";
 import type { ApiTrendPoint } from "@/lib/api";
+import { trendRows } from "@/lib/trend-rows";
 
 export type TrendTab = "total_stock" | "oos" | "accuracy" | "restock_volume";
 
@@ -41,9 +42,6 @@ const METRIC_TABS: {
   },
 ];
 
-/** "2026-11-27" → "27/11"; "20261128-09" → "09h". */
-const pointLabel = (t: string) => (t.includes("-") && t.length === 10 ? `${t.slice(8, 10)}/${t.slice(5, 7)}` : `${t.slice(9, 11)}h`);
-
 interface TrendsInsightsChartProps {
   /** Points per tab from GET /reports/trends; null while signed out or loading. */
   trends: Record<TrendTab, ApiTrendPoint[] | null>;
@@ -55,10 +53,7 @@ export function TrendsInsightsChart({ trends, blockedText }: TrendsInsightsChart
   const [active, setActive] = useState<TrendTab>("total_stock");
   const tab = METRIC_TABS.find((t) => t.key === active) ?? METRIC_TABS[0];
   const points = trends[active];
-  const rows = (points ?? []).map((p) => ({
-    label: pointLabel(p.t),
-    value: p.value === null ? null : tab.unit === "%" ? Math.round(p.value * 1000) / 10 : p.value,
-  }));
+  const rows = trendRows(points ?? [], tab.unit);
   const hasData = rows.some((r) => r.value !== null);
   const emptyText =
     points === null

@@ -75,6 +75,17 @@ export const HEALTH_METRICS: HealthMetricInfo[] = [
   },
 ];
 
+/** The Display check line of Live health (numbers from GET /model/summary, display_check). */
+export const DISPLAY_CHECK_INFO = {
+  what:
+    'Whether the worker\'s display check agreed with the labellers on the scoring frames: a labelled frame had the ' +
+    'display in view, a frame skipped as "Display not in view" did not. Only frames the check judged count: frames ' +
+    "from before the check, or from before the worker had learnt the display, are left out.",
+  read:
+    'Wrongly "not in view" drops 5-minute checks the Dashboard could have counted; wrongly "in view" lets an empty ' +
+    "space be counted as out of stock.",
+};
+
 const INFO = new Map(HEALTH_METRICS.map((m) => [m.key, m]));
 const HOUR = /^(\d{4})(\d{2})(\d{2})-(\d{2})$/;
 const HOUR_MS = 3_600_000;

@@ -4,7 +4,7 @@ import React from "react";
 import { Area, AreaChart, ResponsiveContainer } from "recharts";
 import type { ApiKpiResponse, ApiTrendPoint } from "@/lib/api";
 import type { KpiMetrics } from "@/lib/reports-ui";
-import { blockedText, ptsChange } from "@/lib/shelf-ui";
+import { blockedText, coverageText, ptsChange } from "@/lib/shelf-ui";
 
 // Shown wherever the API has no value; the cards never show a number the backend did not return.
 const NO_VALUE = "—";
@@ -103,6 +103,7 @@ export function KpiGrid({ metrics, kpi, sparklines, days, storeName }: KpiGridPr
         <Sub data="osa">
           {osa?.blocked_reason ? blockedText(osa.blocked_reason, storeName) : osaDelta ? `${osaDelta} vs ${period}` : "No previous period to compare"}
         </Sub>
+        {kpi?.coverage && <Sub data="coverage">{coverageText(kpi.coverage)}</Sub>}
         <Defn>Checks in opening hours where an expected SKU had at least 1 unit.</Defn>
         <OrangeSparkline points={sparklines.osa} gradientId="kpiOsaSparkline" scale={100} />
       </div>

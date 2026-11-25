@@ -1,8 +1,8 @@
 // Unit tests for labelling one frame on the Model page (run: npm test). Expected values are worked out by hand.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canSave, nextVerdict, toPayload, totalsBySku } from "./audit-labeling.ts";
-import type { BoxLabel } from "./audit-labeling.ts";
+import { canSave, nextVerdict, relabelQueue, toPayload, totalsBySku } from "./audit-labeling.ts";
+import type { BoxLabel, RelabelCandidate } from "./audit-labeling.ts";
 
 const twoHot = [
   { box_id: 1, sku_id: "hot160" },
@@ -13,7 +13,8 @@ test("a click walks a box through every verdict and back to unlabelled", () => {
   assert.equal(nextVerdict(null), "correct");
   assert.equal(nextVerdict("correct"), "wrong_sku");
   assert.equal(nextVerdict("wrong_sku"), "not_product");
-  assert.equal(nextVerdict("not_product"), null);
+  assert.equal(nextVerdict("not_product"), "out_of_scope");
+  assert.equal(nextVerdict("out_of_scope"), null);
 });
 
 test("totals per SKU count right boxes, relabelled boxes and missed units", () => {
@@ -33,22 +34,22 @@ test("an UNRECOGNIZED box judged right counts for no SKU", () => {
 });
 
 test("save needs a verdict on every box and the right SKU on wrong ones", () => {
-  assert.equal(canSave(twoHot, { 1: { verdict: "correct", trueSku: null } }), false);
+  assert.equal(canSave(twoHot, { 1: { verdict: "correct", trueSku: null } }, true), false);
   assert.equal(
     canSave(twoHot, {
       1: { verdict: "correct", trueSku: null },
       2: { verdict: "wrong_sku", trueSku: null },
-    }),
+    }, true),
     false
   );
   assert.equal(
     canSave(twoHot, {
       1: { verdict: "correct", trueSku: null },
       2: { verdict: "not_product", trueSku: null },
-    }),
+    }, true),
     true
   );
-  assert.equal(canSave([], {}), true); // a frame with no boxes is saved with its missed units only
+  assert.equal(canSave([], {}, true), true); // a frame with no boxes is saved with its missed units only
 });
 
 test("the payload sends the right SKU only for wrong boxes and rounds the missed points", () => {
@@ -62,5 +63,46 @@ test("the payload sends the right SKU only for wrong boxes and rounds the missed
       { box_id: 2, verdict: "wrong_sku", true_sku_id: "original145" },
     ],
     missed: [{ sku_id: "hot160", x: 941, y: 400 }],
+    misses_checked: true,
+  });
+});
+
+test("a click goes from not our SKU to out of scope, then back to unlabelled", () => {
+  assert.equal(nextVerdict("not_product"), "out_of_scope");
+  assert.equal(nextVerdict("out_of_scope"), null);
+});
+
+test("save needs every box labelled and the missed-cans check", () => {
+  const boxes = [{ box_id: 1, sku_id: "hot160" }];
+  const labels = { 1: { verdict: "out_of_scope" as const, trueSku: null } };
+  assert.equal(canSave(boxes, labels, false), false);
+  assert.equal(canSave(boxes, labels, true), true);
+});
+
+test("an out-of-scope box counts neither for the model nor for the truth", () => {
+  assert.deepEqual(totalsBySku([{ box_id: 1, sku_id: "cheese145" }], { 1: { verdict: "out_of_scope", trueSku: null } }, []), {});
+});
+
+test("Relabel them opens the done scoring frames labelled before rule A, oldest first", () => {
+  const frame = (audit_id: string, capture_timestamp: string, fields: Partial<RelabelCandidate> = {}) =>
+    ({ audit_id, capture_timestamp, purpose: "scoring", status: "done", label_rule: null, ...fields }) as RelabelCandidate;
+  assert.deepEqual(
+    relabelQueue([
+      frame("AUD-20261124-12", "2026-11-24T12:05:00+07:00"),
+      frame("AUD-20261123-17", "2026-11-23T17:44:38+07:00"),
+      frame("AUD-20261123-18", "2026-11-23T18:49:00+07:00", { label_rule: "A" }), // already under rule A
+      frame("TRN-20261123-09", "2026-11-23T09:00:00+07:00", { purpose: "training" }), // never scored
+      frame("AUD-20261123-08", "2026-11-23T08:00:00+07:00", { status: "pending" }), // not labelled yet
+    ]),
+    ["AUD-20261123-17", "AUD-20261124-12"]
+  );
+  assert.deepEqual(relabelQueue([]), []);
+});
+
+test("the payload says the missed cans were checked", () => {
+  assert.deepEqual(toPayload({ 1: { verdict: "out_of_scope", trueSku: null } }, []), {
+    verdicts: [{ box_id: 1, verdict: "out_of_scope" }],
+    missed: [],
+    misses_checked: true,
   });
 });

@@ -28,7 +28,7 @@ import {
   type CategoryOption,
   type TimeframeOption,
 } from "@/lib/reports-ui";
-import { blockedText } from "@/lib/shelf-ui";
+import { alertAccuracyByTypeText, alertAccuracyText, blockedText } from "@/lib/shelf-ui";
 
 const TREND_METRICS: TrendMetric[] = ["total_stock", "oos", "accuracy", "restock_volume", "osa"];
 type Trends = Record<TrendMetric, ApiTrendPoint[] | null>;
@@ -36,7 +36,7 @@ const NO_TRENDS: Trends = { total_stock: null, oos: null, accuracy: null, restoc
 
 /** The Dashboard: every card and chart follows the Timeframe, Store and Category filters (spec 2026-11-24). */
 export function ReportsDashboard() {
-  const { isApproved, getIdToken } = useAuth();
+  const { isApproved, getIdToken, user } = useAuth();
   const [timeframe, setTimeframe] = useState<TimeframeOption>(DEFAULT_TIMEFRAME);
   const [store, setStore] = useState<string>(ALL_STORES_LABEL);
   const [category, setCategory] = useState<CategoryOption>("All Categories");
@@ -106,6 +106,7 @@ export function ReportsDashboard() {
   const kpis = useMemo(() => kpisFromApi(kpi), [kpi]);
   const shelfBlocked = kpi?.osa?.blocked_reason === "no_hours" ? blockedText("no_hours", storeName) : null;
 
+  const canVerify = (user?.groups ?? []).some((g) => g === "team_admin" || g === "field_team");
   const loadEvents = useCallback(
     (kind: ActivityKind, cursor?: string) => api.getShelfEvents({ ...query, kind, limit: 20, cursor }),
     [api, query]
@@ -216,6 +217,11 @@ export function ReportsDashboard() {
             load={isApproved ? loadEvents : null}
             reloadKey={`${days}|${storeId ?? ""}|${categoryValue ?? ""}`}
             blockedText={shelfBlocked}
+            accuracyLine={alertAccuracyText(kpi?.alert_accuracy, canVerify)}
+            accuracyByType={alertAccuracyByTypeText(kpi?.alert_accuracy?.by_type)}
+            canVerify={canVerify}
+            loadPhotos={isApproved ? api.getShelfEventPhotos : null}
+            saveVerdict={isApproved ? api.saveShelfEventVerdict : null}
           />
         </div>
       </section>

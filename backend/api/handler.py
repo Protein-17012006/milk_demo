@@ -21,8 +21,18 @@ from typing import Any
 
 import boto3
 import shelf
-from audit_scoring import SKIP_REASONS, summarize, validate_labels
+from audit_scoring import (
+    SKIP_REASONS,
+    by_day,
+    check_level,
+    display_agreement,
+    kpis,
+    sku_reliability,
+    summarize,
+    validate_labels,
+)
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 from common import (
     CAPTURE_LOG_COLUMNS,
     CV_OUTPUT_COLUMNS,
@@ -289,6 +299,9 @@ def _handle_get_products(event: dict[str, Any], ddb) -> dict[str, Any]:
     else:
         filtered.sort(key=lambda x: x["unit_count"], reverse=True)
 
+    reliability = _reliability_by_name(ddb, _stores_for(ddb, params), products)
+    for p in filtered:
+        p["reliability"] = reliability.get(p["sku_id"]) or _no_reliability()
     return _json_response(
         200,
         {
@@ -297,9 +310,63 @@ def _handle_get_products(event: dict[str, Any], ddb) -> dict[str, Any]:
             "unrecognized_units": unrecognized_units,
             "stores_total": total_stores,
             "flag_threshold": MILK_FLAG_THRESHOLD,
+            "displays": _display_statuses(ddb, _stores_for(ddb, params)),
         },
         event,
     )
+
+
+RELIABILITY_DAYS = 14  # one Datagent cycle
+# sku_reliability per (sorted store ids, 5-minute ICT slot) in a warm container: Products re-reads every 15 s and
+# would rerun the bootstrap each time. Only the current slot is kept; badges can lag the labelling by 5 minutes.
+_RELIABILITY_CACHE: dict[tuple[tuple[str, ...], str], dict[str, dict[str, Any]]] = {}
+
+
+def _no_reliability() -> dict[str, Any]:
+    """The badge of a SKU no scoring frame has anything on: not enough samples, and no number."""
+    return {
+        "badge": "insufficient",
+        "named_right": None,
+        "found_right": None,
+        "true_units": 0,
+        "frames": 0,
+        "confused_as": None,
+    }
+
+
+def _reliability_by_label(ddb, stores: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """sku_reliability of the stores' done scoring frames of the last RELIABILITY_DAYS days, kept for the current
+    5-minute ICT slot (_RELIABILITY_CACHE); the first call of a new slot drops the older ones. A read that fails
+    raises and keeps nothing."""
+    slot = shelf.bucket_of(_now().isoformat())
+    key = (tuple(sorted(s["store_id"] for s in stores)), slot)
+    if key not in _RELIABILITY_CACHE:
+        rows = sku_reliability(_done_audits(ddb, stores, RELIABILITY_DAYS))
+        for old in [k for k in _RELIABILITY_CACHE if k[1] != slot]:
+            del _RELIABILITY_CACHE[old]
+        _RELIABILITY_CACHE[key] = rows
+    return _RELIABILITY_CACHE[key]
+
+
+def _reliability_by_name(ddb, stores: list[dict[str, Any]], masters: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Reliability badge per product name from the last RELIABILITY_DAYS days of done scoring frames, computed with
+    the same code as the Model page and kept for 5 minutes (_reliability_by_label). `confused_as` is turned from a
+    model label to a product name, by `masters` (SKU Master rows the caller already loaded: no second read of them).
+    A decoration of /products and /shelf-events: when the frames cannot be read, every SKU shows as not enough
+    samples and the lists still answer."""
+    if not AUDITS_TABLE:
+        return {}
+    try:
+        by_label = _reliability_by_label(ddb, stores)
+    except ClientError as exc:
+        print(json.dumps({"reliability_failed": repr(exc)}))
+        return {}
+    name_of = _choices_of(masters)
+    out = {}
+    for label, row in by_label.items():
+        confused = row["confused_as"]
+        out[name_of.get(label, label)] = {**row, "confused_as": name_of.get(confused, confused) if confused else None}
+    return out
 
 
 def _handle_get_product_detail(sku_id_raw: str, event: dict[str, Any], s3, ddb) -> dict[str, Any]:
@@ -661,6 +728,8 @@ def _handle_kpi(event: dict[str, Any], ddb) -> dict[str, Any]:
 
 TOP_50_NOTE = "All SKUs: Datagent has not sent a top-50 list yet"
 ALERT_TYPES = {"OOS", "LOW_STOCK", "DEPLETED"}
+ALERT_MIN_VERIFIED = 10
+VERDICTS = {"right", "wrong", "unsure"}
 TREND_METRICS = {"total_stock", "oos", "accuracy", "restock_volume", "osa"}
 
 
@@ -724,14 +793,51 @@ def _with_hours(stores: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [s for s in stores if s.get("open_time") and s.get("close_time")]
 
 
+def _is_scoring(audit: dict[str, Any]) -> bool:
+    """Only scoring frames (AUD-) count in the metrics; training frames (TRN-) never do."""
+    return str(audit.get("audit_id", "")).startswith("AUD-")
+
+
+def _purpose(audit: dict[str, Any]) -> str:
+    """The audit's purpose; an old audit without one is judged by its id."""
+    return audit.get("purpose") or ("scoring" if _is_scoring(audit) else "training")
+
+
+def _store_cameras(ddb, store_id: str) -> list[str]:
+    """Cameras of one store, from its latest_stock rows (one Query)."""
+    rows = _query_all(ddb.Table(LATEST_STOCK_TABLE), KeyConditionExpression=Key("store_id").eq(store_id))
+    return sorted({r["camera_id"] for r in rows if r.get("camera_id")})
+
+
+def _scoring_audits_of(ddb, store_id: str, first_day: str | None, last_day: str) -> list[dict[str, Any]]:
+    """The scoring audits (AUD-) of one store, read by key. Ids are AUD-<camera>-<YYYYMMDD>-<HH>, so with
+    `first_day` set (YYYYMMDD, ICT) only that camera's ids from that day through `last_day` are read; without it, or
+    when the store's cameras are unknown, every AUD- id of the store. Training audits (TRN-) are never read."""
+    table = ddb.Table(AUDITS_TABLE)
+    store = Key("store_id").eq(store_id)
+    cameras = _store_cameras(ddb, store_id) if first_day else []
+    if not cameras:
+        return _query_all(table, KeyConditionExpression=store & Key("audit_id").begins_with("AUD-"))
+    items: list[dict[str, Any]] = []
+    for camera in cameras:
+        low, high = f"AUD-{camera}-{first_day}", f"AUD-{camera}-{last_day}~"  # "~" sorts after any hour suffix
+        items.extend(_query_all(table, KeyConditionExpression=store & Key("audit_id").between(low, high)))
+    return items
+
+
 def _done_audits(ddb, stores: list[dict[str, Any]], days: int) -> list[dict[str, Any]]:
-    since = (_now() - timedelta(days=days)).isoformat(timespec="seconds")
-    store_ids = {s["store_id"] for s in stores}
-    return [
-        _audit_view(a)
-        for a in _scan_all(ddb.Table(AUDITS_TABLE))
-        if a.get("status") == "done" and a.get("store_id") in store_ids and str(a.get("capture_timestamp", "")) >= since
-    ]
+    """Done scoring audits of these stores whose frame was taken in the last `days` days: from now minus `days`
+    up to now. Every caller passes 1 or more (with 0 nothing older than now would be kept)."""
+    now = _now()
+    since = (now - timedelta(days=days)).isoformat(timespec="seconds")
+    first_day = (now - timedelta(days=days)).strftime("%Y%m%d") if days > 0 else None
+    last_day = now.strftime("%Y%m%d")
+    out = []
+    for store in stores:
+        for a in _scoring_audits_of(ddb, store["store_id"], first_day, last_day):
+            if a.get("status") == "done" and _is_scoring(a) and str(a.get("capture_timestamp", "")) >= since:
+                out.append(_audit_view(a))
+    return out
 
 
 def _oos_now(ddb, stores: list[dict[str, Any]], skus: set[str] | None) -> dict[str, Any]:
@@ -753,6 +859,123 @@ def _oos_now(ddb, stores: list[dict[str, Any]], skus: set[str] | None) -> dict[s
     return {"count": count, "as_of": as_of, "blocked_reason": None}
 
 
+def _hours(checks: int) -> float:
+    """Hours of that many 5-minute checks, 1 decimal."""
+    return round(checks * shelf.BUCKET_MINUTES / 60, 1)
+
+
+def _display_statuses(ddb, stores: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per camera: does it see the display cabinet, since when, and when it last did."""
+    if not SHELF_TABLE:
+        return []
+    rows = []
+    for store in stores:
+        cond = Key("store_id").eq(store["store_id"]) & Key("key").begins_with("display#")
+        try:
+            items = _query_all(ddb.Table(SHELF_TABLE), KeyConditionExpression=cond)
+        except ClientError as exc:  # a decoration of /products: the list must still answer
+            print(json.dumps({"display_status_failed": store["store_id"], "error": repr(exc)}))
+            return []
+        for item in items:
+            rows.append(
+                {
+                    "camera_id": item.get("camera_id") or item["key"].split("#", 1)[1],
+                    "store_id": store["store_id"],
+                    "visible": item.get("visible", True) is not False,
+                    "since": item.get("since"),
+                    "last_visible_at": item.get("last_visible_at"),
+                }
+            )
+    return sorted(rows, key=lambda r: (r["store_id"], r["camera_id"]))
+
+
+def _first_bucket_of(key: str) -> str:
+    """The first 5-minute bucket of a rollup key: day#20261127 → 20261127-0000, hour#20261128-09 → 20261128-0900."""
+    kind, value = key.split("#", 1)
+    return f"{value}-0000" if kind == "day" else f"{value}00"
+
+
+def _first_counted(ddb, store_id: str) -> str | None:
+    """The first bucket of the store's oldest hour# rollup, the hour it was first counted in; None when it has none.
+    One Query that reads one key."""
+    resp = ddb.Table(SHELF_TABLE).query(
+        KeyConditionExpression=Key("store_id").eq(store_id) & Key("key").begins_with("hour#"),
+        ProjectionExpression="#k",
+        ExpressionAttributeNames={"#k": "key"},
+        ScanIndexForward=True,
+        Limit=1,
+    )
+    items = resp.get("Items", [])
+    return _first_bucket_of(items[0]["key"]) if items else None
+
+
+def _coverage(ddb, open_stores: list[dict[str, Any]], current: dict[str, Any], window_start: str) -> dict[str, float]:
+    """Hours measured, hours the display was out of view, and hours the stores were open up to the last closed check.
+    window_start is the first rollup key of the window (_windows). A store's open hours start at the later of the
+    window start and the hour it was first counted: hours before its camera existed were never there to measure. A
+    store never counted adds none."""
+    last = shelf.add_buckets(shelf.bucket_of(_now().isoformat()), -1)
+    open_checks = 0
+    for s in open_stores:
+        counted_from = _first_counted(ddb, s["store_id"])
+        if counted_from is None:
+            continue
+        first = max(_first_bucket_of(window_start), counted_from)
+        if first <= last:
+            open_checks += shelf.open_buckets(s["open_time"], s["close_time"], first, last)
+    return {
+        "measured_hours": _hours(current["store_checks"]),
+        "open_hours": _hours(open_checks),
+        "display_away_hours": _hours(current["unmeasured_checks"]),
+    }
+
+
+def _event_floor(days: int) -> str:
+    return (_now() - timedelta(days=days - 1)).strftime("%Y%m%d") + "-0000"
+
+
+def _events_of(ddb, store_id: str, first: str) -> list[dict[str, Any]]:
+    """A store's shelf events from `first` on. Event keys start with a digit; verdict# items sort after them."""
+    cond = Key("store_id").eq(store_id) & Key("event_key").between(first, "9")
+    return _query_all(ddb.Table(SHELF_EVENTS_TABLE), KeyConditionExpression=cond)
+
+
+def _verdicts_of(ddb, store_id: str) -> dict[str, dict[str, Any]]:
+    """The store's verdicts by the event_key they are about."""
+    cond = Key("store_id").eq(store_id) & Key("event_key").begins_with("verdict#")
+    items = _query_all(ddb.Table(SHELF_EVENTS_TABLE), KeyConditionExpression=cond)
+    return {i["event_key"][len("verdict#") :]: i for i in items}
+
+
+def _alert_accuracy(ddb, stores: list[dict[str, Any]], days: int, skus: set[str] | None) -> dict[str, Any]:
+    """How often alerts were confirmed right: right / (right + wrong) over the events still in the range that
+    have a verdict, of the SKUs given (a category; None for every SKU), as the events list filters them. Unsure is
+    counted apart, not in the share or in the threshold."""
+    by_type: dict[str, dict[str, int]] = {}
+    for store in stores:
+        verdicts = _verdicts_of(ddb, store["store_id"])
+        if not verdicts:
+            continue
+        for item in _events_of(ddb, store["store_id"], _event_floor(days)):
+            if skus is not None and item["sku_id"] not in skus:
+                continue
+            verdict = (verdicts.get(item["event_key"]) or {}).get("verdict")
+            if verdict in VERDICTS:
+                counts = by_type.setdefault(item["type"], {"right": 0, "wrong": 0, "unsure": 0})
+                counts[verdict] += 1
+    right = sum(c["right"] for c in by_type.values())
+    wrong = sum(c["wrong"] for c in by_type.values())
+    n = right + wrong
+    enough = n >= ALERT_MIN_VERIFIED
+    return {
+        "value": _r(right / n, 4) if enough else None,
+        "n": n,
+        "unsure": sum(c["unsure"] for c in by_type.values()),
+        "by_type": by_type,
+        "blocked_reason": None if enough else "few_verified",
+    }
+
+
 def _shelf_kpis(ddb, params: dict[str, Any]) -> dict[str, Any]:
     """OSA, restock rate, out-of-stock now and top-50 accuracy for the Dashboard filters (days, store_id,
     category). A number the data cannot give is None with a blocked_reason."""
@@ -766,6 +989,7 @@ def _shelf_kpis(ddb, params: dict[str, Any]) -> dict[str, Any]:
         out["osa"] = {"value": None, "previous": None, **blocked}
         out["restock_rate"] = {"units_per_day": None, "previous_units_per_day": None, "change_pct": None, **blocked}
         out["oos_now"] = {"count": None, "as_of": None, **blocked}
+        out["coverage"] = None
     else:
         current_keys, previous_keys = _windows(days)
         current = shelf.totals([i for v in _rollups_by_key(ddb, open_stores, current_keys).values() for i in v], skus)
@@ -786,8 +1010,10 @@ def _shelf_kpis(ddb, params: dict[str, Any]) -> dict[str, Any]:
             "blocked_reason": reason,
         }
         out["oos_now"] = _oos_now(ddb, open_stores, skus)
+        out["coverage"] = _coverage(ddb, open_stores, current, current_keys[0])
+    out["alert_accuracy"] = _alert_accuracy(ddb, stores, days, skus)
     audits = _done_audits(ddb, stores, days)
-    value = summarize(audits, [])["kpis"]["sku_identification_accuracy"]["value"] if audits else None
+    value = kpis(audits, [])["sku_identification_accuracy"]["value"] if audits else None
     out["top_50_sku_accuracy"] = {
         "value": value,
         "n_frames": len(audits),
@@ -808,11 +1034,8 @@ def _handle_reports_trends(event: dict[str, Any], ddb) -> dict[str, Any]:
     keys, _ = _windows(days)
     if metric == "accuracy":
         dates = sorted({_point_label(k)[:10] if k.startswith("day#") else _now().strftime("%Y-%m-%d") for k in keys})
-        by_day = {
-            d["day"]: d["overall_identification_accuracy"]
-            for d in summarize(_done_audits(ddb, stores, days), [])["by_day"]
-        }
-        points = [{"t": date, "value": by_day.get(date)} for date in dates]
+        accuracy = {d["day"]: d["overall_identification_accuracy"] for d in by_day(_done_audits(ddb, stores, days))}
+        points = [{"t": date, "value": accuracy.get(date), "unmeasured_hours": None} for date in dates]
     else:
         skus = _category_skus(ddb, params.get("category"))
         by_key = _rollups_by_key(ddb, _with_hours(stores), keys)
@@ -827,7 +1050,7 @@ def _handle_reports_trends(event: dict[str, Any], ddb) -> dict[str, Any]:
                     "oos": t["oos_started"],
                     "restock_volume": t["restock_units"],
                 }[metric]
-            points.append({"t": _point_label(key), "value": value})
+            points.append({"t": _point_label(key), "value": value, "unmeasured_hours": _hours(t["unmeasured_checks"])})
     return _json_response(200, {"metric": metric, "days": days, "points": points}, event)
 
 
@@ -843,11 +1066,12 @@ def _handle_shelf_events(event: dict[str, Any], ddb) -> dict[str, Any]:
     stores = _stores_for(ddb, params)
     master = {s["sku_id"]: s for s in _scan_all(ddb.Table(SKU_MASTER_TABLE))}
     skus = _category_skus(ddb, params.get("category"))
-    first = (_now() - timedelta(days=days - 1)).strftime("%Y%m%d") + "-0000"
+    first = _event_floor(days)
+    reliability = _reliability_by_name(ddb, stores, list(master.values()))
     items = []
     for store in stores:
-        cond = Key("store_id").eq(store["store_id"]) & Key("event_key").gte(first)
-        for item in _query_all(ddb.Table(SHELF_EVENTS_TABLE), KeyConditionExpression=cond):
+        verdicts = _verdicts_of(ddb, store["store_id"])
+        for item in _events_of(ddb, store["store_id"], first):
             if kind == "alerts" and item["type"] not in ALERT_TYPES:
                 continue
             if kind == "restocked" and item["type"] != "RESTOCKED":
@@ -855,8 +1079,13 @@ def _handle_shelf_events(event: dict[str, Any], ddb) -> dict[str, Any]:
             if skus is not None and item["sku_id"] not in skus:
                 continue
             item.pop("expires_at", None)
+            if item["event_key"] in verdicts:
+                item["verdict"] = verdicts[item["event_key"]]["verdict"]
             item["store_name"] = store.get("store_name") or store["store_id"]
             item["sku_name"] = (master.get(item["sku_id"]) or {}).get("sku_name_vi") or item["sku_id"]
+            item["badge"] = (reliability.get(item["sku_id"]) or _no_reliability())["badge"]
+            if item["badge"] == "low":
+                item["uncertain"] = True
             items.append(item)
     items.sort(key=lambda e: (e["event_key"], e["store_id"]), reverse=True)
     cursor = params.get("cursor") or ""
@@ -865,6 +1094,61 @@ def _handle_shelf_events(event: dict[str, Any], ddb) -> dict[str, Any]:
     page = items[:limit]
     next_cursor = f"{page[-1]['event_key']}|{page[-1]['store_id']}" if len(items) > limit else None
     return _json_response(200, {"items": page, "next_cursor": next_cursor}, event)
+
+
+def _find_event(ddb, store_id: str, event_key: str) -> dict[str, Any] | None:
+    if not store_id or not event_key or event_key.startswith("verdict#"):
+        return None
+    item = ddb.Table(SHELF_EVENTS_TABLE).get_item(Key={"store_id": store_id, "event_key": event_key}).get("Item")
+    return from_dynamodb(item) if item else None
+
+
+def _handle_shelf_event_photos(event: dict[str, Any], s3, ddb) -> dict[str, Any]:
+    """Short-lived links to an event's two photos; null for a photo that was never kept or has expired."""
+    params = event.get("queryStringParameters") or {}
+    found = _find_event(ddb, params.get("store_id") or "", params.get("event_key") or "")
+    if not found:
+        return _json_response(404, {"error": "EVENT_NOT_FOUND"}, event)
+    urls = {}
+    for name in ("before", "after"):
+        key = found.get(f"photo_{name}_key") or ""
+        urls[f"{name}_url"] = None
+        if key and _object_exists(s3, key):
+            urls[f"{name}_url"] = _presign_frame(s3, key, ANALYTICS_BUCKET)
+    return _json_response(200, urls, event)
+
+
+def _object_exists(s3, key: str) -> bool:
+    try:
+        s3.head_object(Bucket=ANALYTICS_BUCKET, Key=key)
+    except ClientError:
+        return False
+    return True
+
+
+def _handle_put_shelf_event_verdict(event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
+    """The team says whether a shelf event was right. Body only: event keys hold spaces and '&'."""
+    body = _parse_body(event)
+    store_id, event_key, verdict = body.get("store_id"), body.get("event_key"), body.get("verdict")
+    if not (isinstance(store_id, str) and isinstance(event_key, str) and store_id and event_key):
+        return _json_response(400, {"error": "MISSING_FIELDS", "required": ["store_id", "event_key", "verdict"]}, event)
+    if verdict not in VERDICTS:
+        return _json_response(400, {"error": "INVALID_VERDICT", "allowed": sorted(VERDICTS)}, event)
+    found = _find_event(ddb, store_id, event_key)
+    if not found:
+        return _json_response(404, {"error": "EVENT_NOT_FOUND"}, event)
+    item = {
+        "store_id": store_id,
+        "event_key": f"verdict#{event_key}",
+        "verdict": verdict,
+        "verified_by": user["email"] or user["sub"],
+        "verified_at": datetime.now(ICT).isoformat(timespec="seconds"),
+        "type": found["type"],
+        "sku_id": found["sku_id"],
+        "at": found["at"],
+    }
+    ddb.Table(SHELF_EVENTS_TABLE).put_item(Item=to_dynamodb_safe(item))
+    return _json_response(200, {"event_key": event_key, "verdict": verdict, "verified_by": item["verified_by"]}, event)
 
 
 def _handle_reports_series(event: dict[str, Any], ddb) -> dict[str, Any]:
@@ -885,6 +1169,7 @@ def _handle_reports_series(event: dict[str, Any], ddb) -> dict[str, Any]:
                     "avg_units": _r(t["avg_total_units"], 1),
                     "max_units": max(int(i.get("max_total", 0)) for i in items),
                     "checks": t["store_checks"],
+                    "unmeasured_hours": _hours(t["unmeasured_checks"]),
                 }
             )
     return _json_response(200, {"series": series}, event)
@@ -1065,6 +1350,7 @@ def _handle_put_shelf_plan(store_id: str, event: dict[str, Any], user: dict[str,
 
 def _audit_view(item: dict[str, Any]) -> dict[str, Any]:
     out = {k: v for k, v in item.items() if not k.endswith("_json")}
+    out["purpose"] = _purpose(item)
     out["ai_boxes"] = json.loads(item.get("ai_boxes_json") or "[]")
     out["verdicts"] = json.loads(item.get("verdicts_json") or "[]")
     out["missed"] = json.loads(item.get("missed_json") or "[]")
@@ -1085,22 +1371,37 @@ def _within_days(ts: str, days: int) -> bool:
         return False
 
 
-def _sku_choices(ddb) -> dict[str, str]:
-    """Model label -> official product name: SKU Master first, the built-in alias table for the rest."""
-    choices = {s["model_alias"]: s["sku_id"] for s in _scan_all(ddb.Table(SKU_MASTER_TABLE)) if s.get("model_alias")}
+def _choices_of(masters: list[dict[str, Any]]) -> dict[str, str]:
+    """Model label -> official product name from rows carrying `model_alias` and `sku_id`, the built-in alias table
+    for the rest."""
+    choices = {s["model_alias"]: s["sku_id"] for s in masters if s.get("model_alias")}
     for label, entry in DEFAULT_ALIAS_MAP.items():
         choices.setdefault(label, entry["sku_id"])
     return choices
 
 
+def _sku_choices(ddb) -> dict[str, str]:
+    """Model label -> official product name: SKU Master first, the built-in alias table for the rest."""
+    return _choices_of(_scan_all(ddb.Table(SKU_MASTER_TABLE)))
+
+
+def _before_rule_a(audit: dict[str, Any]) -> bool:
+    """A done scoring frame labelled before rule A (no label_rule "A"): its numbers follow the old rule until the team
+    relabels it (spec 1.2a)."""
+    return audit.get("status") == "done" and _is_scoring(audit) and audit.get("label_rule") != "A"
+
+
 def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:
+    """Audits of the last `days` days (0: all), newest first, optionally of one status; old_rule=1 keeps only the
+    frames labelled before rule A, for the Model page's "Relabel them". counts are always those of the range."""
     params = event.get("queryStringParameters") or {}
     status = params.get("status") or ""
     days = int(params.get("days") or 7)
+    old_rule = params.get("old_rule") in ("1", "true")
     audits = [a for a in _scan_all(ddb.Table(AUDITS_TABLE)) if _within_days(str(a.get("capture_timestamp", "")), days)]
     counts = {s: sum(1 for a in audits if a.get("status") == s) for s in ("pending", "done", "skipped")}
     chosen = sorted(
-        (a for a in audits if not status or a.get("status") == status),
+        (a for a in audits if (not status or a.get("status") == status) and (not old_rule or _before_rule_a(a))),
         key=lambda a: str(a.get("capture_timestamp", "")),
         reverse=True,
     )
@@ -1111,9 +1412,11 @@ def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:
             "capture_id": a.get("capture_id"),
             "capture_timestamp": a.get("capture_timestamp"),
             "model_version": a.get("model_version"),
+            "purpose": _purpose(a),
             "status": a.get("status"),
             "n_boxes": len(json.loads(a.get("ai_boxes_json") or "[]")),
             "labeled_by": a.get("labeled_by"),
+            "label_rule": a.get("label_rule"),
         }
         for a in chosen
     ]
@@ -1156,6 +1459,15 @@ def _handle_model_audit_put(audit_id: str, event: dict[str, Any], user: dict[str
     verdicts, missed = body.get("verdicts"), body.get("missed")
     if not isinstance(verdicts, list) or not isinstance(missed, list):
         return _json_response(400, {"error": "INVALID_LABELS", "message": "verdicts and missed must be lists"}, event)
+    if body.get("misses_checked") is not True:
+        return _json_response(
+            400,
+            {
+                "error": "INVALID_LABELS",
+                "message": "misses_checked must be true: check for cans the model missed",
+            },
+            event,
+        )
     errors = validate_labels(json.loads(audit.get("ai_boxes_json") or "[]"), verdicts, missed, set(_sku_choices(ddb)))
     if any(not isinstance(m.get("x"), (int, float)) or not isinstance(m.get("y"), (int, float)) for m in missed):
         errors.append("every missed point needs numbers x and y")
@@ -1177,6 +1489,8 @@ def _handle_model_audit_put(audit_id: str, event: dict[str, Any], user: dict[str
             "verdicts_json": json.dumps(clean_verdicts, separators=(",", ":")),
             "missed_json": json.dumps(clean_missed, separators=(",", ":")),
             "status": "done",
+            "label_rule": "A",
+            "misses_checked": True,
             "labeled_by": user["email"],
             "labeled_at": datetime.now(ICT).isoformat(timespec="seconds"),
         },
@@ -1218,20 +1532,94 @@ def _hour_within_days(hour: str, days: int) -> bool:
     return start >= datetime.now(ICT) - timedelta(days=days)
 
 
+def _expected_labels(ddb, store_ids: set[str], label_of: dict[str, str]) -> dict[str, set[str]]:
+    """Per store, the model labels of the SKUs it must carry: its saved shelf plan, else the suggestion, as the
+    Dashboard counts them. Kept apart, so that a frame is never held to another store's SKUs. A suggestion that cannot
+    be read gives none: the Model page must still answer."""
+    plans: dict[str, set[str]] = {}
+    for store_id in sorted(store_ids):
+        names = list((_store_item(ddb, store_id) or {}).get("expected_skus") or [])
+        if not names and SHELF_TABLE:
+            try:
+                names = [s["sku_id"] for s in _suggested_skus(ddb, store_id)]
+            except ClientError as exc:
+                print(json.dumps({"model_summary_plan_failed": store_id, "error": repr(exc)}))
+        plans[store_id] = {label_of.get(name, name) for name in names}
+    return plans
+
+
+def _checks_of(ddb, audits: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    """The check# items of the audits' 5-minute buckets, by (store_id, key): one Query per store over the range of
+    its audits' buckets (the Lambda role may Query the shelf table, not BatchGetItem), projected to the fields the
+    comparison reads. A store whose checks cannot be read has none: the Model page still answers."""
+    wanted: dict[str, set[str]] = defaultdict(set)
+    for a in audits:
+        wanted[a["store_id"]].add(f"check#{shelf.bucket_of(a['capture_timestamp'])}")
+    if not SHELF_TABLE:
+        return {}
+    names = {"#k": "key", "#c": "counts", "#m": "measurable", "#cam": "cameras"}
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+    for store_id, keys in sorted(wanted.items()):
+        cond = Key("store_id").eq(store_id) & Key("key").between(min(keys), max(keys))
+        try:
+            items = _query_all(
+                ddb.Table(SHELF_TABLE),
+                KeyConditionExpression=cond,
+                ProjectionExpression=", ".join(names),
+                ExpressionAttributeNames=names,
+            )
+        except ClientError as exc:
+            print(json.dumps({"model_summary_checks_failed": store_id, "error": repr(exc)}))
+            continue
+        found.update({(store_id, item["key"]): item for item in items if item["key"] in keys})
+    return found
+
+
+def _check_pairs(
+    audits: list[dict[str, Any]], checks: dict[tuple[str, str], dict[str, Any]], label_of: dict[str, str]
+) -> list[tuple[dict[str, Any], dict[str, int]]]:
+    """Each audit with the counts, by model label, of the check that holds it. Left out: no check, a check that was
+    not measurable (an old item without the field was), and a check counted from other cameras too (a store-wide sum
+    is not one frame's truth)."""
+    pairs = []
+    for a in audits:
+        check = checks.get((a["store_id"], f"check#{shelf.bucket_of(a['capture_timestamp'])}"))
+        if not check or check.get("measurable", True) is False:
+            continue
+        if (check.get("cameras") or [a.get("camera_id")]) != [a.get("camera_id")]:
+            continue
+        counts: dict[str, int] = defaultdict(int)
+        for name, units in (check.get("counts") or {}).items():
+            counts[label_of.get(name, name)] += int(units)
+        pairs.append((a, dict(counts)))
+    return pairs
+
+
+def _against_the_shelf(
+    ddb, audits: list[dict[str, Any]]
+) -> tuple[dict[str, set[str]], list[tuple[dict, dict[str, int]]]]:
+    """Per store, the model labels it must carry, and the audits paired with their 5-minute checks."""
+    label_of = {name: label for label, name in sorted(_sku_choices(ddb).items())}
+    plans = _expected_labels(ddb, {a["store_id"] for a in audits}, label_of)
+    return plans, _check_pairs(audits, _checks_of(ddb, audits), label_of)
+
+
 def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
     params = event.get("queryStringParameters") or {}
     days = int(params.get("days") or 7)
     version = params.get("model_version") or "all"
-    done = [
+    scoring = [
         a
         for a in _scan_all(ddb.Table(AUDITS_TABLE))
-        if a.get("status") == "done" and _within_days(str(a.get("capture_timestamp", "")), days)
+        if _is_scoring(a) and _within_days(str(a.get("capture_timestamp", "")), days)
     ]
+    done = [a for a in scoring if a.get("status") == "done"]
     latest: dict[str, str] = {}
     for a in done:
         v = a.get("model_version") or "unknown"
         latest[v] = max(latest.get(v, ""), str(a.get("capture_timestamp", "")))
-    chosen = [a for a in done if version == "all" or (a.get("model_version") or "unknown") == version]
+    in_version = [a for a in scoring if version == "all" or (a.get("model_version") or "unknown") == version]
+    chosen = [_audit_view(a) for a in in_version if a.get("status") == "done"]
     health = [h for h in _scan_all(ddb.Table(MODEL_HEALTH_TABLE)) if _hour_within_days(str(h.get("hour", "")), days)]
     processing = [
         float(h["processing_ms_median"])
@@ -1239,10 +1627,15 @@ def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
         if "processing_ms_median" in h
         for _ in range(int(h.get("captures", 0)))
     ]
+    old_rule_frames = sum(1 for a in done if _before_rule_a(a))
+    plans, pairs = _against_the_shelf(ddb, chosen)  # each frame is held to its own store's plan
     return _json_response(
         200,
         {
-            **summarize([_audit_view(a) for a in chosen], processing),
+            **summarize(chosen, processing, plans),
+            "check_level": check_level(pairs, plans),
+            "display_check": display_agreement(in_version),
+            "old_rule_frames": old_rule_frames,
             "model_versions": sorted(latest, key=lambda v: latest[v], reverse=True),
             "range": {"days": days, "model_version": version},
         },
@@ -1407,6 +1800,15 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
 
         if method == "GET" and route_path == "/shelf-events":
             return _handle_shelf_events(event, ddb)
+
+        if method == "GET" and route_path == "/shelf-events/photos":
+            return _handle_shelf_event_photos(event, s3, ddb)
+
+        if method == "PUT" and route_path == "/shelf-events/verdict":
+            err = _require_groups(user, WRITE_CORRECTION_GROUPS, event)
+            if err:
+                return err
+            return _handle_put_shelf_event_verdict(event, user, ddb)
 
         if method == "GET" and route_path == "/settings":
             return _handle_get_settings(event, user, ddb)

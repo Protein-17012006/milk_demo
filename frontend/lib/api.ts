@@ -16,6 +16,18 @@ export class ApiError extends Error {
   }
 }
 
+export type ReliabilityBadge = "high" | "medium" | "low" | "insufficient";
+
+/** How far one SKU can be trusted, from the labelled scoring frames of the last 14 days. */
+export interface ApiReliability {
+  badge: ReliabilityBadge;
+  named_right: number | null; // boxes named this SKU and right / boxes named this SKU
+  found_right: number | null; // boxes named this SKU and right / true cans of it
+  true_units: number; // true cans of it in the frames that had one
+  frames: number; // frames with a true can
+  confused_as: string | null; // product name the model most often gave its true cans
+}
+
 export interface ApiProduct {
   sku_id: string;
   sku_name: string;
@@ -39,6 +51,7 @@ export interface ApiProduct {
   capture_id: string | null;
   capture_timestamp: string | null;
   processing_time_ms: number;
+  reliability?: ApiReliability; // older backends leave it out
 }
 
 export interface ApiProductsResponse {
@@ -47,6 +60,16 @@ export interface ApiProductsResponse {
   unrecognized_units: number;
   stores_total: number;
   flag_threshold: number;
+  displays?: ApiDisplayStatus[]; // one per camera; older backends leave it out
+}
+
+/** Whether a camera sees the display cabinet. `since` is when the current state began (ISO, UTC+7). */
+export interface ApiDisplayStatus {
+  camera_id: string;
+  store_id: string;
+  visible: boolean;
+  since: string | null;
+  last_visible_at: string | null;
 }
 
 export interface ApiProductDetail {
@@ -155,12 +178,39 @@ export interface ApiKpiResponse {
     blocked_reason: BlockedReason | null;
   };
   oos_now?: { count: number | null; as_of: string | null; blocked_reason: BlockedReason | null };
+  // Hours of the period: measured, open, and open hours in which the camera could not see the display.
+  // null when the store has no opening hours (an older backend leaves the field out).
+  coverage?: ApiCoverage | null;
+  // How often confirmed alerts were right; value is null (blocked_reason "few_verified") below 10 confirmed events.
+  alert_accuracy?: ApiAlertAccuracy;
   top_50_sku_accuracy?: {
     value: number | null;
     n_frames: number;
     scope_note: string;
     blocked_reason: BlockedReason | null;
   };
+}
+
+export type ShelfVerdict = "right" | "wrong" | "unsure";
+
+export interface ApiAlertAccuracy {
+  value: number | null;
+  n: number; // right + wrong
+  unsure: number;
+  by_type?: Record<string, Record<ShelfVerdict, number>>;
+  blocked_reason: "few_verified" | null;
+}
+
+/** Links (valid 15 minutes) to the two photos of a shelf event; null for a photo that was not kept. */
+export interface ApiEventPhotos {
+  before_url: string | null;
+  after_url: string | null;
+}
+
+export interface ApiCoverage {
+  measured_hours: number;
+  open_hours: number;
+  display_away_hours: number;
 }
 
 export type BlockedReason = "no_hours" | "no_expected" | "no_checks" | "no_previous" | "no_labels";
@@ -180,6 +230,14 @@ export interface ApiShelfEvent {
   level_before: number;
   level_after: number;
   duration_min?: number | null; // left out when empty: only a RESTOCKED that ended an out-of-stock has it
+  // Set when the shelf was not seen for a while before this change: buckets of the last measured check before the
+  // gap and of the first one after it.
+  after_gap?: boolean;
+  gap_from?: string;
+  gap_to?: string;
+  verdict?: ShelfVerdict; // what the team confirmed, once someone has
+  badge?: ReliabilityBadge; // reliability of the SKU; older backends leave it out
+  uncertain?: true; // set when the badge is "low"
 }
 
 export interface ApiShelfEventsResponse {
@@ -191,6 +249,7 @@ export interface ApiShelfEventsResponse {
 export interface ApiTrendPoint {
   t: string;
   value: number | null;
+  unmeasured_hours?: number | null; // hours of this point in which the display was out of view
 }
 
 export interface ApiTrendsResponse {
@@ -216,6 +275,7 @@ export interface ApiReportsSeriesPoint {
   avg_units: number;
   max_units: number;
   checks: number;
+  unmeasured_hours?: number;
 }
 
 export interface ApiReportsSeriesResponse {
@@ -234,15 +294,20 @@ export interface ApiAuditBox {
   box: [number, number, number, number]; // x, y, w, h in frame pixels
 }
 
+// scoring frames count in the accuracy numbers; training frames only teach the flavour gallery
+export type AuditPurpose = "scoring" | "training";
+
 export interface ApiAuditListItem {
   audit_id: string;
   camera_id: string;
   capture_id: string;
   capture_timestamp: string;
   model_version: string;
+  purpose: AuditPurpose;
   status: AuditStatus;
   n_boxes: number;
   labeled_by?: string | null;
+  label_rule?: string | null; // "A" when labelled under rule A; null when labelled before it, or not labelled yet
 }
 
 export interface ApiAuditListResponse {
@@ -252,7 +317,7 @@ export interface ApiAuditListResponse {
 
 export interface ApiAuditVerdict {
   box_id: number;
-  verdict: "correct" | "wrong_sku" | "not_product";
+  verdict: "correct" | "wrong_sku" | "not_product" | "out_of_scope";
   true_sku_id?: string;
 }
 
@@ -263,6 +328,7 @@ export interface ApiAuditDetail {
   capture_id: string;
   capture_timestamp: string;
   model_version: string;
+  purpose: AuditPurpose;
   status: AuditStatus;
   ai_boxes: ApiAuditBox[];
   verdicts: ApiAuditVerdict[];
@@ -273,6 +339,18 @@ export interface ApiAuditDetail {
   labeled_at?: string;
   skip_reason?: string;
   skip_note?: string;
+  label_rule?: string;
+  misses_checked?: boolean;
+}
+
+/** A 95% interval from resampling whole labelled frames; null under 2 frames. */
+export type ApiInterval = [number, number] | null;
+
+/** One ratio or mean over labelled frames: value null when nothing was counted (never 0); n = sum of denominators. */
+export interface ApiStat {
+  value: number | null;
+  ci: ApiInterval;
+  n: number;
 }
 
 export interface ApiKpiValue {
@@ -281,20 +359,69 @@ export interface ApiKpiValue {
   met: boolean | null;
   n: number;
   exact_or_minor?: number | null;
+  ci?: ApiInterval; // every KPI but processing time
+}
+
+export interface ApiPerSkuRow {
+  sku_id: string;
+  model_units: number;
+  true_units: number;
+  id_accuracy: number | null; // named right: boxes named this SKU and right / boxes named this SKU
+  missed_units: number;
+  confused_as: string | null;
+  confused_count: number;
+  // older backends leave the rest out
+  id_accuracy_ci?: ApiInterval;
+  found_right?: number | null; // boxes named this SKU and right / true cans of it
+  found_right_ci?: ApiInterval;
+  bias_per_frame?: number | null; // mean of model - truth over the frames where either side counted it
+  bias_per_frame_ci?: ApiInterval;
+  frames?: number; // frames with a true can
+  days?: number; // days of those frames (UTC+7)
+  enough?: boolean; // 10 frames, 20 true cans, 2 days
+  badge?: ReliabilityBadge;
+}
+
+export type DayPeriod = "morning" | "afternoon" | "evening";
+
+export interface ApiPeriodSku {
+  named_right: number | null;
+  found_right: number | null;
+  model_units: number;
+  true_units: number;
+  frames: number;
+  days: number;
+  enough: boolean;
+}
+
+export interface ApiPeriod {
+  frames: number;
+  overall_identification_accuracy: ApiStat;
+  presence_agree: ApiStat;
+  per_sku: Record<string, ApiPeriodSku>;
+}
+
+/** The Dashboard's 5-minute checks against the truth of the labelled frame inside each; n = SKU rows. */
+export interface ApiCheckLevel {
+  frames: number;
+  count_mae: ApiStat;
+  count_bias: ApiStat; // check minus truth: positive counts too many
+  presence_agree: ApiStat;
+}
+
+/** The worker's display check against the labellers on scoring frames. */
+export interface ApiDisplayCheck {
+  agree: ApiStat;
+  false_not_visible: number;
+  false_visible: number;
 }
 
 export interface ApiModelSummary {
   n_audits: number;
+  old_rule_frames: number; // done frames not labelled under rule A
+  out_of_scope_share: { value: number | null; n: number }; // out_of_scope boxes / all AI boxes; n = boxes
   kpis: Record<string, ApiKpiValue>;
-  per_sku: {
-    sku_id: string;
-    model_units: number;
-    true_units: number;
-    id_accuracy: number | null;
-    missed_units: number;
-    confused_as: string | null;
-    confused_count: number;
-  }[];
+  per_sku: ApiPerSkuRow[];
   confusion: { rows: string[]; cols: string[]; cells: Record<string, number> };
   by_day: {
     day: string;
@@ -303,6 +430,11 @@ export interface ApiModelSummary {
     unit_count_mae: number | null;
     exact_or_minor_rate: number | null;
   }[];
+  // older backends leave these four out; n of presence = SKU rows (one SKU in one frame)
+  presence?: { agree: ApiStat; false_empty: ApiStat; missed_empty: ApiStat };
+  by_period?: Record<DayPeriod, ApiPeriod>;
+  check_level?: ApiCheckLevel;
+  display_check?: ApiDisplayCheck;
   model_versions: string[];
   range: { days: number; model_version: string };
 }
@@ -491,6 +623,19 @@ export function createApiClient(getIdToken: TokenGetter) {
     getShelfEvents: (p: DashboardQuery = {}) =>
       requestWithAuth(`/shelf-events${dashboardQuery(p)}`, getIdToken) as Promise<ApiShelfEventsResponse>,
 
+    getShelfEventPhotos: (storeId: string, eventKey: string) =>
+      requestWithAuth(
+        `/shelf-events/photos?store_id=${encodeURIComponent(storeId)}&event_key=${encodeURIComponent(eventKey)}`,
+        getIdToken
+      ) as Promise<ApiEventPhotos>,
+
+    // The event key goes in the body: it holds spaces and "&".
+    saveShelfEventVerdict: (storeId: string, eventKey: string, verdict: ShelfVerdict) =>
+      requestWithAuth("/shelf-events/verdict", getIdToken, {
+        method: "PUT",
+        body: JSON.stringify({ store_id: storeId, event_key: eventKey, verdict }),
+      }) as Promise<{ event_key: string; verdict: ShelfVerdict }>,
+
     getShelfPlan: (storeId: string) =>
       requestWithAuth(`/stores/${encodeURIComponent(storeId)}/shelf-plan`, getIdToken) as Promise<ApiShelfPlan>,
 
@@ -518,9 +663,11 @@ export function createApiClient(getIdToken: TokenGetter) {
     exportCaptureLogCsv: () =>
       requestWithAuth("/exports/capture-log.csv", getIdToken, {}, true) as Promise<string>,
 
-    listAudits: (status?: AuditStatus, days = 7) => {
+    // oldRule: only the done scoring frames labelled before rule A, for "Relabel them"
+    listAudits: (status?: AuditStatus, days = 7, options: { oldRule?: boolean } = {}) => {
       const sp = new URLSearchParams({ days: String(days) });
       if (status) sp.set("status", status);
+      if (options.oldRule) sp.set("old_rule", "1");
       return requestWithAuth(`/model/audits?${sp.toString()}`, getIdToken) as Promise<ApiAuditListResponse>;
     },
 
@@ -529,7 +676,11 @@ export function createApiClient(getIdToken: TokenGetter) {
 
     saveAudit: (
       auditId: string,
-      body: { verdicts: ApiAuditVerdict[]; missed: { sku_id: string; x: number; y: number }[] }
+      body: {
+        verdicts: ApiAuditVerdict[];
+        missed: { sku_id: string; x: number; y: number }[];
+        misses_checked: boolean;
+      }
     ) =>
       requestWithAuth(`/model/audits/${encodeURIComponent(auditId)}`, getIdToken, {
         method: "PUT",
