@@ -23,10 +23,12 @@ import numpy as np
 
 SIG_W, SIG_H = 64, 48
 # Held out from training, database and threshold tuning (spec 5.2e): 23/11 from 18:00 until the cabinet was packed
-# away (standing packs at dusk), and everything from 25/11 on. End None = no end.
+# away (standing packs at dusk), and the whole of 25/11. The 25/11 window had no end until the first gate (25/11
+# night) failed on arrangements seen only that day; hoang chose to close it, so days from 26/11 can teach them while
+# 25/11 stays the gate. End None = no end.
 HOLDOUT = (
     ("2026-11-23T18:00:00+07:00", "2026-11-23T21:00:00+07:00"),
-    ("2026-11-25T00:00:00+07:00", None),
+    ("2026-11-25T00:00:00+07:00", "2026-11-26T00:00:00+07:00"),
 )
 
 

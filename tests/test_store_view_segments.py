@@ -75,6 +75,12 @@ def test_holdout_window_marks_segments():
     assert [s["split"] for s in split(rows, sigs)] == ["holdout"]
 
 
+def test_frames_from_26_11_are_for_training_again():
+    # hoang 25/11 (option A): 25/11 stays the gate, days from 26/11 teach the arrangements first seen on 25/11
+    assert holdout("2026-11-25T23:59:59+07:00")
+    assert not holdout("2026-11-26T00:00:00+07:00") and not holdout("2026-11-27T09:00:00+07:00")
+
+
 def test_a_segment_never_spans_a_holdout_boundary():
     # one arrangement from 17:55 to 18:10 on 23/11: the part from 18:00 is held out, so it must be its own segment
     rows, sigs = frames("2026-11-23T17:55:00+07:00", [A] * 6, step_s=180)

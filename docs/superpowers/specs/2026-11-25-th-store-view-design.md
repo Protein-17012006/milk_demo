@@ -145,7 +145,10 @@ liệu, train lâu.
 
 **e) Tập giữ riêng.** Đây là ngoại lệ duy nhất của "dùng mọi thứ", vì không có nó thì không biết model chạy thật hay
 chỉ nhớ ảnh. Tập gồm:
-- Mọi frame từ ngày 25/11 trở đi, chụp tới lúc train. Lốc nằm, cách xếp mới hơn những gì có trong tập dạy.
+- Mọi frame ngày 25/11. Lốc nằm, cách xếp mới hơn những gì có trong tập dạy.
+  - Ban đầu là "từ 25/11 trở đi, không có điểm kết thúc".
+  - Lần đo cổng đầu tiên (tối 25/11) trượt vì các cách xếp E0/E1/E2 chỉ có trong ngày 25/11.
+  - hoang chọn (25/11, cách A): đóng cửa sổ lúc 26/11 00:00. Frame từ 26/11 được dùng để train, còn 25/11 vẫn là phép đo cổng.
 - Frame ngày 23/11 từ 18:00 đến lúc tủ được cất (khoảng 20:40). Lốc đứng, lúc chạng vạng.
   - Phần này gần giống các giờ trước trong ngày, nên số đo sẽ hơi lạc quan. Báo cáo phải ghi rõ điều đó.
 - Claude vẽ khung trên keyframe của tập này, theo đúng cách ở mục c.
