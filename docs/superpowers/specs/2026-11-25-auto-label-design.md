@@ -312,9 +312,12 @@ Nếu nhóm SKU chưa có detector (không có nguồn A):
 **Frame AUD lọt vào tập train TH:**
 - `training/store_view` không lọc `audit_ids`.
 - Có 30 ảnh (27 train, 3 val) cắt từ 21 frame AUD ngày 22–24/11 nằm trong `store_dataset_v1`, tập mà TH đang train.
-- Cổng đo TH không bị ảnh hưởng, vì cổng dùng cửa sổ giữ riêng.
-- Số TH trên trang Model sẽ đẹp hơn thực tế đúng ở 21 frame đó.
-- Pipeline mới và `dataset.py` phải lọc frame AUD.
+- Không con số nào hiện nay bị sai:
+  - cổng đo TH dùng cửa sổ giữ riêng;
+  - trang Model chấm box mà model đang chạy thật trả ra lúc chụp, nên model TH mới không bao giờ bị chấm trên các frame cũ đó.
+- `database v2` (chưa live) có 32 trong 4.000 ảnh cắt TH lấy từ 4 frame AUD.
+- hoang chọn giữ lần train này (cách a).
+- Commit `1d89c26`: `dataset.py` và `build_db.py` đọc manifest, bỏ mọi frame AUD, và từ chối chạy khi thiếu manifest. Pipeline mới phải làm như vậy.
 
 **HUYHOANG bật Smart App Control:** torch mới cài bị chặn. Không được nâng cấp torch trong `.venv` của worker.
 
