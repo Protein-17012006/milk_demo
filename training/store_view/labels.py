@@ -8,7 +8,7 @@ covers what is visible of it.
 
     python -m training.store_view.labels zoom   --frames DIR --segments FILE --out DIR [--split train|holdout|all]
     python -m training.store_view.labels review --frames DIR --segments FILE --keyframes FILE --out DIR
-    python -m training.store_view.labels write  --segments FILE --keyframes FILE --out DIR
+    python -m training.store_view.labels write  --frames DIR --segments FILE --keyframes FILE --out DIR
 """
 
 from __future__ import annotations
@@ -73,13 +73,35 @@ def from_yolo(lines: list[str], w: int, h: int) -> list[tuple[int, list[int]]]:
     return out
 
 
-def write_labels(segments: list[dict], keyframes: dict, out_dir: Path, size: tuple[int, int]) -> dict[str, int]:
+def pack_area(boxes: list[list[int]], w: int, h: int, margin: int = 16) -> tuple[int, int, int, int]:
+    """x0, y0, x1, y1 around all the boxes, grown by margin on every side, inside the frame."""
+    x0 = max(0, min(b[0] for b in boxes) - margin)
+    y0 = max(0, min(b[1] for b in boxes) - margin)
+    x1 = min(w, max(b[0] + b[2] for b in boxes) + margin)
+    y1 = min(h, max(b[1] + b[3] for b in boxes) + margin)
+    return x0, y0, x1, y1
+
+
+def write_labels(
+    segments: list[dict],
+    keyframes: dict,
+    out_dir: Path,
+    size: tuple[int, int],
+    keep=None,
+    zone: tuple[int, int, int, int] | None = None,
+) -> dict[str, int]:
     """One label file per member: a day segment's members take its keyframe's boxes, negative segments' members an
-    empty file. Transient segments, and day segments whose keyframe has no entry yet, get no files."""
+    empty file. Transient segments, and day segments whose keyframe has no entry yet, get no files.
+
+    keep(member, keyframe, area) -> bool, when given, decides whether a day member still looks like its keyframe where
+    the packs are: area is the keyframe's pack_area, or `zone` (where packs stand in other keyframes) when the
+    keyframe shows none. A segment is cut by the look of a wide region, so a pack put down, taken away or hidden by a
+    passer-by inside it would otherwise inherit the keyframe's boxes. Members it rejects get no file."""
     w, h = size
     out_dir.mkdir(parents=True, exist_ok=True)
-    counts = {"labelled": 0, "negative": 0, "unlabelled_segments": 0}
+    counts = {"labelled": 0, "negative": 0, "unlabelled_segments": 0, "dropped": 0}
     for seg in segments:
+        area = None
         if seg["kind"] == "negative":
             lines, key = [], "negative"
         elif seg["kind"] == "day":
@@ -87,11 +109,17 @@ def write_labels(segments: list[dict], keyframes: dict, out_dir: Path, size: tup
             if entry is None:
                 counts["unlabelled_segments"] += 1
                 continue
-            lines, key = to_yolo(boxes_of(entry, w, h), w, h), "labelled"
+            boxes = boxes_of(entry, w, h)
+            lines, key = to_yolo(boxes, w, h), "labelled"
+            area = pack_area(boxes, w, h) if boxes else zone
         else:
             continue
         text = "".join(f"{line}\n" for line in lines)
         for capture_id in seg["members"]:
+            checked = keep is not None and area is not None and capture_id != seg["keyframe"]
+            if checked and not keep(capture_id, seg["keyframe"], area):
+                counts["dropped"] += 1
+                continue
             (out_dir / f"{capture_id}.txt").write_text(text, encoding="utf-8")
             counts[key] += 1
     return counts
@@ -162,14 +190,33 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--region")
     ap.add_argument("--split", default="all", choices=["train", "holdout", "all"])
     ap.add_argument("--scale", type=int, default=4)
+    ap.add_argument("--propagate-sim", type=float, default=0.9, help="write: how alike the pack area must stay")
     args = ap.parse_args(argv)
     segments = json.loads(args.segments.read_text(encoding="utf-8"))
     args.out.mkdir(parents=True, exist_ok=True)
     region = _region(args.region)
 
     if args.command == "write":
+        from training.store_view.segments import signature, similarity
+
         keyframes = json.loads(args.keyframes.read_text(encoding="utf-8"))
-        print(write_labels(segments, keyframes, args.out, (2560, 1440)))
+        labelled = [boxes_of(e, 2560, 1440) for e in keyframes.values()]
+        zone = pack_area([b for boxes in labelled for b in boxes], 2560, 1440) if any(labelled) else None
+        paths = {p.stem: p for p in args.frames.glob("*/*.jpg")}
+        sigs: dict = {}
+
+        def look(capture_id: str, area: tuple[int, int, int, int]):
+            if (capture_id, area) not in sigs:
+                grey = cv2.imread(str(paths[capture_id]), cv2.IMREAD_GRAYSCALE)
+                sigs[(capture_id, area)] = signature(grey, area) if grey is not None else None
+            return sigs[(capture_id, area)]
+
+        def keep(member: str, keyframe: str, area: tuple[int, int, int, int]) -> bool:
+            a, b = look(member, area), look(keyframe, area)
+            return a is not None and b is not None and similarity(a, b) >= args.propagate_sim
+
+        print("pack zone of empty keyframes:", zone)
+        print(write_labels(segments, keyframes, args.out, (2560, 1440), keep=keep, zone=zone))
         return
 
     if args.command == "zoom":
