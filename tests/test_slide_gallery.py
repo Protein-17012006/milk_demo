@@ -131,3 +131,30 @@ def test_save_and_load_round_trip(tmp_path):
     assert np.allclose(back.features, g.features) and back.labels.tolist() == g.labels.tolist()
     assert back.sources.tolist() == g.sources.tolist() and back.built_at == "2026-11-25" and back.none_threshold == 0.91
     assert back.counts() == {"cheese145": 3}
+
+
+def test_twenty_crops_of_one_can_are_not_twenty_cans():
+    # a truth box is cut from up to 30 frames: those crops are one can, and MIN_IMAGES counts cans
+    hot = near(axis(0), 25, spread=0.01)
+    rest = near(axis(40), 30)
+    feats = np.concatenate([hot, rest])
+    labels = np.array(["hot160"] * 25 + ["original145"] * 30)
+    objects = np.array(["truth:K1#3"] * 25 + [f"trn:C{i}@1,1" for i in range(30)])
+    g = Gallery(feats, labels, np.array(["K1"] * 55), "x", None, objects)
+    assert g.counts() == {"hot160": 1, "original145": 30}
+    assert read(g, axis(0)).sku is None
+
+
+def test_build_names_each_can_once(tmp_path):
+    # one truth box cut from three look-alike frames of its segment is one can
+    frames = tmp_path / "frames"
+    (frames / "2026-11-24").mkdir(parents=True)
+    img = RNG.integers(30, 220, size=(120, 200, 3)).astype(np.uint8)
+    for cid in ("K", "M1", "M2"):
+        cv2.imwrite(str(frames / "2026-11-24" / f"{cid}.jpg"), img)
+    rows = [{"capture_id": c, "audit_ids": []} for c in ("K", "M1", "M2")]
+    (frames / "manifest.jsonl").write_text("".join(json.dumps(r) + chr(10) for r in rows))
+    truth = {"K": [{"box": [20, 20, 30, 60], "sku": "cheese145", "kind": "face"}]}
+    segments = [{"id": "s", "kind": "day", "split": "train", "keyframe": "K", "members": ["K", "M1", "M2"]}]
+    g = build(truth, segments, frames, [], exclude_holdout=True)
+    assert len(g.labels) == 3 and g.counts() == {"cheese145": 1}

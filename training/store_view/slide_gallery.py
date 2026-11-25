@@ -56,6 +56,7 @@ class Gallery:
     sources: np.ndarray
     built_at: str
     none_threshold: float | None = None
+    objects: np.ndarray | None = None  # the can each crop shows: one truth box cut from many frames is one can
 
     def save(self, path: Path) -> None:
         np.savez(
@@ -65,16 +66,21 @@ class Gallery:
             sources=self.sources.astype(str),
             built_at=np.array(self.built_at),
             none_threshold=np.array(np.nan if self.none_threshold is None else self.none_threshold),
+            objects=(self.objects if self.objects is not None else self.sources).astype(str),
         )
 
     @classmethod
     def load(cls, path: Path) -> Gallery:
         d = np.load(path, allow_pickle=False)
         nt = float(d["none_threshold"])
-        return cls(d["features"], d["labels"], d["sources"], str(d["built_at"]), None if np.isnan(nt) else nt)
+        objects = d["objects"] if "objects" in d.files else None
+        return cls(d["features"], d["labels"], d["sources"], str(d["built_at"]), None if np.isnan(nt) else nt, objects)
 
     def counts(self) -> dict[str, int]:
-        return dict(Counter(self.labels.tolist()))
+        """Cans per label (MIN_IMAGES counts cans, not crops); crops when the gallery does not know its cans."""
+        if self.objects is None:
+            return dict(Counter(self.labels.tolist()))
+        return dict(Counter(label for label, _ in set(zip(self.labels.tolist(), self.objects.tolist(), strict=True))))
 
 
 @dataclass(frozen=True)
@@ -154,14 +160,15 @@ def build(
 
     scoring = read_scoring_frames(frames_dir)
     paths = {p.stem: p for p in frames_dir.glob("*/*.jpg")}
-    feats, labels, sources = [], [], []
+    feats, labels, sources, objects = [], [], [], []
 
-    def add(image, box, label, source):
+    def add(image, box, label, source, obj):
         crop = crop_of(image, box)
         if crop is not None:
             feats.append(colour(crop))
             labels.append(label)
             sources.append(source)
+            objects.append(obj)
 
     seg_of = {s["keyframe"]: s for s in segments if s.get("kind") == "day"}
     for key, rows in truth.items():
@@ -169,16 +176,16 @@ def build(
         if seg is None or key not in paths or (exclude_holdout and seg.get("split") == "holdout"):
             continue
         key_grey = cv2.imread(str(paths[key]), cv2.IMREAD_GRAYSCALE)
-        usable = [r for r in rows if r.get("kind") != "ignore" and r.get("sku") not in (None, "unknown")]
+        usable = [(i, r) for i, r in enumerate(rows) if r.get("kind") != "ignore" and r.get("sku") not in (None, "unknown")]
         for cid in spread([c for c in seg["members"] if c not in scoring and c in paths], per_keyframe):
             image = cv2.imread(str(paths[cid]))
             grey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            for r in usable:
+            for i, r in usable:
                 x, y, w, h = r["box"]
                 area = (max(0, x - 8), max(0, y - 8), x + w + 8, y + h + 8)
                 if cid != key and similarity(signature(grey, area), signature(key_grey, area)) < min_sim:
                     continue
-                add(image, r["box"], r["sku"], cid)
+                add(image, r["box"], r["sku"], cid, f"truth:{key}#{i}")
     stamp = {a["capture_id"]: a.get("capture_timestamp", "") for a in trn}
     cache: dict[str, np.ndarray] = {}
     for cid, box, label in trn_rows(trn):
@@ -187,13 +194,14 @@ def build(
         if cid not in cache:
             cache.clear()
             cache[cid] = cv2.imread(str(paths[cid]))
-        add(cache[cid], box, label, cid)
+        add(cache[cid], box, label, cid, f"trn:{cid}@{box[0]},{box[1]}")
     return Gallery(
         np.stack(feats) if feats else np.zeros((0, 144)),
         np.array(labels, dtype=str),
         np.array(sources, dtype=str),
         datetime.now().isoformat(timespec="seconds"),
         None,
+        np.array(objects, dtype=str),
     )
 
 
