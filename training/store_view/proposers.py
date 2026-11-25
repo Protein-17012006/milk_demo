@@ -68,18 +68,20 @@ class Sources:
 
     def __init__(
         self,
-        slide_weights: str,
+        slide_weights: str | None,
         yoloe_weights: str,
         prompt_images: list[np.ndarray],
         prompt_boxes: list[np.ndarray],
         region: tuple[int, int, int, int],
     ) -> None:
-        os.environ["MILK_SLIDE_WEIGHTS"] = slide_weights
-        os.environ["MILK_SLIDE_CONF"] = SLIDE_CONF
-        os.environ["MILK_SLIDE_IMGSZ"] = SLIDE_IMGSZ
-        from milk.slide_adapter import SlidePipeline
+        self._slide = None  # without Slide weights, YOLOE alone (draft boxes for any product group)
+        if slide_weights:
+            os.environ["MILK_SLIDE_WEIGHTS"] = slide_weights
+            os.environ["MILK_SLIDE_CONF"] = SLIDE_CONF
+            os.environ["MILK_SLIDE_IMGSZ"] = SLIDE_IMGSZ
+            from milk.slide_adapter import SlidePipeline
 
-        self._slide = SlidePipeline()
+            self._slide = SlidePipeline()
         self._yoloe_weights = yoloe_weights
         x0, y0, x1, y1 = region
         self._prompts = [(img[y0:y1, x0:x1].copy(), boxes) for img, boxes in zip(prompt_images, prompt_boxes, strict=True)]
@@ -108,5 +110,6 @@ class Sources:
         return union_nms(out)
 
     def frame(self, image: np.ndarray) -> list[Proposal]:
-        a = [Proposal("A", tuple(float(v) for v in d.box), float(d.confidence), d.sku_id) for d in self._slide.detect(image)]
+        detections = self._slide.detect(image) if self._slide else []
+        a = [Proposal("A", tuple(float(v) for v in d.box), float(d.confidence), d.sku_id) for d in detections]
         return [p for p in a + self._yoloe(image) if in_region(p.box, self._region)]

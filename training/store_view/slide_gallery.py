@@ -129,7 +129,7 @@ def trn_rows(audits: list[dict]) -> list[tuple[str, list[int], str]]:
     return out
 
 
-def _crop(image: np.ndarray, box: list[int]) -> np.ndarray | None:
+def crop_of(image: np.ndarray, box) -> np.ndarray | None:
     x, y, w, h = (int(round(v)) for v in box)
     crop = image[max(y, 0) : y + h, max(x, 0) : x + w]
     return crop if crop.size and crop.shape[0] >= 4 and crop.shape[1] >= 4 else None
@@ -157,7 +157,7 @@ def build(
     feats, labels, sources = [], [], []
 
     def add(image, box, label, source):
-        crop = _crop(image, box)
+        crop = crop_of(image, box)
         if crop is not None:
             feats.append(colour(crop))
             labels.append(label)
