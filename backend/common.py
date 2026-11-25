@@ -51,6 +51,20 @@ CAPTURE_LOG_COLUMNS = [
 # Decision 21/11 (hoang): sku_id is the exact product name printed on packaging;
 # model labels (TMP-MLK-* and Slide snack classes) map via alias table.
 DEFAULT_ALIAS_MAP: dict[str, dict[str, Any]] = {
+    # 25/11 (spec 2026-11-25-th-store-view): the store camera cannot read which of the two TH 180ml it sees, so the
+    # store-view model counts both in one row. Its name says so; it is not a product of its own.
+    "TMP-MLK-TH-00": {
+        "sku_id": "TH true MILK Sữa Tươi Tiệt Trùng 180ml (Có đường + Ít đường)",
+        "sku_name_vi": "TH true MILK Sữa Tươi Tiệt Trùng 180ml (Có đường + Ít đường)",
+        "sku_name_en": "TH true MILK Fresh Milk 180ml (Sweetened + Low Sugar)",
+        "brand": "TH true MILK",
+        "manufacturer": "TH Group",
+        "category": "Milk",
+        "subcategory": "Fresh Milk",
+        "pack_type": "Box",
+        "pack_size": "180 ml",
+        "image_url": "/images/products/th-true-milk-fresh-milk-180ml.png",
+    },
     "TMP-MLK-TH-01": {
         "sku_id": "TH true MILK Sữa Tươi Tiệt Trùng Có Đường 180ml",
         "sku_name_vi": "TH true MILK Sữa Tươi Tiệt Trùng Có Đường 180ml",

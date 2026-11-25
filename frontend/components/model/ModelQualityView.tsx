@@ -123,8 +123,8 @@ export function ModelQualityView() {
     );
   }
 
-  // "Relabel them": the frames labelled before rule A in this range, read on click (no extra call on page load) and
-  // opened in the labeller with their saved verdicts; saving stores them under rule A and the note's count drops
+  // "Relabel them": the frames labelled before rule B in this range, read on click (no extra call on page load) and
+  // opened in the labeller with their saved verdicts; saving stores them under rule B and the note's count drops
   const relabelOldFrames = () => {
     setFindingOldFrames(true);
     api
@@ -196,8 +196,8 @@ export function ModelQualityView() {
         >
           <p>
             {summary.old_rule_frames === 1
-              ? "1 frame was labelled before rule A — relabel it so the numbers follow one rule"
-              : `${summary.old_rule_frames} frames were labelled before rule A — relabel them so the numbers follow one rule`}
+              ? "1 frame was labelled before rule B — relabel it so the numbers follow one rule"
+              : `${summary.old_rule_frames} frames were labelled before rule B — relabel them so the numbers follow one rule`}
           </p>
           <button
             type="button"

@@ -81,3 +81,7 @@ def test_tile_and_variants_settings(monkeypatch):
     assert _settings() == (1280, True)
     monkeypatch.setenv("MILK_LONG_VARIANTS", "0")
     assert _settings() == (1280, False)
+
+
+def test_worker_and_backend_name_the_merged_th_row_alike():
+    assert product_names()["TMP-MLK-TH-00"] == common.DEFAULT_ALIAS_MAP["TMP-MLK-TH-00"]["sku_name_vi"]

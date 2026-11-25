@@ -5,7 +5,7 @@
  *   correct      named box: one unit of that SKU; UNRECOGNIZED box: goods outside the catalogue
  *   wrong_sku    one unit of another catalogue SKU (trueSku)
  *   not_product  not a catalogue SKU (named box) / not goods at all (UNRECOGNIZED box)
- *   out_of_scope a real can that rule A does not count; the box is dropped from every number
+ *   out_of_scope a real unit that the labelling rule does not count; the box is dropped from every number
  */
 
 import type { ApiAuditListItem } from "./api";
@@ -74,12 +74,16 @@ export type RelabelCandidate = Pick<
   "audit_id" | "capture_timestamp" | "purpose" | "status" | "label_rule"
 >;
 
-/** The frames "Relabel them" opens in the labeller: done scoring frames labelled before rule A (label_rule is not
- * "A"), oldest first. GET /model/audits?old_rule=1 lists only these; the filter keeps the labeller to them anyway.
- * The labeller loads each frame's saved verdicts, and Save stores it under rule A. */
+/** The labelling rule a save stores (backend LABEL_RULE). A (24/11): Slide cans on the display's top tray.
+ * B (25/11): every unit of the store's shelf plan whose face, lid or top shows, so the TH packs too. */
+export const CURRENT_LABEL_RULE = "B";
+
+/** The frames "Relabel them" opens in the labeller: done scoring frames labelled under an older rule (label_rule is
+ * not CURRENT_LABEL_RULE), oldest first. GET /model/audits?old_rule=1 lists only these; the filter keeps the labeller
+ * to them anyway. The labeller loads each frame's saved verdicts, and Save stores it under the current rule. */
 export function relabelQueue(items: RelabelCandidate[]): string[] {
   return items
-    .filter((a) => a.status === "done" && a.purpose === "scoring" && a.label_rule !== "A")
+    .filter((a) => a.status === "done" && a.purpose === "scoring" && a.label_rule !== CURRENT_LABEL_RULE)
     .sort((a, b) => a.capture_timestamp.localeCompare(b.capture_timestamp))
     .map((a) => a.audit_id);
 }

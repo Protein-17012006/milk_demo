@@ -83,18 +83,19 @@ test("an out-of-scope box counts neither for the model nor for the truth", () =>
   assert.deepEqual(totalsBySku([{ box_id: 1, sku_id: "cheese145" }], { 1: { verdict: "out_of_scope", trueSku: null } }, []), {});
 });
 
-test("Relabel them opens the done scoring frames labelled before rule A, oldest first", () => {
+test("Relabel them opens the done scoring frames labelled before rule B, oldest first", () => {
   const frame = (audit_id: string, capture_timestamp: string, fields: Partial<RelabelCandidate> = {}) =>
     ({ audit_id, capture_timestamp, purpose: "scoring", status: "done", label_rule: null, ...fields }) as RelabelCandidate;
   assert.deepEqual(
     relabelQueue([
       frame("AUD-20261124-12", "2026-11-24T12:05:00+07:00"),
       frame("AUD-20261123-17", "2026-11-23T17:44:38+07:00"),
-      frame("AUD-20261123-18", "2026-11-23T18:49:00+07:00", { label_rule: "A" }), // already under rule A
+      frame("AUD-20261123-18", "2026-11-23T18:49:00+07:00", { label_rule: "B" }), // already under rule B
+      frame("AUD-20261123-19", "2026-11-23T19:13:00+07:00", { label_rule: "A" }), // rule A left out the milk
       frame("TRN-20261123-09", "2026-11-23T09:00:00+07:00", { purpose: "training" }), // never scored
       frame("AUD-20261123-08", "2026-11-23T08:00:00+07:00", { status: "pending" }), // not labelled yet
     ]),
-    ["AUD-20261123-17", "AUD-20261124-12"]
+    ["AUD-20261123-17", "AUD-20261123-19", "AUD-20261124-12"]
   );
   assert.deepEqual(relabelQueue([]), []);
 });

@@ -33,7 +33,7 @@ const SKIP_REASONS: { value: string; label: string }[] = [
 ];
 
 interface AuditLabelerProps {
-  /** Audits to label, oldest first: pending ones, or done ones to relabel under rule A (their saved verdicts load
+  /** Audits to label, oldest first: pending ones, or done ones to relabel under the current rule (their saved verdicts load
    * first). Next moves along this list. */
   auditIds: string[];
   onClose(): void;
@@ -254,8 +254,8 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
       )}
 
       <p data-rule-a className="bg-[#F3F4F6] px-5 py-2 text-[12.5px] text-[#1F2937]">
-        <b>Rule A</b> — count catalogue cans on the display&apos;s top tray whose face or lid shows enough to tell the
-        flavour. Mark <b>Out of scope</b>: cans on the lower tier, cans almost fully hidden, cans whose flavour you
+        <b>Rule B</b> — count every unit of the store&apos;s shelf plan (can, carton, pack) whose face, lid or top
+        shows enough to tell the product. Mark <b>Out of scope</b>: units almost fully hidden, units whose product you
         can&apos;t tell.
       </p>
 

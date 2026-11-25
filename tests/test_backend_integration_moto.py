@@ -605,7 +605,7 @@ def test_saving_needs_the_missed_cans_check(monkeypatch: pytest.MonkeyPatch):
     status, body = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body=labels)
     assert status == 400 and "misses_checked" in body["message"]
     status, body = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body={**labels, "misses_checked": True})
-    assert status == 200 and (body["label_rule"], body["misses_checked"]) == ("A", True)
+    assert status == 200 and (body["label_rule"], body["misses_checked"]) == ("B", True)
 
 
 @mock_aws
@@ -637,7 +637,7 @@ def test_summary_counts_frames_labelled_before_rule_a(monkeypatch: pytest.Monkey
     assert [v["verdict"] for v in detail["verdicts"]] == ["correct", "correct"]
     body = {"verdicts": detail["verdicts"], "missed": [], "misses_checked": True}
     status, saved = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body=body)
-    assert status == 200 and saved["label_rule"] == "A"
+    assert status == 200 and saved["label_rule"] == "B"
     assert _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["old_rule_frames"] == 0
     assert _call(api, "GET", "/v1/model/audits", query={"days": "0", "old_rule": "1"})[1]["items"] == []
 
@@ -662,15 +662,15 @@ def test_the_audits_list_finds_the_frames_labelled_before_rule_a(monkeypatch: py
         )
 
     put("AUD-CAM-S01-A-20261123-12", "done")  # labelled on 24/11, before rule A
-    put("AUD-CAM-S01-A-20261123-10", "done")
-    put("AUD-CAM-S01-A-20261123-13", "done", label_rule="A")
+    put("AUD-CAM-S01-A-20261123-10", "done", label_rule="A")  # rule A counted only Slide cans: relabel
+    put("AUD-CAM-S01-A-20261123-13", "done", label_rule="B")
     put("AUD-CAM-S01-A-20261123-14", "pending")
     put("AUD-CAM-S01-A-20261123-15", "skipped", skip_reason="blurry")
     put("TRN-CAM-S01-A-20261123-11", "done")  # a training frame is never scored
     items = _call(api, "GET", "/v1/model/audits", query={"days": "0"})[1]["items"]
     rules = {i["audit_id"]: i["label_rule"] for i in items}
-    assert rules.pop("AUD-CAM-S01-A-20261123-13") == "A" and len(rules) == 5
-    assert set(rules.values()) == {None}
+    assert rules.pop("AUD-CAM-S01-A-20261123-13") == "B" and len(rules) == 5
+    assert set(rules.values()) == {None, "A"}
     for query in ({"old_rule": "1"}, {"old_rule": "1", "status": "done"}):
         old = _call(api, "GET", "/v1/model/audits", query={"days": "0", **query})[1]
         assert [i["audit_id"] for i in old["items"]] == ["AUD-CAM-S01-A-20261123-12", "AUD-CAM-S01-A-20261123-10"]
@@ -1613,7 +1613,7 @@ def test_presence_holds_each_frame_to_its_own_stores_plan(monkeypatch: pytest.Mo
             "capture_timestamp": "2026-11-21T14:07:00+07:00",
             "model_version": "unknown",
             "status": "done",
-            "label_rule": "A",
+            "label_rule": "B",
             "ai_boxes_json": json.dumps([{"box_id": 1, "sku_id": "TMP-MLK-TH-01", "conf": 0.9, "box": [1, 2, 3, 4]}]),
             "verdicts_json": json.dumps([{"box_id": 1, "verdict": "correct"}]),
             "missed_json": "[]",

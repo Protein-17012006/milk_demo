@@ -1385,15 +1385,20 @@ def _sku_choices(ddb) -> dict[str, str]:
     return _choices_of(_scan_all(ddb.Table(SKU_MASTER_TABLE)))
 
 
-def _before_rule_a(audit: dict[str, Any]) -> bool:
-    """A done scoring frame labelled before rule A (no label_rule "A"): its numbers follow the old rule until the team
-    relabels it (spec 1.2a)."""
-    return audit.get("status") == "done" and _is_scoring(audit) and audit.get("label_rule") != "A"
+# The labelling rule frames are saved under. A (24/11): Slide cans on the display's top tray. B (25/11, spec
+# 2026-11-25-th-store-view): every unit of the store's shelf plan whose face, lid or top shows, so the TH packs too.
+LABEL_RULE = "B"
+
+
+def _before_current_rule(audit: dict[str, Any]) -> bool:
+    """A done scoring frame labelled under an older rule (label_rule not LABEL_RULE): its numbers follow that rule
+    until the team relabels it."""
+    return audit.get("status") == "done" and _is_scoring(audit) and audit.get("label_rule") != LABEL_RULE
 
 
 def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:
     """Audits of the last `days` days (0: all), newest first, optionally of one status; old_rule=1 keeps only the
-    frames labelled before rule A, for the Model page's "Relabel them". counts are always those of the range."""
+    frames labelled under an older rule, for the Model page's "Relabel them". counts are always those of the range."""
     params = event.get("queryStringParameters") or {}
     status = params.get("status") or ""
     days = int(params.get("days") or 7)
@@ -1401,7 +1406,7 @@ def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:
     audits = [a for a in _scan_all(ddb.Table(AUDITS_TABLE)) if _within_days(str(a.get("capture_timestamp", "")), days)]
     counts = {s: sum(1 for a in audits if a.get("status") == s) for s in ("pending", "done", "skipped")}
     chosen = sorted(
-        (a for a in audits if (not status or a.get("status") == status) and (not old_rule or _before_rule_a(a))),
+        (a for a in audits if (not status or a.get("status") == status) and (not old_rule or _before_current_rule(a))),
         key=lambda a: str(a.get("capture_timestamp", "")),
         reverse=True,
     )
@@ -1489,7 +1494,7 @@ def _handle_model_audit_put(audit_id: str, event: dict[str, Any], user: dict[str
             "verdicts_json": json.dumps(clean_verdicts, separators=(",", ":")),
             "missed_json": json.dumps(clean_missed, separators=(",", ":")),
             "status": "done",
-            "label_rule": "A",
+            "label_rule": LABEL_RULE,
             "misses_checked": True,
             "labeled_by": user["email"],
             "labeled_at": datetime.now(ICT).isoformat(timespec="seconds"),
@@ -1627,7 +1632,7 @@ def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
         if "processing_ms_median" in h
         for _ in range(int(h.get("captures", 0)))
     ]
-    old_rule_frames = sum(1 for a in done if _before_rule_a(a))
+    old_rule_frames = sum(1 for a in done if _before_current_rule(a))
     plans, pairs = _against_the_shelf(ddb, chosen)  # each frame is held to its own store's plan
     return _json_response(
         200,

@@ -307,7 +307,7 @@ export interface ApiAuditListItem {
   status: AuditStatus;
   n_boxes: number;
   labeled_by?: string | null;
-  label_rule?: string | null; // "A" when labelled under rule A; null when labelled before it, or not labelled yet
+  label_rule?: string | null; // the rule it was labelled under ("B" now, "A" before 25/11); null before rules, or not labelled yet
 }
 
 export interface ApiAuditListResponse {
@@ -418,7 +418,7 @@ export interface ApiDisplayCheck {
 
 export interface ApiModelSummary {
   n_audits: number;
-  old_rule_frames: number; // done frames not labelled under rule A
+  old_rule_frames: number; // done frames not labelled under the current rule (B)
   out_of_scope_share: { value: number | null; n: number }; // out_of_scope boxes / all AI boxes; n = boxes
   kpis: Record<string, ApiKpiValue>;
   per_sku: ApiPerSkuRow[];
@@ -663,7 +663,7 @@ export function createApiClient(getIdToken: TokenGetter) {
     exportCaptureLogCsv: () =>
       requestWithAuth("/exports/capture-log.csv", getIdToken, {}, true) as Promise<string>,
 
-    // oldRule: only the done scoring frames labelled before rule A, for "Relabel them"
+    // oldRule: only the done scoring frames labelled under an older rule, for "Relabel them"
     listAudits: (status?: AuditStatus, days = 7, options: { oldRule?: boolean } = {}) => {
       const sp = new URLSearchParams({ days: String(days) });
       if (status) sp.set("status", status);
