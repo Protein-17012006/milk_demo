@@ -17,21 +17,16 @@ SKU (the product name) is the backend's alias table.
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
 import numpy as np
 
+from .catalog import SKUS, product_names  # noqa: F401 - both stay importable from here
 from .cvoutput import Detection
 from .pipeline import dedupe
 
 DEFAULT_WEIGHTS = "~/Desktop/Datagent/slide_pilot/runs_v3/best.pt"
-SKUS = Path(__file__).with_name("skus.json")
-
-
-def product_names() -> dict[str, str]:
-    return {s["id"]: s["name"] for s in json.loads(SKUS.read_text("utf-8"))}
 
 
 def to_detections(classes, scores, boxes_xyxy, names: dict[int, str], product: dict[str, str]) -> list[Detection]:
