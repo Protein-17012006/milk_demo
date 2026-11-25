@@ -126,7 +126,8 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
-def _spread(members: list[str], n: int) -> list[str]:
+def spread(members: list[str], n: int) -> list[str]:
+    """Up to n members, evenly spaced in their order (time order for a segment)."""
     if len(members) <= n:
         return members
     return [members[i] for i in sorted({int(round(v)) for v in np.linspace(0, len(members) - 1, n)})]
@@ -155,7 +156,7 @@ def build(
     kw, kh = KEYFRAME_SIZE
     for seg in segments:
         chosen = [cid for cid in seg["members"] if cid in parts]
-        for cid in _spread(chosen, per_segment):
+        for cid in spread(chosen, per_segment):
             label_file = labels_dir / f"{cid}.txt"
             if cid not in paths or not label_file.is_file():
                 counts["skipped_no_file"] += 1
