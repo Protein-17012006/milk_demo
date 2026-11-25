@@ -45,7 +45,9 @@ def signature(image: np.ndarray, region: tuple[int, int, int, int]) -> np.ndarra
 
     x0, y0, x1, y1 = region
     crop = image[y0:y1, x0:x1]
-    if crop.ndim == 3:
+    if crop.ndim == 3 and crop.shape[2] == 1:  # ultralytics' patched cv2.imread keeps a channel axis on grey images
+        crop = crop[..., 0]
+    elif crop.ndim == 3:
         crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     small = cv2.resize(crop, (SIG_W, SIG_H), interpolation=cv2.INTER_AREA).astype(np.float32).ravel()
     small -= small.mean()

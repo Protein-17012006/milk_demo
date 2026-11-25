@@ -93,3 +93,10 @@ def test_signature_reads_only_the_region():
     changed = image.copy()
     changed[:, 260:] = 0  # outside the region
     assert similarity(signature(image, (50, 20, 250, 180)), signature(changed, (50, 20, 250, 180))) > 0.999
+
+
+def test_signature_reads_a_single_channel_image_as_grey():
+    # ultralytics patches cv2.imread: a grey image comes back as (h, w, 1)
+    grey = RNG.integers(40, 200, size=(200, 300)).astype(np.uint8)
+    region = (50, 20, 250, 180)
+    assert similarity(signature(grey[..., None], region), signature(grey, region)) > 0.999
