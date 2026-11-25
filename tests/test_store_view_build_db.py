@@ -31,6 +31,11 @@ def test_crop_jobs_never_touch_held_out_frames(tmp_path):
         crop_jobs(SEGMENTS, folder, "holdout")
 
 
+def test_crop_jobs_never_crop_a_scoring_frame(tmp_path):
+    jobs = crop_jobs(SEGMENTS, labels(tmp_path), "train", share=0.0, per_segment=10, never={"A2"})
+    assert [cid for cid, _ in jobs] == ["A1", "A3"]
+
+
 def test_pick_threshold_keeps_98_percent_of_positives():
     pos = [0.90 + k / 100 for k in range(10)]
     neg = [0.50 + k / 100 for k in range(36)]  # up to 0.85

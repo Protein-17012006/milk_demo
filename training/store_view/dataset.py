@@ -4,7 +4,8 @@ set with the two TH classes merged into one.
 Real frames: each train or val segment gives up to `per_segment` frames spread over its time. A frame with cartons
 gives every window holding one whole (at least 60% of it), plus one window touching none. A negative frame (the
 cabinet packed away) gives windows without cartons, always the one showing the gap under the freezer, where a white
-bottle was read as TH at night. Held-out segments never enter; val is chosen by segment, never by frame.
+bottle was read as TH at night. Held-out segments never enter; val is chosen by segment, never by frame. Scoring
+frames (an AUD- audit in the camera folder's manifest.jsonl) never enter either (TRAINING.md).
 
     python -m training.store_view.dataset --segments S.json --frames DIR --labels DIR --synthetic DIR --out DIR
 """
@@ -88,12 +89,30 @@ def val_segments(segment_ids: list[str], share: float = 0.1) -> set[str]:
     return {i for i in segment_ids if zlib.crc32(i.encode()) % 10000 < share * 10000}
 
 
-def assign(segments: list[dict], share: float = 0.1) -> dict[str, str]:
+def scoring_frames(rows: list[dict]) -> set[str]:
+    """Capture ids of the frames sampled for scoring (an AUD- audit): TRAINING.md never lets them be trained on."""
+    return {r["capture_id"] for r in rows if any(str(a).startswith("AUD-") for a in r.get("audit_ids") or [])}
+
+
+def read_scoring_frames(frames_dir: Path) -> set[str]:
+    """The scoring frames listed in the camera folder's harvest manifest; without the manifest nothing may be built,
+    since nothing would say which frames are scoring frames."""
+    manifest = frames_dir / "manifest.jsonl"
+    if not manifest.is_file():
+        raise FileNotFoundError(f"{manifest}: the harvest manifest says which frames are scoring frames")
+    return scoring_frames(
+        [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+    )
+
+
+def assign(segments: list[dict], share: float = 0.1, never: set[str] = frozenset()) -> dict[str, str]:
     """capture_id -> "train" or "val" for the members of the training day and negative segments; held-out and
-    transient segments get nothing."""
+    transient segments get nothing, nor does any frame in `never` (the scoring frames)."""
     usable = [s for s in segments if s["split"] == "train" and s["kind"] in ("day", "negative")]
     val = val_segments([s["id"] for s in usable], share)
-    return {cid: ("val" if s["id"] in val else "train") for s in usable for cid in s["members"]}
+    return {
+        cid: ("val" if s["id"] in val else "train") for s in usable for cid in s["members"] if cid not in never
+    }
 
 
 def frame_samples(
@@ -147,12 +166,19 @@ def build(
     import cv2
 
     rng = random.Random(seed)
-    parts = assign(segments, share)
+    scoring = read_scoring_frames(frames_dir)
+    parts = assign(segments, share, never=scoring)
     for part in ("train", "val"):
         (out / "images" / part).mkdir(parents=True, exist_ok=True)
         (out / "labels" / part).mkdir(parents=True, exist_ok=True)
     paths = {p.stem: p for p in frames_dir.glob("*/*.jpg")}
     counts: Counter = Counter()
+    counts["skipped_scoring"] = sum(
+        cid in scoring
+        for s in segments
+        if s["split"] == "train" and s["kind"] in ("day", "negative")
+        for cid in s["members"]
+    )
     kw, kh = KEYFRAME_SIZE
     for seg in segments:
         chosen = [cid for cid in seg["members"] if cid in parts]

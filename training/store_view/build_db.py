@@ -19,18 +19,24 @@ import math
 import sys
 from pathlib import Path
 
-from training.store_view.dataset import KEYFRAME_SIZE, assign, spread
+from training.store_view.dataset import KEYFRAME_SIZE, assign, read_scoring_frames, spread
 from training.store_view.labels import from_yolo
 
 
 def crop_jobs(
-    segments: list[dict], labels_dir: Path, part: str, share: float = 0.1, per_segment: int = 40
+    segments: list[dict],
+    labels_dir: Path,
+    part: str,
+    share: float = 0.1,
+    per_segment: int = 40,
+    never: set[str] = frozenset(),
 ) -> list[tuple[str, list[int]]]:
     """(capture_id, box x, y, w, h) of every labelled carton in up to per_segment frames of each day segment of the
-    training days' `part` (train or val). Held-out frames are never cropped."""
+    training days' `part` (train or val). Held-out frames and the frames in `never` (scoring frames) are never
+    cropped."""
     if part not in ("train", "val"):
         raise ValueError(f"crops come from the training days only (train or val), not {part!r}")
-    parts = assign(segments, share)
+    parts = assign(segments, share, never)
     jobs = []
     for seg in segments:
         if seg["kind"] != "day":
@@ -84,13 +90,14 @@ def _crops(jobs, paths, crop_box):
     return crops, meta
 
 
-def _mistakes(segments, labels_dir, frames, part, yolo_path, tile, recognize, per_segment, share):
-    """(capture_id, box) of detector boxes that are not labelled cartons, on the part's day and negative frames."""
+def _mistakes(segments, labels_dir, frames, part, yolo_path, tile, recognize, per_segment, share, never):
+    """(capture_id, box) of detector boxes that are not labelled cartons, on the part's day and negative frames;
+    never on the frames in `never` (scoring frames)."""
     import cv2
     from ultralytics import YOLO
 
     yolo = YOLO(str(yolo_path))
-    parts = assign(segments, share)
+    parts = assign(segments, share, never)
     jobs = []
     for seg in segments:
         if seg["kind"] not in ("day", "negative"):
@@ -125,15 +132,18 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("refusing to write to the database the worker reads: use a copy (carton_recognition_v2)")
     long_db, embedder, recognize = _long(args.long_dir)
     segments = json.loads(args.segments.read_text(encoding="utf-8"))
+    scoring = read_scoring_frames(args.frames)
     frames = _frames_index(args.frames)
     emb = embedder.Embedder(device="cuda", types=True)
 
     if args.command in ("enrol", "negatives"):
         if args.command == "enrol":
-            jobs = crop_jobs(segments, args.labels, "train", args.share, args.per_segment)
+            jobs = crop_jobs(segments, args.labels, "train", args.share, args.per_segment, scoring)
             brand = kind = "th_true_milk"
         else:
-            jobs = _mistakes(segments, args.labels, frames, "train", args.yolo, args.tile, recognize, 20, args.share)
+            jobs = _mistakes(
+                segments, args.labels, frames, "train", args.yolo, args.tile, recognize, 20, args.share, scoring
+            )
             brand = kind = "none"
         crops, meta = _crops(jobs, frames, embedder.crop_box)
         if not crops:
@@ -149,9 +159,11 @@ def main(argv: list[str] | None = None) -> None:
 
     rec = recognize.Recognizer(device="cuda", types=True, strict=False)
     pos_crops, _ = _crops(
-        crop_jobs(segments, args.labels, "val", args.share, args.per_segment), frames, embedder.crop_box
+        crop_jobs(segments, args.labels, "val", args.share, args.per_segment, scoring), frames, embedder.crop_box
     )
-    neg_jobs = _mistakes(segments, args.labels, frames, "val", args.yolo, args.tile, recognize, 20, args.share)
+    neg_jobs = _mistakes(
+        segments, args.labels, frames, "val", args.yolo, args.tile, recognize, 20, args.share, scoring
+    )
     neg_crops, _ = _crops(neg_jobs, frames, embedder.crop_box)
     pos = rec.lookup(emb.embed(pos_crops)) if pos_crops else []
     neg = rec.lookup(emb.embed(neg_crops)) if neg_crops else []
