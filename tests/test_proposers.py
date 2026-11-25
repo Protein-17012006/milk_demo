@@ -52,3 +52,15 @@ def test_sources_find_cans_on_a_store_frame():
     found = sources.frame(image)
     assert sum(p.source == "A" for p in found) >= 6 and sum(p.source == "B" for p in found) >= 6
     assert all(in_region(p.box, REGION) for p in found)
+
+
+def test_the_sources_find_the_server_package_outside_pytest():
+    # `python -m training.store_view.auto_label_run` runs without pytest's pythonpath: Sources imports milk.slide_adapter
+    import subprocess
+    import sys
+
+    repo = Path(__file__).resolve().parents[1]
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    code = "from training.store_view.proposers import ensure_server_path; ensure_server_path(); import milk.catalog"
+    r = subprocess.run([sys.executable, "-c", code], cwd=repo, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr

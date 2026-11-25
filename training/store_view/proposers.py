@@ -23,6 +23,16 @@ YOLOE_IMGSZ = 640
 YOLOE_CONF = 0.3
 
 
+def ensure_server_path() -> None:
+    """Put the repo's server/ on the import path, so `milk` imports outside pytest (as evaluate.run does)."""
+    import sys
+    from pathlib import Path
+
+    server = str(Path(__file__).resolve().parents[2] / "server")
+    if server not in sys.path:
+        sys.path.insert(0, server)
+
+
 @dataclass(frozen=True)
 class Proposal:
     source: str  # "A" (Slide detector) or "B" (YOLOE)
@@ -79,6 +89,7 @@ class Sources:
             os.environ["MILK_SLIDE_WEIGHTS"] = slide_weights
             os.environ["MILK_SLIDE_CONF"] = SLIDE_CONF
             os.environ["MILK_SLIDE_IMGSZ"] = SLIDE_IMGSZ
+            ensure_server_path()
             from milk.slide_adapter import SlidePipeline
 
             self._slide = SlidePipeline()
