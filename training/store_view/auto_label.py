@@ -9,12 +9,19 @@ YOLOE's lid-and-body box.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from training.store_view.proposers import Proposal
-from training.store_view.slide_gallery import GalleryVote
+from training.store_view.slide_gallery import MIN_IMAGES, GalleryVote
+
+PRESENT_BOTH = 0.30  # both sources see the can in at least this share of the segment's frames
+PRESENT_B_ONLY = 0.60  # or YOLOE alone sees it this often (a lid the detector misses)
+GHOST = 0.30  # seen in fewer frames than this: not a can
+STABLE = 0.80  # a source's flavour holds in at least this share of the frames it read the can
+MIN_FRAMES = 5  # fewer frames than this in a segment: nothing is decided
 
 
 def _overlap(a, b) -> tuple[float, float]:
@@ -69,3 +76,45 @@ def cluster(frames: dict[str, list[Proposal]], segment_id: str) -> list[Track]:
                 boxes = np.array([p.box for p in track.proposals()], dtype=float)
                 track.box = tuple(float(v) for v in np.median(boxes, axis=0))
     return tracks
+
+
+@dataclass(frozen=True)
+class Decision:
+    status: str  # "accept", "review", "drop" or "too_short"
+    sku: str | None
+    reason: str
+
+
+def decide(track: Track, frames: list[str], gallery_counts: dict[str, int]) -> Decision:
+    """Accept a can only when independent sources agree: the detector and YOLOE that a can is there (or YOLOE alone,
+    often, with the gallery not calling it a non-product), and the detector and the gallery on its flavour, each
+    steadily. Everything else goes to a person, or is dropped as a ghost."""
+    n = len(frames)
+    if n < MIN_FRAMES:
+        return Decision("too_short", None, "too_short")
+    a_frames = [c for c in frames if "A" in track.seen.get(c, {})]
+    b_frames = [c for c in frames if "B" in track.seen.get(c, {})]
+    if len(set(a_frames) | set(b_frames)) / n < GHOST:
+        return Decision("drop", None, "ghost")
+    a_frac, b_frac = len(a_frames) / n, len(b_frames) / n
+    if a_frac < PRESENT_BOTH and b_frac >= PRESENT_B_ONLY:
+        none = sum(1 for c in b_frames if track.votes.get(c) and track.votes[c].none_hit)
+        if none >= len(b_frames) / 2:
+            return Decision("drop", None, "gallery_none")
+        return Decision("review", None, "no_A_flavour")
+    if a_frac < PRESENT_BOTH:
+        return Decision("review", None, "weak")
+    if b_frac < PRESENT_BOTH:
+        return Decision("review", None, "only_A")
+    a_sku, a_n = Counter(track.seen[c]["A"].sku for c in a_frames).most_common(1)[0]
+    if gallery_counts.get(a_sku, 0) < MIN_IMAGES:
+        return Decision("review", None, "thin_gallery")
+    read = [track.votes[c].sku for c in frames if c in track.seen and c in track.votes]
+    g_sku, g_n = Counter(read).most_common(1)[0] if read else (None, 0)
+    if g_sku is None:
+        return Decision("review", None, "gallery_unsure")
+    if g_sku != a_sku:
+        return Decision("review", None, "disagree")
+    if a_n / len(a_frames) >= STABLE and g_n / len(read) >= STABLE:
+        return Decision("accept", a_sku, "agree")
+    return Decision("review", None, "unstable")
