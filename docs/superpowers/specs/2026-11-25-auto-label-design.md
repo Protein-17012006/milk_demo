@@ -115,6 +115,16 @@ Hiện chưa có tiệm mới, nhưng hệ thống đang được xây theo hư�
   - SAM 3 chỉ nhận box mẫu trong cùng một ảnh;
   - YOLOE chạy trong bộ ultralytics sẵn có và đã đo được trên camera này.
 - **Khi SAM 3 được duyệt** thì chạy so sánh. Nếu SAM 3 tốt hơn rõ thì đổi.
+- **So sánh tối 25/11** (`store_eval\sam3_spike_20261125.json`, cùng 10 keyframe):
+
+  | Nguồn | Tìm thấy | Nắp | Box ở chỗ không có lon trong đáp án |
+  |---|---|---|---|
+  | YOLOE box mẫu, 0,3 | 116/121 | 43/45 | 2,8/frame |
+  | SAM 3 bằng chữ "can", 0,6 | 120/121 | 45/45 | 6,4/frame |
+
+  - Box thừa của SAM 3 phần lớn là lon Slide thật ở tầng dưới, phần còn lại là nắp hũ và lọ khác.
+  - SAM 3 không tốt hơn rõ, nên **giữ YOLOE làm nguồn B**, vì nó chỉ tìm đúng lon Slide.
+  - SAM 3 (bằng chữ, không cần box mẫu) dùng để đề xuất box trên keyframe đầu tiên của camera mới (5.8).
 
 ## 5. Thiết kế
 
@@ -272,7 +282,7 @@ Nếu độ đúng không đạt thì dời ngưỡng về phía "đưa người
 
 **Các bước cho camera mới:**
 1. Gom frame (harvest) và chia đoạn.
-2. Người vẽ box trên 1–3 keyframe.
+2. Người vẽ box trên 1–3 keyframe. SAM 3 với chữ "can" đề xuất box trước, người sửa.
 3. Chạy pipeline.
 4. Review.
 5. Train.
@@ -323,7 +333,6 @@ Nếu nhóm SKU chưa có detector (không có nguồn A):
 
 ## 7. Để sau
 
-- So sánh với SAM 3 khi được duyệt.
 - Chạy pipeline hằng đêm.
 - Đưa TH vào pipeline.
 - Vẽ box trên trang Model, thay vì chỉ chấm điểm lon sót.
