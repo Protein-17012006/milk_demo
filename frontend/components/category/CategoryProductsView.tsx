@@ -40,8 +40,9 @@ import { ProductRow } from "./ProductRow";
 import { ProductGroupRow } from "./ProductGroupRow";
 import { ReviewBanner, ReviewQueueDialog } from "./ReviewQueue";
 import { cardFromQueueItem, queueKeyForReading } from "@/lib/review-queue";
-import { groupProducts } from "@/lib/product-groups";
+import { groupProducts, type ProductGroup } from "@/lib/product-groups";
 import { displayBanner } from "@/lib/shelf-ui";
+import { splitByPlan } from "@/lib/shelf-now";
 
 interface ToolbarDropdownProps<T extends string> {
   label: string;
@@ -204,6 +205,7 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
       reviewedAt: null,
     },
     reliability: p.reliability,
+    inShelfPlan: p.in_shelf_plan === true,
   };
 }
 
@@ -231,6 +233,8 @@ export function CategoryProductsView() {
 
   // Product-line groups start open; keys are stable, so the 15 s refresh keeps the closed ones closed.
   const [collapsedKeys, setCollapsedKeys] = useState<Set<string>>(() => new Set());
+  // Products that are not on the store's shelf plan sit in a section of their own, closed until asked for.
+  const [offPlanOpen, setOffPlanOpen] = useState(false);
 
   const [viewingProduct, setViewingProduct] = useState<SkuProduct | null>(null);
   const [reviewQueueOpen, setReviewQueueOpen] = useState(false);
@@ -364,10 +368,16 @@ export function CategoryProductsView() {
   ]);
 
   const searchText = localSearch.trim();
-  const groups = useMemo(
-    () => groupProducts(filteredProducts, sortBy),
-    [filteredProducts, sortBy]
+  // With a shelf plan, its products come first; a store without one (no product is on a plan) lists all as before.
+  const hasPlan = useMemo(() => products.some((p) => p.inShelfPlan), [products]);
+  const { onPlan, offPlan } = useMemo(() => splitByPlan(filteredProducts), [filteredProducts]);
+  const mainGroups = useMemo(
+    () => groupProducts(hasPlan ? onPlan : filteredProducts, sortBy),
+    [hasPlan, onPlan, filteredProducts, sortBy]
   );
+  const offPlanGroups = useMemo(() => (hasPlan ? groupProducts(offPlan, sortBy) : []), [hasPlan, offPlan, sortBy]);
+  const groups = useMemo(() => [...mainGroups, ...offPlanGroups], [mainGroups, offPlanGroups]);
+  const showOffPlan = offPlanOpen || searchText !== "";
   const isExpanded = (key: string) => searchText !== "" || !collapsedKeys.has(key);
   const allGroupsExpanded = groups.length > 0 && groups.every((g) => !collapsedKeys.has(g.key));
 
@@ -575,6 +585,27 @@ export function CategoryProductsView() {
     );
   };
 
+  const renderGroup = (group: ProductGroup) => (
+    <React.Fragment key={group.key}>
+      <ProductGroupRow
+        group={group}
+        expanded={isExpanded(group.key)}
+        columns={columns}
+        onToggleExpand={() => toggleGroup(group.key)}
+      />
+      {isExpanded(group.key) &&
+        group.variants.map((item) => (
+          <ProductRow
+            key={item.id}
+            item={item}
+            nested
+            columns={columns}
+            onOpenDetails={() => void handleOpenProductDetails(item)}
+          />
+        ))}
+    </React.Fragment>
+  );
+
   return (
     <div className="min-h-full w-full bg-[#F7F8FA]">
       <div className="mx-auto w-full max-w-[1640px] px-4 pt-[26px] pb-10 sm:px-6 lg:px-7">
@@ -739,26 +770,27 @@ export function CategoryProductsView() {
                   {emptyText}
                 </div>
               ) : (
-                groups.map((group) => (
-                  <React.Fragment key={group.key}>
-                    <ProductGroupRow
-                      group={group}
-                      expanded={isExpanded(group.key)}
-                      columns={columns}
-                      onToggleExpand={() => toggleGroup(group.key)}
-                    />
-                    {isExpanded(group.key) &&
-                      group.variants.map((item) => (
-                        <ProductRow
-                          key={item.id}
-                          item={item}
-                          nested
-                          columns={columns}
-                          onOpenDetails={() => void handleOpenProductDetails(item)}
-                        />
-                      ))}
-                  </React.Fragment>
-                ))
+                <>
+                  {mainGroups.map(renderGroup)}
+                  {offPlanGroups.length > 0 && (
+                    <button
+                      type="button"
+                      data-off-plan
+                      aria-expanded={showOffPlan}
+                      onClick={() => setOffPlanOpen((open) => !open)}
+                      className="flex h-[40px] items-center gap-[8px] rounded-[10px] border border-dashed border-[#D1D5DB] bg-[#F9FAFB] px-[16px] text-left text-[12.5px] font-medium text-[#374151] transition-colors hover:border-[#9CA3AF] cursor-pointer"
+                    >
+                      <ChevronDown
+                        className={`h-[14px] w-[14px] shrink-0 text-[#6B7280] transition-transform ${showOffPlan ? "" : "-rotate-90"}`}
+                        strokeWidth={2}
+                      />
+                      <span>
+                        Not on this store&apos;s shelf plan ({offPlan.length})
+                      </span>
+                    </button>
+                  )}
+                  {showOffPlan && offPlanGroups.map(renderGroup)}
+                </>
               )}
             </div>
           </div>

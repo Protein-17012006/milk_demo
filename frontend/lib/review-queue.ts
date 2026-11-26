@@ -108,6 +108,7 @@ export function cardFromQueueItem(det: ApiReviewQueueItem, row: SkuProduct | und
       frame_url: null,
     },
     audit: { accuracy: null, expectedLabel: "", mismatchType: "None", reviewedAt: null },
+    inShelfPlan: false,
   };
   return {
     ...base,

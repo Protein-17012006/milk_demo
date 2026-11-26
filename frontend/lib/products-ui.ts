@@ -133,6 +133,8 @@ export interface SkuProduct {
   audit: SkuAudit;
   /** Reliability badge from the last 14 days of labelled frames; absent from older backends. */
   reliability?: ApiReliability;
+  /** On the shelf plan of a store (saved, or suggested when none is saved); false from older backends. */
+  inShelfPlan: boolean;
   /** Set when the card was opened from the review queue: it shows that flagged reading, not the latest one, and
    * saving a correction checks the queue item off. */
   reviewQueueKey?: string;
