@@ -8,9 +8,13 @@ import { createApiClient, type ApiAuditDetail } from "@/lib/api";
 import { focusRegion, type Box } from "@/lib/frame-geometry";
 import {
   canSave,
+  markRestCorrect,
+  nextUnjudged,
   nextVerdict,
+  restCount,
   toPayload,
   totalsBySku,
+  verdictForKey,
   type BoxLabel,
   type MissedPoint,
   type Verdict,
@@ -44,6 +48,8 @@ interface AuditLabelerProps {
 /**
  * Labels one sampled frame at a time: click a box to cycle Right → Wrong SKU → Not our SKU → Out of scope, pick the right
  * SKU for wrong boxes, click empty shelf to add a unit the model missed. Spec 2026-11-23, section 7.
+ * Faster ways to the same labels: keys 1 to 4 judge the highlighted box and move on, one button marks every box
+ * left as right, and Enter saves once Save is allowed. The rule for saving is unchanged (canSave).
  */
 export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps) {
   const { getIdToken } = useAuth();
@@ -59,6 +65,8 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
   const [skipReason, setSkipReason] = useState("blocked");
   const [skipNote, setSkipNote] = useState("");
   const [missesChecked, setMissesChecked] = useState(false);
+  // the box the number keys judge; it starts at the first box without a verdict and follows clicks
+  const [activeBox, setActiveBox] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0); // bumped to fetch a fresh signed link
@@ -77,6 +85,7 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
         for (const v of d.verdicts) fromSaved[v.box_id] = { verdict: v.verdict, trueSku: v.true_sku_id ?? null };
         setDetail(d);
         setLabels(fromSaved);
+        setActiveBox(nextUnjudged(d.ai_boxes, fromSaved, null));
         setMissed(d.missed.map((m) => ({ ...m })));
         setMessage(null);
       })
@@ -113,14 +122,6 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
     };
   }, [detail]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   const names = useMemo(() => {
     const map: Record<string, string> = {};
     for (const c of detail?.sku_choices ?? []) map[c.label] = c.name;
@@ -138,8 +139,10 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
   const totals = useMemo(() => totalsBySku(boxes, labels, missed), [boxes, labels, missed]);
   const saveAllowed = detail !== null && canSave(boxes, labels, missesChecked) && !busy;
 
-  const setVerdict = (boxId: number, verdict: Verdict | null) =>
+  const setVerdict = (boxId: number, verdict: Verdict | null) => {
+    setActiveBox(boxId);
     setLabels((prev) => ({ ...prev, [boxId]: { verdict, trueSku: prev[boxId]?.trueSku ?? null } }));
+  };
   const setTrueSku = (boxId: number, sku: string) =>
     setLabels((prev) => ({ ...prev, [boxId]: { verdict: "wrong_sku", trueSku: sku || null } }));
 
@@ -163,6 +166,7 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
     setLabels({});
     setMissed([]);
     setMissesChecked(false);
+    setActiveBox(null);
     setPendingPoint(null);
     setSkipping(false);
     setMessage(null);
@@ -197,6 +201,44 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
       setBusy(false);
     }
   };
+
+  // Keys: Escape closes; 1 to 4 judge the highlighted box and move to the next one without a verdict (a box marked
+  // wrong stays highlighted, for its right SKU); Enter saves once Save is allowed. Typing in a field is left alone.
+  const saveRef = useRef<() => void>(() => undefined);
+  useEffect(() => {
+    saveRef.current = () => void save();
+  });
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      const el = e.target as HTMLElement | null;
+      const typing =
+        el !== null &&
+        (el.tagName === "SELECT" || el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && (el as HTMLInputElement).type !== "checkbox"));
+      if (typing || skipping || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === "Enter") {
+        if (!saveAllowed) return;
+        e.preventDefault(); // a focused button must not also be pressed
+        saveRef.current();
+        return;
+      }
+      const box = boxes.find((b) => b.box_id === activeBox);
+      if (!box) return;
+      const verdict = verdictForKey(e.key, box.needs_flavour);
+      if (!verdict) return;
+      e.preventDefault();
+      const next = { ...labels, [box.box_id]: { verdict, trueSku: labels[box.box_id]?.trueSku ?? null } };
+      setLabels(next);
+      if (verdict !== "wrong_sku") setActiveBox(nextUnjudged(boxes, next, box.box_id) ?? box.box_id);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, boxes, labels, activeBox, saveAllowed, skipping]);
+
+  const rest = restCount(boxes, labels);
 
   return createPortal(
     <div
@@ -286,7 +328,8 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
                     onClick={() => setVerdict(b.box_id, nextVerdict(labels[b.box_id]?.verdict ?? null, b.needs_flavour))}
                   >
                     <rect x={x} y={y} width={w} height={h} fill={style.color} fillOpacity={0.12}
-                      stroke={style.color} strokeWidth={3} vectorEffect="non-scaling-stroke" />
+                      stroke={style.color} strokeWidth={activeBox === b.box_id ? 5 : 3}
+                      strokeDasharray={activeBox === b.box_id ? "7 4" : undefined} vectorEffect="non-scaling-stroke" />
                     <text x={x} y={Math.max(y - fontSize * 0.3, fontSize)} fontSize={fontSize} fontWeight={700}
                       fill={style.color} stroke="#FFFFFF" strokeWidth={fontSize / 6} paintOrder="stroke">
                       {b.needs_flavour ? `${b.box_id}?` : b.box_id}
@@ -324,6 +367,10 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
             Click a box to cycle <b className="text-[#16A34A]">Right</b> → <b className="text-[#DC2626]">Wrong SKU</b> →{" "}
             <b className="text-[#7C3AED]">Not our SKU</b> → <b className="text-[#6B7280]">Out of scope</b>. Click empty shelf to add a unit the model missed; click an
             orange dot to remove it.
+            <span data-labeler-keys className="mt-1 block">
+              Keys: <b>1</b> Right · <b>2</b> Wrong SKU · <b>3</b> Not our SKU · <b>4</b> Out of scope for the highlighted
+              box · <b>Enter</b> saves.
+            </span>
             {detail?.purpose === "review" && (
               <> A ? box has no suggestion: click to pick its flavour, Not our SKU or Out of scope.</>
             )}
@@ -361,12 +408,31 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
           <section>
             <h3 className="mb-1.5 text-[12px] font-semibold uppercase tracking-wide text-[#6B7280]">Model boxes</h3>
             {boxes.length === 0 && <p className="text-[#6B7280]">The model drew no box on this frame.</p>}
+            {rest > 0 && (
+              <button
+                type="button"
+                data-mark-rest
+                title="Every box that has no verdict yet is marked Right; change the ones that are not"
+                onClick={() => setLabels((prev) => markRestCorrect(boxes, prev))}
+                className="mb-1.5 w-full rounded-[8px] border border-[#16A34A] bg-[#F0FDF4] px-2 py-1.5 text-[12.5px] font-semibold text-[#166534] hover:bg-[#DCFCE7] cursor-pointer"
+              >
+                {rest === boxes.length ? `Mark all ${rest} right` : `Mark the other ${rest} right`}
+              </button>
+            )}
             <ul className="flex flex-col gap-1.5">
               {boxes.map((b) => {
                 const label = labels[b.box_id];
                 const verdict = label?.verdict ?? null;
                 return (
-                  <li key={b.box_id} data-box-row={b.box_id} className="rounded-[8px] border border-black/10 p-2">
+                  <li
+                    key={b.box_id}
+                    data-box-row={b.box_id}
+                    data-active-box={activeBox === b.box_id ? "" : undefined}
+                    onClick={() => setActiveBox(b.box_id)}
+                    className={`rounded-[8px] border p-2 ${
+                      activeBox === b.box_id ? "border-[#111827] ring-1 ring-[#111827]" : "border-black/10"
+                    }`}
+                  >
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate">
                         <b>#{b.box_id}</b> {b.needs_flavour ? "? no suggestion" : nameOf(b.sku_id)}{" "}
