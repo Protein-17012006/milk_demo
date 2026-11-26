@@ -5,12 +5,17 @@ IoU >= 0.5) with the same colour (the gallery's colour features, dot product >= 
 is not enough: on 23/11 a Sour Cream can at (943, 247) had become a Cheese can 43 minutes later. When the matching
 decisions disagree, nothing is reused and a person looks again.
 
+Reuse stays within a day: the shop rearranges between days, and decisions from other days at the same place
+disagreed 20 times on the held-out segments (26/11). A decision "not a product" is reused as a grey mask, never as
+background, so a can that stands there now is not taught as background.
+
 The queue takes the segments in time order. A can no decision covers either waits on a can already waiting at the
-same place with the same colour in an earlier segment, or needs a new review frame for its segment.
+same place with the same colour in an earlier segment of the same day, or needs a new review frame for its segment.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -58,14 +63,33 @@ def label_of(d: Decision) -> str | None:
     return {"accept": d.sku, "drop": NOT_PRODUCT, "masked": OUT_OF_SCOPE}.get(d.status)
 
 
-def reuse(track: Track, precedents: Sequence[Precedent], min_sim: float) -> Decision | None:
+def day_of(capture_id: str) -> str:
+    """The YYYYMMDD of a capture id (CAP-S01-20261125-064004-3); "" when it has none."""
+    m = re.search(r"\d{8}", capture_id)
+    return m.group(0) if m else ""
+
+
+def _reused(track: Track, precedents: Sequence[Precedent], min_sim: float) -> Precedent | str | None:
+    """The latest matching decision, "conflict" when the matching decisions disagree, None when none matches."""
     found = matching(track, precedents, min_sim)
     if not found:
         return None
     if len({p.label for p in found}) > 1:
+        return "conflict"
+    return max(found, key=lambda p: p.key)
+
+
+def _apply(p: Precedent) -> Decision:
+    return decision_for(OUT_OF_SCOPE if p.label == NOT_PRODUCT else p.label, f"reused:{p.source}")
+
+
+def reuse(track: Track, precedents: Sequence[Precedent], min_sim: float) -> Decision | None:
+    found = _reused(track, precedents, min_sim)
+    if found is None:
+        return None
+    if found == "conflict":
         return Decision("review", None, "reuse_conflict")
-    latest = max(found, key=lambda p: p.key)
-    return decision_for(latest.label, f"reused:{latest.source}")
+    return _apply(found)
 
 
 def _truth_label(row: dict) -> str:
@@ -162,7 +186,7 @@ def suggest_min_sim(pairs: list[tuple[float, bool]]) -> float:
 class QueueResult:
     decisions: dict[str, dict[str, Decision]] = field(default_factory=dict)
     new_frames: dict[str, list[str]] = field(default_factory=dict)
-    links: list[tuple[str, str, str]] = field(default_factory=list)
+    links: list[tuple[str, str, str, str]] = field(default_factory=list)  # (segment, track, source, label)
 
 
 def queue(
@@ -176,33 +200,39 @@ def queue(
     cans on a new frame at once (gate 1 simulates people with the truth); its decisions are then reused like any other.
     Neither the proposals nor their decisions are changed."""
     decided = list(precedents)
-    pending: list[Track] = []
+    pending: list[tuple[str, Track]] = []
     out = QueueResult()
     for p in sorted(proposals, key=lambda p: p["frames"][0] if p["frames"] else ""):
         seg = p["segment"]
+        day = day_of(p["frames"][0]) if p["frames"] else ""
         decisions = dict(p["decisions"])
         for t in p["tracks"]:
             d = decisions.get(t.id)
             if d is None or d.status != "review":
                 continue
-            again = reuse(t, decided, min_sim)
-            if again is not None and again.status != "review":
-                decisions[t.id] = again
-                out.links.append((seg, t.id, again.reason.removeprefix("reused:")))
+            found = _reused(t, [x for x in decided if day_of(x.key) == day], min_sim)
+            if isinstance(found, Precedent):
+                decisions[t.id] = _apply(found)
+                out.links.append((seg, t.id, found.source, found.label))
                 continue
-            if again is None:
+            if found is None:
                 waits_on = next(
-                    (w for w in pending if same_place(t.box, w.box) and _same_colour(t.colour, w.colour, min_sim)), None
+                    (
+                        w
+                        for wday, w in pending
+                        if wday == day and same_place(t.box, w.box) and _same_colour(t.colour, w.colour, min_sim)
+                    ),
+                    None,
                 )
                 if waits_on is not None:
                     decisions[t.id] = Decision("review", None, f"waits:{waits_on.id}")
                     continue
             else:
-                decisions[t.id] = again
+                decisions[t.id] = Decision("review", None, "reuse_conflict")
             out.new_frames.setdefault(seg, []).append(t.id)
             label = human(p, t) if human else None
             if label is None:
-                pending.append(t)
+                pending.append((day, t))
             elif t.colour is not None:
                 decided.append(Precedent(p["frames"][0], t.box, t.colour, label, f"sim:{t.id}"))
                 decisions[t.id] = decision_for(label, "human")

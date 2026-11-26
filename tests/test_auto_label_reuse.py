@@ -120,7 +120,7 @@ def test_a_decided_precedent_resolves_the_can_without_a_frame():
     r = queue([waiting("s1", "CAP-1")], [precedent("cheese145")], 0.95)
     assert r.new_frames == {}
     assert r.decisions["s1"]["s1-t0"] == Decision("accept", "cheese145", "reused:truth:K#0")
-    assert r.links == [("s1", "s1-t0", "truth:K#0")]
+    assert r.links == [("s1", "s1-t0", "truth:K#0", "cheese145")]
 
 
 def test_a_conflict_opens_a_frame():
@@ -140,7 +140,7 @@ def test_a_simulated_human_decision_is_reused_by_later_segments():
     assert r.new_frames == {"s1": ["s1-t0"]}
     assert r.decisions["s1"]["s1-t0"] == Decision("accept", "cheese145", "human")
     assert r.decisions["s2"]["s2-t0"] == Decision("accept", "cheese145", "reused:sim:s1-t0")
-    assert r.links == [("s2", "s2-t0", "sim:s1-t0")]
+    assert r.links == [("s2", "s2-t0", "sim:s1-t0", "cheese145")]
 
 
 def test_accepted_cans_and_out_of_scope_are_left_alone():
@@ -247,3 +247,24 @@ def test_pair_stats_pairs_only_different_keys_at_the_same_place():
     ]
     pairs = pair_stats(ps)
     assert sorted(pairs) == [(0.0, False), (0.0, False), (1.0, True)]
+
+
+def test_a_reused_not_product_masks_instead_of_dropping():
+    # a person said "not a product" there once; if a real can stands there now it must not become background
+    assert reuse(can("t"), [precedent("not_product")], 0.95) == Decision("masked", None, "reused:truth:K#0")
+
+
+def test_reuse_stays_within_the_day():
+    yesterday = precedent("cheese145", key="CAP-S01-20261124-100000")
+    r = queue([waiting("s1", "CAP-S01-20261125-090000")], [yesterday], 0.95)
+    assert r.new_frames == {"s1": ["s1-t0"]} and r.links == []
+
+
+def test_a_can_waits_only_on_a_can_of_the_same_day():
+    r = queue([waiting("s1", "CAP-S01-20261124-180000"), waiting("s2", "CAP-S01-20261125-070000")], [], 0.95)
+    assert r.new_frames == {"s1": ["s1-t0"], "s2": ["s2-t0"]}
+
+
+def test_links_carry_the_reused_label():
+    r = queue([waiting("s1", "CAP-1")], [precedent("not_product")], 0.95)
+    assert r.links == [("s1", "s1-t0", "truth:K#0", "not_product")]

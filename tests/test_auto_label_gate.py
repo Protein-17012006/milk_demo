@@ -141,3 +141,12 @@ def test_simulate_scores_a_right_reuse_and_counts_it_covered():
 def test_simulate_leaves_segments_without_truth_waiting():
     s = simulate([tracked("s1", "K1", YELLOW), tracked("s2", "K2", YELLOW)], {}, [], 0.95)
     assert s["counts"]["waiting"] == 1 and s["reuse_right"] is None and s["counts"]["new_frames"] == 1
+
+
+def test_simulate_splits_reuse_by_kind():
+    rows_sour = [{**ROW, "sku": "sourcream150"}]
+    s = simulate([tracked("s1", "K1", YELLOW), tracked("s2", "K2", YELLOW)], {"K1": rows_sour, "K2": [ROW]}, [], 0.95)
+    assert s["counts"]["reuse_kinds"] == {"flavour_swap": 1}
+    unknown = [{**ROW, "sku": "unknown"}]
+    s = simulate([tracked("s1", "K1", YELLOW), tracked("s2", "K2", YELLOW)], {"K1": [ROW], "K2": unknown}, [], 0.95)
+    assert s["counts"]["reuse_kinds"] == {"flavour_where_unknown": 1}

@@ -10,7 +10,9 @@ whose box holds its centre (cans the machine accepted are matched before the oth
     coverage      truth rows (not ignore) matched by a can that is accepted, masked or sent to review
     review_share  segments that need a new review frame (after reusing decisions, design 5.4b), among segments not too
                   short to decide; without that list, segments with any can sent to review
-    reuse_right   reused decisions whose label is the truth's at that can, over reused cans in segments with a truth
+    reuse_right   reused decisions whose label is the truth's at that can, over reused cans in segments with a truth;
+                  counts.reuse_kinds splits the wrong ones (flavour_swap, flavour_where_unknown,
+                  flavour_where_no_can, no_flavour_where_flavour, out_of_scope_vs_not_product)
 
 simulate() plays the person with the truth: a can on a new review frame of a segment whose keyframe has a truth gets
 the truth's label at once, and later segments may reuse it; segments without a truth leave their cans waiting.
@@ -18,10 +20,11 @@ the truth's label at once, and later segments may reuse it; segments without a t
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 
 from training.store_view.auto_label import Decision, Track
-from training.store_view.auto_label_reuse import NOT_PRODUCT, OUT_OF_SCOPE, Precedent, label_of, queue
+from training.store_view.auto_label_reuse import NOT_PRODUCT, OUT_OF_SCOPE, Precedent, queue
 
 GATE1 = {
     "real": (">=", 0.99),
@@ -121,6 +124,22 @@ def truth_label(rows: list[dict], box) -> str:
     return NOT_PRODUCT
 
 
+def reuse_kind(got: str, want: str) -> str:
+    """How a reused label stands against the truth's at that can."""
+    none = (NOT_PRODUCT, OUT_OF_SCOPE)
+    if got == want:
+        return "right"
+    if got in none and want in none:
+        return "out_of_scope_vs_not_product"
+    if got in none:
+        return "no_flavour_where_flavour"
+    if want == OUT_OF_SCOPE:
+        return "flavour_where_unknown"
+    if want == NOT_PRODUCT:
+        return "flavour_where_no_can"
+    return "flavour_swap"
+
+
 def simulate(
     proposals: list[dict], truth: dict[str, list[dict]], precedents: Sequence[Precedent], min_sim: float
 ) -> dict:
@@ -142,14 +161,14 @@ def simulate(
         set(r.new_frames),
     )
     by_seg = {p["segment"]: p for p in proposals}
-    checked = right = 0
-    for seg, tid, _ in r.links:
+    kinds: Counter = Counter()
+    for seg, tid, _, label in r.links:
         p = by_seg[seg]
         if p.get("keyframe") not in truth:
             continue
         t = next(t for t in p["tracks"] if t.id == tid)
-        checked += 1
-        right += label_of(r.decisions[seg][tid]) == truth_label(truth[p["keyframe"]], box_at(p, t))
+        kinds[reuse_kind(label, truth_label(truth[p["keyframe"]], box_at(p, t)))] += 1
+    checked, right = sum(kinds.values()), kinds["right"]
     summary["reuse_right"] = _ratio(right, checked)
     summary["counts"].update(
         new_frames=len(r.new_frames),
@@ -158,6 +177,7 @@ def simulate(
         conflict=sum(d.reason == "reuse_conflict" for ds in r.decisions.values() for d in ds.values()),
         reuse_checked=checked,
         reuse_right=right,
+        reuse_kinds={k: v for k, v in sorted(kinds.items()) if k != "right"},
     )
     return summary
 
