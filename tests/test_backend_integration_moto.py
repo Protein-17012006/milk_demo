@@ -2150,3 +2150,46 @@ def test_scoring_frames_are_read_by_key_for_the_window_only(monkeypatch: pytest.
     items = {p["sku_id"]: p for p in _call(api, "GET", "/v1/products", groups="datagent")[1]["items"]}
     assert items[CHEESE]["reliability"]["frames"] == 12
     assert len(read) == 12 and all(a.startswith("AUD-CAM-S01-A-202611") and "-20261101-" not in a for a in read)
+
+
+@mock_aws
+def test_a_review_frame_is_labelled_but_never_scored(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _one_pending_audit(ingest)
+    table = _table("test-audits")
+    sampled = table.get_item(Key={"store_id": "DEMO-S01", "audit_id": AUDIT_14})["Item"]
+    review_id = "REV-CAM-S01-A-seg-0090"
+    boxes = [
+        {"box_id": 1, "track_id": "seg-0090-t7", "sku_id": None, "conf": 0, "box": [1, 1, 5, 5], "needs_flavour": True},
+        {"box_id": 2, "track_id": "seg-0090-t8", "sku_id": "hot160", "conf": 1, "box": [9, 1, 5, 5]},
+    ]
+    table.put_item(
+        Item={
+            **{k: sampled[k] for k in ("store_id", "camera_id", "capture_id", "capture_timestamp", "image_key")},
+            "audit_id": review_id,
+            "purpose": "review",
+            "model_version": "auto-label",
+            "status": "pending",
+            "ai_boxes_json": json.dumps(boxes),
+            "verdicts_json": json.dumps([{"box_id": 2, "verdict": "correct"}]),
+            "missed_json": "[]",
+        }
+    )
+    items = _call(api, "GET", "/v1/model/audits", query={"days": "0"})[1]["items"]
+    assert {i["audit_id"]: i["purpose"] for i in items}[review_id] == "review"
+    right = {
+        "verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}],
+        "missed": [],
+        "misses_checked": True,
+    }
+    assert _call(api, "PUT", f"/v1/model/audits/{review_id}", body=right)[0] == 400
+    chosen = {
+        **right,
+        "verdicts": [
+            {"box_id": 1, "verdict": "wrong_sku", "true_sku_id": "original145"},
+            {"box_id": 2, "verdict": "correct"},
+        ],
+    }
+    status, saved = _call(api, "PUT", f"/v1/model/audits/{review_id}", body=chosen)
+    assert status == 200 and saved["status"] == "done" and saved["ai_boxes"][0]["needs_flavour"] is True
+    assert _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["n_audits"] == 0

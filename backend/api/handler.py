@@ -794,7 +794,7 @@ def _with_hours(stores: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _is_scoring(audit: dict[str, Any]) -> bool:
-    """Only scoring frames (AUD-) count in the metrics; training frames (TRN-) never do."""
+    """Only scoring frames (AUD-) count in the metrics; training (TRN-) and review frames (REV-) never do."""
     return str(audit.get("audit_id", "")).startswith("AUD-")
 
 
