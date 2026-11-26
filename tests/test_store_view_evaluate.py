@@ -1,7 +1,9 @@
 """Scoring the counting path on held-out frames, and the gate before going live (training/store_view/evaluate.py)."""
 
+import os
+
 from milk.cvoutput import Detection
-from training.store_view.evaluate import frame_result, gate, match, summarize
+from training.store_view.evaluate import apply_env, frame_result, gate, in_window, match, night, summarize
 
 
 def test_centre_inside_matches():
@@ -80,3 +82,31 @@ def test_gate_fails_a_number_that_could_not_be_measured():
         "frames: recall not measured",
         "segments: recall not measured",
     ]
+
+
+def test_the_current_pipeline_does_not_inherit_the_new_ones_settings(monkeypatch):
+    # every variable is set through monkeypatch first, so pytest restores it after apply_env changed it
+    monkeypatch.setenv("MILK_LONG_TH_CONFIRM", "detector")
+    monkeypatch.setenv("MILK_LONG_TILE", "1280")
+    monkeypatch.setenv("MILK_SLIDE_CONF", "0.9")
+    monkeypatch.delenv("NOT_A_MILK_SETTING", raising=False)
+    apply_env({"MILK_SLIDE_CONF": "0.25", "NOT_A_MILK_SETTING": "x"}, {"MILK_LONG_TILE": "0"})
+    assert "MILK_LONG_TH_CONFIRM" not in os.environ
+    assert os.environ["MILK_LONG_TILE"] == "0" and os.environ["MILK_SLIDE_CONF"] == "0.25"
+    assert "NOT_A_MILK_SETTING" not in os.environ
+
+
+def test_since_keeps_segments_that_start_at_or_after_it():
+    since = "2026-11-25T13:00:00+07:00"
+    assert in_window("2026-11-25T13:00:00+07:00", since) and in_window("2026-11-26T06:00:00+07:00", since)
+    assert not in_window("2026-11-25T12:59:59+07:00", since)
+    assert in_window("2026-11-23T18:00:00+07:00", None)
+
+
+def test_night_counts_milk_boxes_on_frames_without_the_display():
+    rows = [{"kind": "negative", "milk": 0}] * 199 + [{"kind": "negative", "milk": 2}, {"kind": "day", "milk": 5}]
+    assert night(rows) == {"frames": 200, "milk_boxes": 2, "per_100": 1.0}
+
+
+def test_night_without_frames_is_not_measured():
+    assert night([{"kind": "day", "milk": 1}]) == {"frames": 0, "milk_boxes": 0, "per_100": None}

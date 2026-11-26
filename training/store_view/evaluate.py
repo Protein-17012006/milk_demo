@@ -8,6 +8,7 @@ TH box on a frame without TH. Unrecognised boxes and Slide boxes are not milk. N
 
     python -m training.store_view.evaluate run --frames F --segments S --labels L --env-file worker.env ^
         --new "MILK_LONG_DIR=...;MILK_LONG_YOLO=...;MILK_LONG_TILE=1280" --current "MILK_LONG_TILE=0" --out R.json
+        [--since 2026-11-25T13:00:00+07:00]   only segments that start at or after this moment
     python -m training.store_view.evaluate synthetic --old best_types.pt --old-data D12 --new best_store_v1.pt --new-data D11
 """
 
@@ -18,6 +19,7 @@ import json
 import os
 import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 GATE = {
@@ -27,6 +29,8 @@ GATE = {
     "negatives_per_100": ("<=", 1.0),
 }
 VINAMILK_DROP = 0.02  # most a Vinamilk class may lose in mAP50 on the synthetic val images
+# The milk pipeline's settings: cleared before each pipeline is loaded, so the second one never inherits the first's.
+LONG_KEYS = ("MILK_LONG_DIR", "MILK_LONG_YOLO", "MILK_LONG_TILE", "MILK_LONG_VARIANTS", "MILK_LONG_TH_CONFIRM")
 
 
 def match(model: list[tuple[list[int], float]], truth: list[list[int]]) -> tuple[int, int, int]:
@@ -119,13 +123,31 @@ def _env_file(path: Path) -> dict[str, str]:
     return out
 
 
-def _pipeline(base: dict[str, str], overrides: dict[str, str]):
-    from milk.pipeline import load_pipeline
-
-    for key in ("MILK_LONG_DIR", "MILK_LONG_YOLO", "MILK_LONG_TILE", "MILK_LONG_VARIANTS"):
+def apply_env(base: dict[str, str], overrides: dict[str, str]) -> None:
+    """The environment one pipeline is loaded with: the milk settings cleared, then the MILK_ settings of `base`
+    (worker.env), then `overrides`."""
+    for key in LONG_KEYS:
         os.environ.pop(key, None)
     os.environ.update({k: v for k, v in base.items() if k.startswith("MILK_")})
     os.environ.update(overrides)
+
+
+def in_window(first_ts: str, since: str | None) -> bool:
+    """Whether a segment that starts at first_ts is scored: always without `since`, else from that moment on."""
+    return since is None or datetime.fromisoformat(first_ts) >= datetime.fromisoformat(since)
+
+
+def night(results: list[dict]) -> dict:
+    """Milk boxes on the frames of negative segments (the display is not in view: the cabinet is packed away)."""
+    rows = [r for r in results if r.get("kind") == "negative"]
+    boxes = sum(r["milk"] for r in rows)
+    return {"frames": len(rows), "milk_boxes": boxes, "per_100": 100 * boxes / len(rows) if rows else None}
+
+
+def _pipeline(base: dict[str, str], overrides: dict[str, str]):
+    from milk.pipeline import load_pipeline
+
+    apply_env(base, overrides)
     return load_pipeline("long+slide", "")
 
 
@@ -147,6 +169,8 @@ def run(args: argparse.Namespace) -> None:
     for seg in segments:
         if seg["split"] != "holdout" or seg["kind"] not in ("day", "negative"):
             continue
+        if not in_window(seg["first_ts"], args.since):
+            continue
         for cid in spread(seg["members"], args.per_segment):
             label = args.labels / f"{cid}.txt"
             if cid not in paths or not label.is_file():
@@ -155,7 +179,7 @@ def run(args: argparse.Namespace) -> None:
             image = cv2.imread(str(paths[cid]))
             found = {name: pipe.detect(image) for name, pipe in pipes.items()}
             for name, dets in found.items():
-                results[name].append(frame_result(cid, seg["id"], dets, truth))
+                results[name].append({**frame_result(cid, seg["id"], dets, truth), "kind": seg["kind"]})
             slides = [
                 sorted((d.sku_id, d.box) for d in dets if not str(d.sku_id or "").startswith("TMP-MLK") and d.sku_id)
                 for dets in found.values()
@@ -164,6 +188,9 @@ def run(args: argparse.Namespace) -> None:
     report = {name: summarize(rs) for name, rs in results.items()}
     report["gate_failures"] = gate(report["new"])
     report["slide_frames_that_differ"] = slide_differs
+    report["since"] = args.since
+    report["settings"] = {"new": args.new, "current": args.current}  # the override strings only, never worker.env
+    report["night"] = night(results["new"])
     report["frames"] = results["new"]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=1), encoding="utf-8")
@@ -173,6 +200,9 @@ def run(args: argparse.Namespace) -> None:
             cells = "  ".join(f"{k} {s[k]:.3f}" if s[k] is not None else f"{k} -" for k in GATE)
             print(f"{name:<8} {view:<9} {cells}")
     print(f"held-out frames {len(results['new'])}; Slide differs on {slide_differs}")
+    n = report["night"]
+    per_100 = "-" if n["per_100"] is None else f"{n['per_100']:.1f}"
+    print(f"night frames {n['frames']}  milk boxes {n['milk_boxes']}  per 100 {per_100}")
     print("gate passed" if not report["gate_failures"] else "gate FAILED: " + "; ".join(report["gate_failures"]))
 
 
@@ -206,6 +236,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--new", required=True, help='overrides for the new model, "KEY=value;KEY=value"')
     r.add_argument("--current", required=True, help="overrides for the running model")
     r.add_argument("--per-segment", type=int, default=30)
+    r.add_argument("--since", help="only segments that start at or after this moment, ISO with offset")
     r.add_argument("--out", type=Path, required=True)
     s = sub.add_parser("synthetic")
     s.add_argument("--old", type=Path, required=True)
