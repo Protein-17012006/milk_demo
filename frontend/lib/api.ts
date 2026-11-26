@@ -302,19 +302,6 @@ export interface ApiShelfPlan {
   updated_at: string | null;
 }
 
-/** One day of GET /reports/series: units of the expected SKUs per counted check, from the day rollups. */
-export interface ApiReportsSeriesPoint {
-  date: string; // YYYY-MM-DD (UTC+7)
-  avg_units: number;
-  max_units: number;
-  checks: number;
-  unmeasured_hours?: number;
-}
-
-export interface ApiReportsSeriesResponse {
-  series: ApiReportsSeriesPoint[];
-}
-
 // --- Model page (GET/PUT /model/*) -------------------------------------------------------------------
 
 export type AuditStatus = "pending" | "done" | "skipped";
@@ -645,9 +632,6 @@ export function createApiClient(getIdToken: TokenGetter) {
 
     getKpi: (p: DashboardQuery = {}) =>
       requestWithAuth(`/kpi${dashboardQuery(p)}`, getIdToken) as Promise<ApiKpiResponse>,
-
-    getReportsSeries: (p: DashboardQuery = {}) =>
-      requestWithAuth(`/reports/series${dashboardQuery(p)}`, getIdToken) as Promise<ApiReportsSeriesResponse>,
 
     getTrends: (metric: TrendMetric, p: DashboardQuery = {}) =>
       requestWithAuth(`/reports/trends${dashboardQuery({ ...p, metric })}`, getIdToken) as Promise<ApiTrendsResponse>,

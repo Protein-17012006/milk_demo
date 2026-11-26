@@ -5,8 +5,7 @@ import { useAuth } from "@/lib/auth";
 import {
   createApiClient,
   type ApiKpiResponse,
-  type ApiReportsSeriesPoint,
-  type ApiReportsSeriesResponse,
+  type ApiProductsResponse,
   type ApiStore,
   type ApiTrendPoint,
   type ApiTrendsResponse,
@@ -15,7 +14,7 @@ import {
 import { ExportCsvButton } from "@/components/common/ExportCsvButton";
 import { FilterBar } from "./FilterBar";
 import { KpiGrid } from "./KpiGrid";
-import { MonthlyStockChart } from "./MonthlyStockChart";
+import { ShelfNowTable } from "./ShelfNowTable";
 import { TrendsInsightsChart } from "./TrendsInsightsChart";
 import { RecentActivitiesCard, type ActivityKind } from "./RecentActivitiesCard";
 import {
@@ -23,19 +22,31 @@ import {
   DEFAULT_TIMEFRAME,
   categoryParam,
   daysOf,
-  kpisFromApi,
   storeParam,
   type CategoryOption,
   type TimeframeOption,
 } from "@/lib/reports-ui";
 import { alertAccuracyByTypeText, alertAccuracyText, blockedText, displayBanner } from "@/lib/shelf-ui";
 import { showStoreFilter } from "@/lib/products-ui";
+import { shelfNowRows, shelfNowSummary, updatedText } from "@/lib/shelf-now";
 
 const TREND_METRICS: TrendMetric[] = ["total_stock", "oos", "accuracy", "restock_volume", "osa"];
 type Trends = Record<TrendMetric, ApiTrendPoint[] | null>;
 const NO_TRENDS: Trends = { total_stock: null, oos: null, accuracy: null, restock_volume: null, osa: null };
 
-/** The Dashboard: every card and chart follows the Timeframe, Store and Category filters (spec 2026-11-24). */
+/** The product list as the Dashboard holds it: the answer, when it was read, and the line that says how fresh the
+ * numbers are (worked out when the answer arrives, so drawing the page never reads the clock). */
+interface LoadedProducts {
+  data: ApiProductsResponse;
+  loadedAt: number;
+  updated: string | null;
+}
+
+/**
+ * The Dashboard. On top, what a viewer opens it for: each product of the shelf plan with its units now, and what
+ * ran out. Below, how the shelf did over the chosen Timeframe (spec 2026-11-24). The table shows the latest
+ * reading, the same numbers as the Category page; the cards and charts under it follow all the filters.
+ */
 export function ReportsDashboard() {
   const { isApproved, getIdToken, user } = useAuth();
   const [timeframe, setTimeframe] = useState<TimeframeOption>(DEFAULT_TIMEFRAME);
@@ -43,7 +54,8 @@ export function ReportsDashboard() {
   const [category, setCategory] = useState<CategoryOption>("All Categories");
   const [liveKpi, setLiveKpi] = useState<ApiKpiResponse | null>(null);
   const [liveStores, setLiveStores] = useState<ApiStore[] | null>(null);
-  const [liveSeries, setLiveSeries] = useState<ApiReportsSeriesPoint[] | null>(null);
+  const [liveProducts, setLiveProducts] = useState<LoadedProducts | null>(null);
+  const [productsFailed, setProductsFailed] = useState(false);
   const [liveTrends, setLiveTrends] = useState<Trends>(NO_TRENDS);
 
   const api = useMemo(() => createApiClient(getIdToken), [getIdToken]);
@@ -73,12 +85,20 @@ export function ReportsDashboard() {
     // numbers under the new filter labels.
     Promise.allSettled([
       api.getKpi(query),
-      api.getReportsSeries({ storeId: query.storeId, category: query.category }),
+      api.getProducts({ category: query.category }),
       ...TREND_METRICS.map((metric) => api.getTrends(metric, query)),
-    ]).then(([kpiRes, seriesRes, ...trendRes]) => {
+    ]).then(([kpiRes, productsRes, ...trendRes]) => {
       if (cancelled) return;
       setLiveKpi(kpiRes.status === "fulfilled" ? (kpiRes.value as ApiKpiResponse) : null);
-      setLiveSeries(seriesRes.status === "fulfilled" ? (seriesRes.value as ApiReportsSeriesResponse).series : null);
+      if (productsRes.status === "fulfilled") {
+        const data = productsRes.value as ApiProductsResponse;
+        const now = new Date();
+        setLiveProducts({ data, loadedAt: now.getTime(), updated: updatedText(data.as_of, now) });
+        setProductsFailed(false);
+      } else {
+        setLiveProducts(null);
+        setProductsFailed(true);
+      }
       setLiveTrends(
         Object.fromEntries(
           TREND_METRICS.map((m, i) => {
@@ -96,7 +116,7 @@ export function ReportsDashboard() {
   // Signed out, nothing from the API is shown.
   const kpi = isApproved ? liveKpi : null;
   const stores = isApproved ? liveStores : null;
-  const series = isApproved ? liveSeries : null;
+  const products = isApproved ? liveProducts : null;
   const trends = isApproved ? liveTrends : NO_TRENDS;
 
   const storeOptions = useMemo(() => {
@@ -104,8 +124,12 @@ export function ReportsDashboard() {
     return [`${ALL_STORES_LABEL} (${stores.length})`, ...stores.map((s) => `${s.store_id} — ${s.store_name}`)];
   }, [stores]);
   const storeName = storeId ?? (stores && stores.length === 1 ? stores[0].store_id : undefined);
-  const kpis = useMemo(() => kpisFromApi(kpi), [kpi]);
   const shelfBlocked = kpi?.osa?.blocked_reason === "no_hours" ? blockedText("no_hours", storeName) : null;
+
+  // What is on the shelf now: the plan's products at the latest reading, and their totals for the first two cards.
+  const rows = useMemo(() => (products ? shelfNowRows(products.data.items) : null), [products]);
+  const summary = useMemo(() => (rows ? shelfNowSummary(rows) : null), [rows]);
+  const outNames = useMemo(() => (rows ?? []).filter((r) => r.status === "OOS").map((r) => r.name), [rows]);
 
   const canVerify = (user?.groups ?? []).some((g) => g === "team_admin" || g === "field_team");
   const loadEvents = useCallback(
@@ -121,9 +145,17 @@ export function ReportsDashboard() {
       <header className="flex flex-col gap-[6px] border-b border-black/10 pb-[18px] sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-[22px] font-normal leading-tight text-black">Dashboard</h1>
-          {kpi && (
+          {isApproved && (
             <p className="mt-1 text-[12px] text-[#6B7280]">
-              Shelf numbers are worked out every 5 minutes from the store&apos;s checks in opening hours.
+              {products?.updated && (
+                <>
+                  <span data-updated className="font-semibold text-[#374151]">
+                    {products.updated}
+                  </span>
+                  {" · "}
+                </>
+              )}
+              Shelf numbers are worked out every 5 minutes in opening hours.
             </p>
           )}
         </div>
@@ -163,18 +195,20 @@ export function ReportsDashboard() {
         </p>
       )}
 
-      <section aria-label="Key metrics and stock count" className="mt-[28px] grid grid-cols-1 gap-[22px] xl:grid-cols-12">
-        <div className="xl:col-span-6">
+      {/* The table comes first on a narrow screen: it is what a viewer came for. */}
+      <section aria-label="What is on the shelf now" className="mt-[28px] grid grid-cols-1 gap-[22px] xl:grid-cols-12">
+        <div className="order-2 xl:order-1 xl:col-span-5">
           <KpiGrid
-            metrics={kpis}
+            summary={summary}
+            outNames={outNames}
             kpi={kpi}
             sparklines={{ osa: trends.osa, restock: trends.restock_volume }}
             days={days}
             storeName={storeName}
           />
         </div>
-        <div className="xl:col-span-6">
-          <MonthlyStockChart series={series} />
+        <div className="order-1 xl:order-2 xl:col-span-7">
+          <ShelfNowTable rows={isApproved ? rows : []} failed={isApproved && productsFailed} />
         </div>
       </section>
 

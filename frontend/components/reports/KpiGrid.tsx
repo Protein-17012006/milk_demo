@@ -3,16 +3,19 @@
 import React from "react";
 import { Area, AreaChart, ResponsiveContainer } from "recharts";
 import type { ApiKpiResponse, ApiTrendPoint } from "@/lib/api";
-import type { KpiMetrics } from "@/lib/reports-ui";
+import { namesText, type ShelfNowSummary } from "@/lib/shelf-now";
 import { blockedText, coverageText, ptsChange, restockDefinition } from "@/lib/shelf-ui";
 
-// Shown wherever the API has no value; the cards never show a number the backend did not return.
+// Shown wherever there is no value; the cards never show a number the backend did not return.
 const NO_VALUE = "—";
-const percent = (v: number | null) => (v === null ? NO_VALUE : `${v}%`);
-const CARD = "flex min-h-[170px] flex-col rounded-[18px] border border-[#EFF0F6] bg-white px-[18px] pt-[18px] pb-[14px]";
+const CARD = "flex min-h-[150px] flex-col rounded-[18px] border border-[#EFF0F6] bg-white px-[18px] pt-[16px] pb-[14px]";
+const NO_PLAN = "No shelf plan yet. An administrator sets it in Settings.";
 
 interface KpiGridProps {
-  metrics: KpiMetrics;
+  /** Totals of the "On the shelf now" table; null until the product list has come back (or when it failed). */
+  summary: ShelfNowSummary | null;
+  /** Names of the plan's products that are out of stock now, in the table's order. */
+  outNames: string[];
   kpi: ApiKpiResponse | null;
   sparklines: { osa: ApiTrendPoint[] | null; restock: ApiTrendPoint[] | null };
   days: number;
@@ -40,98 +43,99 @@ function OrangeSparkline({ points, gradientId, scale = 1 }: { points: ApiTrendPo
 }
 
 function Title({ children }: { children: React.ReactNode }) {
-  return <p className="min-h-[34px] text-[13px] font-medium leading-[1.35] tracking-[-0.011em] text-black/70">{children}</p>;
+  return <p className="text-[13px] font-medium leading-[1.35] tracking-[-0.011em] text-black/70">{children}</p>;
 }
 
-function Value({ children }: { children: React.ReactNode }) {
-  return <span className="text-[22px] font-bold leading-none text-black">{children}</span>;
+function Value({ children, unit, tone }: { children: React.ReactNode; unit?: string; tone?: "alert" }) {
+  return (
+    <p className="mt-[8px] flex items-baseline gap-[5px]">
+      <span data-kpi-value className={`text-[24px] font-bold leading-none ${tone === "alert" ? "text-[#DC2626]" : "text-black"}`}>
+        {children}
+      </span>
+      {unit && <span className="text-[12.5px] font-medium text-[#6B7280]">{unit}</span>}
+    </p>
+  );
 }
 
-/** One line under the number: the change or the reason it is missing. */
+/** One line under the number: what it covers, the change, or the reason it is missing. */
 function Sub({ children, data }: { children: React.ReactNode; data?: string }) {
   return (
-    <p data-kpi-sub={data} className="mt-[6px] text-[11.5px] leading-[1.35] text-[#374151]">
+    <p data-kpi-sub={data} className="mt-[6px] text-[11.5px] leading-[1.4] text-[#374151]">
       {children}
     </p>
   );
 }
 
-/** What the card measures, from the spec's definitions. */
-function Defn({ children }: { children: React.ReactNode }) {
-  return <p className="mt-[4px] text-[11px] leading-[1.35] text-[#9CA3AF]">{children}</p>;
-}
-
-export function KpiGrid({ metrics, kpi, sparklines, days, storeName }: KpiGridProps) {
+/** Four numbers a viewer can read at a glance: what is on the shelf, what ran out, how often there was stock, and
+ * how fast the store restocks. The model's own numbers (processing time, accuracy) live on the Model page. */
+export function KpiGrid({ summary, outNames, kpi, sparklines, days, storeName }: KpiGridProps) {
   const period = days === 1 ? "yesterday" : `the previous ${days} days`;
   const osa = kpi?.osa;
-  const top = kpi?.top_50_sku_accuracy;
   const restock = kpi?.restock_rate;
   const osaDelta = osa ? ptsChange(osa.value, osa.previous) : null;
+  const osaPercent = osa?.value == null ? null : Math.round(osa.value * 1000) / 10;
+  const hasPlan = summary !== null && summary.products > 0;
+  const noPlan = summary !== null && summary.products === 0;
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-      <div className={CARD}>
-        <Title>Active Stores Monitored</Title>
-        <div className="mt-[10px] flex items-baseline">
-          <Value>{metrics.activeStores ?? NO_VALUE}</Value>
-          {metrics.activeStores !== null && metrics.totalStores !== null && (
-            <span className="text-[15.5px] font-semibold leading-none text-black/50">/{metrics.totalStores}</span>
-          )}
-        </div>
-        <Defn>Stores whose camera sent captures.</Defn>
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <div data-kpi="on-shelf" className={CARD}>
+        <Title>On the shelf now</Title>
+        <Value unit={hasPlan ? (summary.units === 1 ? "unit" : "units") : undefined}>
+          {hasPlan ? summary.units.toLocaleString("en-US") : NO_VALUE}
+        </Value>
+        {hasPlan && (
+          <Sub data="on-shelf">
+            {summary.products} {summary.products === 1 ? "product" : "products"} on the shelf plan
+          </Sub>
+        )}
+        {noPlan && <Sub data="on-shelf">{NO_PLAN}</Sub>}
       </div>
 
-      <div className={CARD}>
-        <Title>Total On-Shelf Units (now)</Title>
-        <div className="mt-[10px]">
-          <Value>{metrics.totalOnShelfUnits === null ? NO_VALUE : metrics.totalOnShelfUnits.toLocaleString("en-US")}</Value>
-        </div>
-        <Defn>Units counted on the shelves at the latest capture.</Defn>
+      <div data-kpi="oos-now" className={CARD}>
+        <Title>Out of stock now</Title>
+        <Value tone={hasPlan && summary.out > 0 ? "alert" : undefined} unit={hasPlan ? (summary.out === 1 ? "product" : "products") : undefined}>
+          {hasPlan ? summary.out : NO_VALUE}
+        </Value>
+        {hasPlan && <Sub data="oos-now">{summary.out > 0 ? namesText(outNames) : "Every product on the plan has stock."}</Sub>}
+        {hasPlan && summary.low > 0 && <Sub data="low-now">Low: {summary.low}</Sub>}
+        {noPlan && <Sub data="oos-now">{NO_PLAN}</Sub>}
       </div>
 
-      <div className={CARD}>
-        <Title>Avg. Inference Time</Title>
-        <div className="mt-[10px]">
-          <Value>{metrics.avgInferenceTime ?? NO_VALUE}</Value>
-        </div>
-        <Defn>Model time per image; Datagent&apos;s limit is 30 s.</Defn>
-      </div>
-
-      <div data-kpi="osa" className={CARD}>
-        <Title>On-Shelf Availability (OSA)</Title>
-        <Value>{percent(metrics.osaPercent)}</Value>
+      <div
+        data-kpi="osa"
+        className={CARD}
+        title={[
+          "Checks in opening hours where an expected SKU had at least 1 unit.",
+          kpi?.coverage ? coverageText(kpi.coverage) : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+      >
+        <Title>On-Shelf Availability</Title>
+        <Value>{osaPercent === null ? NO_VALUE : `${osaPercent}%`}</Value>
         <Sub data="osa">
-          {osa?.blocked_reason ? blockedText(osa.blocked_reason, storeName) : osaDelta ? `${osaDelta} vs ${period}` : "No previous period to compare"}
+          {osa?.blocked_reason
+            ? blockedText(osa.blocked_reason, storeName)
+            : osaDelta
+              ? `${osaDelta} vs ${period}`
+              : "Share of opening-hours checks where a product had stock."}
         </Sub>
-        {kpi?.coverage && <Sub data="coverage">{coverageText(kpi.coverage)}</Sub>}
-        <Defn>Checks in opening hours where an expected SKU had at least 1 unit.</Defn>
         <OrangeSparkline points={sparklines.osa} gradientId="kpiOsaSparkline" scale={100} />
       </div>
 
-      <div data-kpi="top50" className={CARD}>
-        <Title>Top 50 SKU Accuracy</Title>
-        <Value>{percent(metrics.top50SkuAccuracy)}</Value>
-        <Sub data="top50">
-          {top?.blocked_reason
-            ? blockedText(top.blocked_reason, storeName)
-            : top
-              ? `From ${top.n_frames} ${top.n_frames === 1 ? "frame" : "frames"} the team labelled`
-              : NO_VALUE}
-        </Sub>
-        <Defn>{top?.scope_note ?? "Boxes named with the right SKU."}</Defn>
-      </div>
-
-      <div data-kpi="restock" className={CARD}>
-        <Title>Restock Rate (vs Last Cycle)</Title>
-        <Value>{metrics.restockRateDelta ?? NO_VALUE}</Value>
+      <div data-kpi="restock" className={CARD} title={restockDefinition(days, restock?.measured_days)}>
+        <Title>Restock rate</Title>
+        <Value unit={restock?.units_per_day != null ? "units/day" : undefined}>{restock?.units_per_day ?? NO_VALUE}</Value>
         <Sub data="restock">
-          {restock && restock.units_per_day !== null
-            ? `${restock.units_per_day} units/day vs ${restock.previous_units_per_day ?? NO_VALUE}`
-            : restock?.blocked_reason
+          {restock?.units_per_day == null
+            ? restock?.blocked_reason
               ? blockedText(restock.blocked_reason, storeName)
-              : NO_VALUE}
+              : NO_VALUE
+            : restock.previous_units_per_day != null
+              ? `vs ${restock.previous_units_per_day} units/day before`
+              : "No earlier period to compare"}
         </Sub>
-        <Defn>{restockDefinition(days, restock?.measured_days)}</Defn>
         <OrangeSparkline points={sparklines.restock} gradientId="kpiRestockSparkline" />
       </div>
     </div>
