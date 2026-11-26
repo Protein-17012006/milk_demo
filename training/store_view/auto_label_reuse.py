@@ -11,12 +11,13 @@ same place with the same colour in an earlier segment, or needs a new review fra
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from training.store_view.auto_label import Decision, Track, _overlap
+from training.store_view.slide_gallery import colour, crop_of
 
 REUSE_MIN_SIM = 0.95  # placeholder until measured on the train-side truth (plan 2026-11-26 Task 6)
 NOT_PRODUCT, OUT_OF_SCOPE = "not_product", "out_of_scope"
@@ -63,6 +64,63 @@ def reuse(track: Track, precedents: Sequence[Precedent], min_sim: float) -> Deci
         return Decision("review", None, "reuse_conflict")
     latest = max(found, key=lambda p: p.key)
     return decision_for(latest.label, f"reused:{latest.source}")
+
+
+def _truth_label(row: dict) -> str:
+    if row.get("kind") == "ignore" or row.get("sku") in (None, "unknown"):
+        return OUT_OF_SCOPE
+    return row["sku"]
+
+
+def truth_precedents(
+    truth: dict[str, list[dict]], keys: Iterable[str], load: Callable[[str], np.ndarray | None]
+) -> list[Precedent]:
+    """Each hand-drawn row of the given keyframes, with the colour of its crop in the keyframe. The caller picks the
+    keys: never a held-out keyframe outside gate 1's simulation."""
+    out = []
+    for key in keys:
+        image = load(key)
+        if image is None:
+            continue
+        for i, row in enumerate(truth.get(key, [])):
+            crop = crop_of(image, row["box"])
+            if crop is not None:
+                out.append(Precedent(key, tuple(float(v) for v in row["box"]), colour(crop), _truth_label(row),
+                                     f"truth:{key}#{i}"))
+    return out
+
+
+def trn_precedents(rows: list[tuple[str, list[int], str]], load: Callable[[str], np.ndarray | None]) -> list[Precedent]:
+    """The judged boxes of done training frames (slide_gallery.trn_rows); "none" is not a product. The caller leaves
+    out scoring and held-out frames."""
+    out, cache = [], {}
+    for cid, box, label in rows:
+        if cid not in cache:
+            cache = {cid: load(cid)}
+        if cache[cid] is None:
+            continue
+        crop = crop_of(cache[cid], box)
+        if crop is not None:
+            out.append(Precedent(cid, tuple(float(v) for v in box), colour(crop),
+                                 NOT_PRODUCT if label == "none" else label, f"trn:{cid}@{box[0]},{box[1]}"))
+    return out
+
+
+def review_precedents(proposals: list[dict], review: dict) -> list[Precedent]:
+    """The cans people decided on review frames (the review file of auto_label_labels); a can without a colour cannot
+    be matched, so it gives none."""
+    labels = {"not_product": NOT_PRODUCT, "out_of_scope": OUT_OF_SCOPE}
+    out = []
+    for p in proposals:
+        verdicts = (review.get(p["segment"]) or {}).get("tracks", {})
+        for t in p["tracks"]:
+            v = verdicts.get(t.id)
+            if not v or t.colour is None or not p["frames"]:
+                continue
+            label = v.get("sku") if v.get("verdict") == "sku" else labels.get(v.get("verdict"))
+            if label:
+                out.append(Precedent(p["frames"][0], t.box, t.colour, label, f"review:{t.id}"))
+    return out
 
 
 @dataclass

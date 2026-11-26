@@ -11,7 +11,11 @@ from training.store_view.auto_label_reuse import (
     label_of,
     queue,
     reuse,
+    review_precedents,
+    trn_precedents,
+    truth_precedents,
 )
+from training.store_view.slide_gallery import colour
 
 BOX = (100.0, 500.0, 70.0, 160.0)
 
@@ -135,3 +139,51 @@ def test_queue_does_not_change_its_input():
     before = copy.deepcopy(s1["decisions"])
     queue([s1], [precedent("cheese145")], 0.95)
     assert s1["decisions"] == before
+
+
+def two_cans():
+    """A 64 x 80 frame with two two-tone cans (grey-world would turn a one-colour crop grey)."""
+    img = np.full((64, 80, 3), 128, np.uint8)
+    img[10:30, 10:30], img[30:50, 10:30] = (40, 200, 230), (200, 90, 40)
+    img[10:30, 40:60], img[30:50, 40:60] = (60, 190, 60), (40, 40, 200)
+    return img
+
+
+ROWS = [{"box": [10, 10, 20, 40], "sku": "cheese145", "kind": "face"},
+        {"box": [40, 10, 20, 40], "sku": "unknown", "kind": "lid"}]
+
+
+def test_truth_rows_become_precedents_with_their_crop_colour_and_unknown_as_out_of_scope():
+    ps = truth_precedents({"K": ROWS, "OTHER": ROWS}, ["K"], lambda c: two_cans())
+    assert [p.label for p in ps] == ["cheese145", "out_of_scope"]
+    assert float(ps[0].colour @ colour(two_cans()[10:50, 10:30])) > 0.99
+    assert float(ps[0].colour @ ps[1].colour) < 0.9
+    assert [p.source for p in ps] == ["truth:K#0", "truth:K#1"] and ps[0].key == "K"
+
+
+def test_an_ignore_row_is_out_of_scope_even_with_a_flavour():
+    ps = truth_precedents({"K": [{"box": [10, 10, 20, 40], "sku": "hot160", "kind": "ignore"}]}, ["K"],
+                          lambda c: two_cans())
+    assert ps[0].label == "out_of_scope"
+
+
+def test_trn_none_is_not_product():
+    ps = trn_precedents([("C1", [10, 10, 20, 40], "none"), ("C1", [40, 10, 20, 40], "sourcream150")],
+                        lambda c: two_cans())
+    assert [(p.label, p.source, p.key) for p in ps] == [("not_product", "trn:C1@10,10", "C1"),
+                                                        ("sourcream150", "trn:C1@40,10", "C1")]
+
+
+def test_review_decisions_become_precedents_keyed_by_the_segment_first_frame():
+    s1 = prop("s1", "C1", [can("s1-t0"), can("s1-t1", colour=GREEN), can("s1-t2", colour=None), can("s1-t3")],
+              {})
+    review = {"s1": {"tracks": {"s1-t0": {"verdict": "sku", "sku": "hot160"}, "s1-t1": {"verdict": "out_of_scope"},
+                                "s1-t2": {"verdict": "not_product"}}, "missed": []}}
+    ps = review_precedents([s1], review)
+    assert {(p.source, p.label, p.key) for p in ps} == {("review:s1-t0", "hot160", "C1"),
+                                                        ("review:s1-t1", "out_of_scope", "C1")}
+
+
+def test_unreadable_images_give_no_precedent():
+    assert truth_precedents({"K": ROWS}, ["K"], lambda c: None) == []
+    assert trn_precedents([("C1", [10, 10, 20, 40], "none")], lambda c: None) == []
