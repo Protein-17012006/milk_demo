@@ -5,9 +5,9 @@ person looked at, and the points of cans the machine missed:
 
     {"<segment id>": {"tracks": {"<track id>": {"verdict": "sku", "sku": "original145"}}, "missed": [[x, y]]}}
 
-verdict "sku" names the flavour, "not_product" drops the box, "out_of_scope" leaves the can unlabelled. A can the
-labels do not name must never look like background to the detector, so it is painted grey (127) on the copy of the
-frame: cans still under review, out of scope, hidden in that very frame, and the missed points.
+verdict "sku" names the flavour, "not_product" drops the box, "out_of_scope" leaves the can unlabelled (status
+"masked"). A can the labels do not name must never look like background to the detector, so it is painted grey (127)
+on the copy of the frame: cans still under review, out of scope, hidden in that very frame, and the missed points.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ def apply_review(decisions: dict[str, Decision], review: dict) -> dict[str, Deci
         elif verdict == "not_product":
             out[tid] = Decision("drop", None, "human_not_product")
         elif verdict == "out_of_scope":
-            out[tid] = Decision("review", None, "out_of_scope")
+            out[tid] = Decision("masked", None, "out_of_scope")
     return out
 
 

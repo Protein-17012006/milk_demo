@@ -34,7 +34,7 @@ def test_review_and_out_of_scope_are_masked_never_labelled():
     a, b, c = can("s-t0", ["C1"]), can("s-t1", ["C1"], box=(1200, 300, 70, 160)), can("s-t2", ["C1"], box=(1300, 1, 9, 9))
     decisions = {
         "s-t0": Decision("review", None, "disagree"),
-        "s-t1": Decision("review", None, "out_of_scope"),
+        "s-t1": Decision("masked", None, "out_of_scope"),
         "s-t2": Decision("drop", None, "ghost"),
     }
     lines, masks = frame_labels("C1", [a, b, c], decisions, CLASSES, [])
@@ -59,7 +59,7 @@ def test_review_file_turns_a_track_into_the_chosen_flavour():
     out = apply_review(decisions, review)
     assert out["s-t0"] == Decision("accept", "original145", "human")
     assert out["s-t1"].status == "drop"
-    assert out["s-t2"] == Decision("review", None, "out_of_scope")
+    assert out["s-t2"] == Decision("masked", None, "out_of_scope")
     assert out["s-t3"] == decisions["s-t3"]
 
 
