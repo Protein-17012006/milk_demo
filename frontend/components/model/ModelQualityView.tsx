@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Tag } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import {
@@ -37,6 +37,7 @@ import {
 import type { HealthMetric } from "@/lib/health-ui";
 import { labelQueueOrder, relabelQueue } from "@/lib/audit-labeling";
 import { BADGE_COLORS, badgeLabel, reliabilityText } from "@/lib/reliability-ui";
+import { runStatus, type RunStatus } from "@/lib/model-status";
 import { AuditLabeler } from "./AuditLabeler";
 import { LiveHealth } from "./LiveHealth";
 
@@ -46,6 +47,8 @@ const RANGES: { days: number; label: string }[] = [
   { days: 0, label: "All time" },
 ];
 const TONE: Record<Tone, string> = { met: "#15803D", missed: "#B91C1C", none: "#6B7280" };
+// the dot before "Camera and worker": green while images arrive, amber when they stopped in opening hours
+const RUN_DOT: Record<RunStatus["tone"], string> = { running: "#16A34A", quiet: "#9CA3AF", stopped: "#D97706", none: "#9CA3AF" };
 const CARD = "rounded-[18px] border border-[#EFF0F6] bg-white";
 
 /**
@@ -64,6 +67,9 @@ export function ModelQualityView() {
   const [health, setHealth] = useState<ApiModelHealthItem[] | null>(null);
   const [pending, setPending] = useState<ApiAuditListItem[]>([]);
   const [names, setNames] = useState<Record<string, string>>({});
+  // per store: whether its camera, hub and worker run, read from the time of its latest image
+  const [runLines, setRunLines] = useState<{ storeId: string; status: RunStatus }[]>([]);
+  const [flagThreshold, setFlagThreshold] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [labelling, setLabelling] = useState<string[] | null>(null);
   const [healthMetric, setHealthMetric] = useState<HealthMetric>("conf_median");
@@ -99,15 +105,25 @@ export function ModelQualityView() {
         const map: Record<string, string> = {};
         for (const p of res.items) if (p.model_alias) map[p.model_alias] = p.sku_name;
         setNames(map);
+        setFlagThreshold(res.flag_threshold);
       })
       .catch(() => undefined); // names are a nicety: model labels are shown instead
+    api
+      .getStores()
+      .then((res) => {
+        if (cancelled) return;
+        const now = new Date();
+        setRunLines(res.items.map((store) => ({ storeId: store.store_id, status: runStatus(store, now) })));
+      })
+      .catch(() => undefined); // without it the page still has Live health below
     return () => {
       cancelled = true;
     };
-  }, [allowed, api]);
+  }, [allowed, api, reloadKey]);
 
   const nameOf = (label: string) =>
     ({ UNRECOGNIZED: "Unrecognized", MISSED: "Missed by model", NOT_PRODUCT: "Not our SKU", OTHER_GOODS: "Other goods" } as Record<string, string>)[label] ??
+    summary?.sku_names?.[label] ?? // every label, also the ones the product list no longer shows
     names[label] ??
     label;
 
@@ -158,7 +174,7 @@ export function ModelQualityView() {
             <option value="all">All versions</option>
             {versions.map((v) => (
               <option key={v} value={v}>
-                {v}
+                {v === "unknown" ? "Before versions were recorded" : v}
               </option>
             ))}
           </select>
@@ -182,6 +198,28 @@ export function ModelQualityView() {
           </button>
         </div>
       </header>
+
+      {(runLines.length > 0 || flagThreshold !== null) && (
+        <div className="mt-3 flex flex-col gap-[3px] text-[12.5px] leading-[1.5] text-[#374151]">
+          {runLines.map(({ storeId, status }) => (
+            <p key={storeId} data-run-status data-tone={status.tone} className="flex items-start gap-[8px]">
+              <span
+                aria-hidden="true"
+                className="mt-[6px] h-[8px] w-[8px] shrink-0 rounded-full"
+                style={{ backgroundColor: RUN_DOT[status.tone] }}
+              />
+              <span>
+                <span className="font-semibold text-[#111827]">Camera and worker, {storeId}:</span> {status.text}
+              </span>
+            </p>
+          ))}
+          {flagThreshold !== null && (
+            <p data-flag-threshold className="text-[12px] text-[#6B7280]">
+              Readings under {flagThreshold.toFixed(2)} confidence, or with no SKU matched, are flagged for review.
+            </p>
+          )}
+        </div>
+      )}
 
       {error && <p className="mt-4 rounded-[8px] bg-[#FEF2F2] px-3 py-2 text-[13px] text-[#991B1B]">{error}</p>}
 
@@ -325,6 +363,7 @@ export function ModelQualityView() {
                 <XAxis dataKey="day" tick={{ fontSize: 11 }} />
                 <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} />
                 <Tooltip formatter={(v) => (typeof v === "number" ? `${v.toFixed(1)}%` : String(v))} />
+                <Legend verticalAlign="top" height={28} iconType="plainline" wrapperStyle={{ fontSize: 12 }} />
                 <Line type="monotone" dataKey="identification" name="Identification" stroke="#EE730A" strokeWidth={2} isAnimationActive={false} connectNulls />
                 <Line type="monotone" dataKey="exactOrMinor" name="Exact + minor" stroke="#2563EB" strokeWidth={2} isAnimationActive={false} connectNulls />
               </LineChart>

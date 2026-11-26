@@ -144,6 +144,9 @@ export interface ApiStore {
   categories_in_view?: string[];
   last_capture_timestamp: string | null;
   has_recent_capture: boolean;
+  // opening hours of the shelf plan ("06:00"); absent until an administrator saves them
+  open_time?: string | null;
+  close_time?: string | null;
 }
 
 export interface ApiStoresResponse {
@@ -465,6 +468,8 @@ export interface ApiModelSummary {
   display_check?: ApiDisplayCheck;
   model_versions: string[];
   range: { days: number; model_version: string };
+  /** Model label -> product name, also for labels the product list no longer shows; older backends leave it out. */
+  sku_names?: Record<string, string>;
 }
 
 /** Health of one camera-hour; shares are absent when there was nothing to divide by. */
