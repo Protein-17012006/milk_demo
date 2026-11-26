@@ -116,8 +116,8 @@ export function ModelQualityView() {
       <div className="mx-auto w-full px-4 pt-6 pb-8 sm:px-6 lg:px-7">
         <h1 className="border-b border-black/10 pb-[18px] text-[22px] font-normal text-black">Model</h1>
         <p data-model-denied className="mt-6 text-[14px] text-[#6B7280]">
-          The Model page is for team_admin and field_team accounts. Sign in with one of them to label frames and
-          see how the model scores.
+          The Model page is for the team that runs the model. Sign in with a team account to label frames and see
+          how the model scores.
         </p>
       </div>
     );

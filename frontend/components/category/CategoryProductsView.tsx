@@ -485,7 +485,7 @@ export function CategoryProductsView() {
   ) => {
     if (liveMode) {
       if (!hasGroup("field_team", "team_admin")) {
-        showToast("Only field_team or team_admin can submit corrections.");
+        showToast("Your account cannot save corrections.");
         return;
       }
       try {
@@ -509,7 +509,7 @@ export function CategoryProductsView() {
         showToast(
           queueKey
             ? "Saved the correction. The reading is checked off in the review queue."
-            : "Saved correction to AWS DynamoDB (corrections)"
+            : "Saved the correction."
         );
         void loadLiveData();
       } catch (err) {
@@ -535,14 +535,14 @@ export function CategoryProductsView() {
       setProducts((prev) => prev.map((item) => (item.id === productId ? reviewed(item) : item)));
     }
     if (!liveMode) {
-      showToast("Saved correction to audit state");
+      showToast("Saved the correction.");
     }
   };
 
   // "Confirm AI" in the review queue: the reading was right, so its item becomes "Đã xác nhận".
   const confirmQueueItem = async (det: ApiReviewQueueItem) => {
     if (!hasGroup("field_team", "team_admin")) {
-      showToast("Only field_team or team_admin can confirm review items.");
+      showToast("Your account cannot confirm readings.");
       return;
     }
     try {
@@ -581,8 +581,8 @@ export function CategoryProductsView() {
             </h1>
             <p className="mt-[4px] text-[12px] font-normal text-[#6B7280]">
               {liveMode
-                ? `Live AWS Singapore backend · ${products.length} SKUs synced (UTC+7)`
-                : "Sign in with an approved account to load live products (UTC+7)"}
+                ? `${products.length} ${products.length === 1 ? "product" : "products"} · times are in UTC+7`
+                : "Products appear once your account is approved."}
             </p>
           </div>
 
@@ -732,8 +732,8 @@ export function CategoryProductsView() {
               {filteredProducts.length === 0 ? (
                 <div className="flex h-[140px] items-center justify-center rounded-[10px] border border-[#EFF0F6] bg-white text-[13px] text-[#6B7280]">
                   {liveMode
-                    ? "No products match the current search and filter criteria."
-                    : "Sign in with an approved account to load live products."}
+                    ? "No products match the search and the filters."
+                    : "Products appear once your account is approved."}
                 </div>
               ) : (
                 groups.map((group) => (

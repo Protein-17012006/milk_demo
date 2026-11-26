@@ -134,12 +134,12 @@ test("alert accuracy says how many were right, and the unsure ones apart", () =>
 
 test("alert accuracy below 10 says not enough samples, and asks only those who can confirm", () => {
   const blocked = { value: null, blocked_reason: "few_verified" as const, n: 3, unsure: 0 };
-  assert.equal(alertAccuracyText(blocked, true), "Not enough samples (n = 3) · confirm 7 more alerts to see how often they are right");
-  assert.equal(alertAccuracyText(blocked, false), "Not enough samples (n = 3)");
-  assert.equal(alertAccuracyText(blocked), "Not enough samples (n = 3)");
+  assert.equal(alertAccuracyText(blocked, true), "Too few confirmed alerts to rate them (3 so far) · confirm 7 more alerts to see how often they are right");
+  assert.equal(alertAccuracyText(blocked, false), "Too few confirmed alerts to rate them (3 so far)");
+  assert.equal(alertAccuracyText(blocked), "Too few confirmed alerts to rate them (3 so far)");
   assert.equal(
     alertAccuracyText({ value: null, blocked_reason: "few_verified", n: 9, unsure: 2 }, true),
-    "Not enough samples (n = 9) · confirm 1 more alert to see how often they are right (2 unsure)"
+    "Too few confirmed alerts to rate them (9 so far) · confirm 1 more alert to see how often they are right (2 unsure)"
   );
   assert.equal(alertAccuracyText(undefined), null);
 });

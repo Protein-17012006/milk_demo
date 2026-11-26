@@ -122,9 +122,7 @@ export function SettingsView() {
               Settings
             </h1>
             <p className="mt-[4px] text-[12px] font-normal text-[#6B7280]">
-              {liveSynced
-                ? "Synced with AWS Cognito & DynamoDB (Phase 1 configuration)"
-                : "Account identity, user preferences, inference rules, and store directory"}
+              Your account, the stores and the shelf plan.
             </p>
           </div>
         </header>
@@ -132,12 +130,12 @@ export function SettingsView() {
         {loading && (
           <div className="mt-5 flex items-center gap-2 text-[13px] text-[#6B7280]">
             <Loader2 className="h-4 w-4 animate-spin text-[#EE730A]" />
-            <span>Loading settings from AWS...</span>
+            <span>Loading settings…</span>
           </div>
         )}
 
         <div className="mt-5 space-y-5">
-          {/* Section 1: Account & Cognito Groups (Read-only) */}
+          {/* Section 1: the account (read-only) */}
           <section className="rounded-[14px] border border-[#EFF0F6] bg-white p-6">
             <div className="flex flex-wrap items-center gap-4 border-b border-[#EFF0F6] pb-4">
               <div className="flex h-[48px] w-[48px] items-center justify-center rounded-[12px] border border-[#EFF0F6] bg-[#FAFAFA]">
@@ -151,12 +149,8 @@ export function SettingsView() {
               </div>
               <div className="min-w-0 flex-1">
                 <h2 className="text-[15px] font-semibold text-[#111827]">
-                  Account &amp; Cognito Role
+                  Account
                 </h2>
-                <p className="mt-0.5 text-[12.5px] text-[#6B7280]">
-                  Managed centrally via Amazon Cognito User Pool + TOTP MFA
-                  (single client: Datagent).
-                </p>
               </div>
               <span className="inline-flex items-center gap-1 rounded-full bg-[#F3F4F6] px-2.5 py-1 text-[11px] font-medium text-[#4B5563]">
                 <Lock className="h-3 w-3" />
@@ -167,7 +161,7 @@ export function SettingsView() {
             <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <p className="text-[12px] font-medium text-[#6B7280]">
-                  Cognito Email
+                  Email
                 </p>
                 <p className="mt-1 rounded-[8px] border border-[#EFF0F6] bg-[#F9FAFB] px-3 py-2 text-[13.5px] font-medium text-[#111827]">
                   {user?.email || "Not signed in"}
@@ -175,7 +169,7 @@ export function SettingsView() {
               </div>
               <div>
                 <p className="text-[12px] font-medium text-[#6B7280]">
-                  Assigned Cognito Groups
+                  Groups
                 </p>
                 <div className="mt-1 flex min-h-[38px] flex-wrap items-center gap-1.5 rounded-[8px] border border-[#EFF0F6] bg-[#F9FAFB] px-3 py-1.5">
                   {user && user.groups.length > 0 ? (
@@ -189,7 +183,7 @@ export function SettingsView() {
                     ))
                   ) : (
                     <span className="text-[13px] text-[#6B7280]">
-                      {user ? "Pending team_admin assignment" : "—"}
+                      {user ? "Waiting for approval" : "—"}
                     </span>
                   )}
                 </div>
@@ -215,8 +209,7 @@ export function SettingsView() {
                 {timezoneLabel}
               </p>
               <p className="mt-2 text-[11.5px] text-[#6B7280]">
-                Standard ISO 8601 UTC+7 across all captures and CSV exports (Data
-                Dictionary).
+                Every time on this site and in the CSV files is in UTC+7.
               </p>
             </section>
 
@@ -233,11 +226,11 @@ export function SettingsView() {
                 </span>
               </div>
               <p className="mt-3 rounded-[8px] border border-[#EFF0F6] bg-[#F9FAFB] px-3 py-2 font-mono text-[14px] font-semibold text-[#111827]">
-                {flagThreshold.toFixed(2)} (MILK_FLAG_THRESHOLD)
+                {flagThreshold.toFixed(2)}
               </p>
               <p className="mt-2 text-[11.5px] text-[#6B7280]">
-                Rows below 0.70 raw average confidence or with{" "}
-                <code>sku_id = NULL</code> are flagged for review.
+                A reading with confidence under {flagThreshold.toFixed(2)}, or one that matched no SKU, is flagged
+                for review.
               </p>
             </section>
           </div>
@@ -252,8 +245,7 @@ export function SettingsView() {
                     Monitored Stores ({stores.length})
                   </h2>
                   <p className="text-[12.5px] text-[#6B7280]">
-                    Loaded from <code>store_list</code>; <code>team_admin</code>{" "}
-                    can import updated store JSON files.
+                    The stores this site monitors.
                   </p>
                 </div>
               </div>
@@ -295,7 +287,7 @@ export function SettingsView() {
             <div className="mt-4 divide-y divide-[#EFF0F6]">
               {stores.length === 0 && (
                 <p className="py-3 text-[12.5px] text-[#6B7280]">
-                  Sign in with an approved account to load the store list.
+                  The stores appear once your account is approved.
                 </p>
               )}
               {stores.map((st) => (

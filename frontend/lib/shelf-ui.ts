@@ -111,7 +111,7 @@ export function coverageText(c: ApiCoverage): string {
 }
 
 /** Head line of Recent Shelf Activities: how often the alerts the team checked were right. Null without the
- * number (an older backend). Below 10 confirmed events it says "Not enough samples" and, for those who can
+ * number (an older backend). Below 10 confirmed events it says there are too few and, for those who can
  * confirm, how many more are needed; never a percentage. */
 export function alertAccuracyText(
   a: (Partial<ApiAlertAccuracy> & { n: number }) | null | undefined,
@@ -124,7 +124,7 @@ export function alertAccuracyText(
     const ask = canConfirm
       ? ` · confirm ${more} more ${more === 1 ? "alert" : "alerts"} to see how often they are right`
       : "";
-    return `Not enough samples (n = ${a.n})${ask}${unsure}`;
+    return `Too few confirmed alerts to rate them (${a.n} so far)${ask}${unsure}`;
   }
   return `Alerts confirmed right: ${Math.round(a.value * a.n)} of ${a.n}${unsure}`;
 }

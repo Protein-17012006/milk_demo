@@ -15,6 +15,8 @@ interface FilterBarProps {
   store: string;
   category: CategoryOption;
   storeOptions?: string[];
+  /** False when there is a single store: a filter with one choice filters nothing. */
+  showStore: boolean;
   onTimeframeChange: (value: TimeframeOption) => void;
   onStoreChange: (value: string) => void;
   onCategoryChange: (value: CategoryOption) => void;
@@ -119,24 +121,27 @@ export function FilterBar({
   store,
   category,
   storeOptions,
+  showStore,
   onTimeframeChange,
   onStoreChange,
   onCategoryChange,
 }: FilterBarProps) {
   return (
-    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+    <div className={`grid grid-cols-1 gap-3 ${showStore ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
       <FilterDropdown
         label="Timeframe"
         value={timeframe}
         options={TIMEFRAME_OPTIONS}
         onChange={onTimeframeChange}
       />
-      <FilterDropdown
-        label="Store"
-        value={store}
-        options={storeOptions && storeOptions.length > 0 ? storeOptions : [ALL_STORES_LABEL]}
-        onChange={onStoreChange}
-      />
+      {showStore && (
+        <FilterDropdown
+          label="Store"
+          value={store}
+          options={storeOptions && storeOptions.length > 0 ? storeOptions : [ALL_STORES_LABEL]}
+          onChange={onStoreChange}
+        />
+      )}
       <FilterDropdown
         label="Category"
         value={category}

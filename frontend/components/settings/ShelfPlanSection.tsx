@@ -9,7 +9,7 @@ const ERRORS: Record<string, string> = {
   INVALID_HOURS: "Opening hours must be HH:MM, with closing after opening.",
   UNKNOWN_SKU: "One of the chosen SKUs is not in the SKU Master.",
   INVALID_SKUS: "The SKU list could not be read.",
-  FORBIDDEN: "Only team_admin can change the shelf plan.",
+  FORBIDDEN: "Only an administrator can change the shelf plan.",
 };
 
 function StorePlan({
@@ -92,7 +92,7 @@ function StorePlan({
         {plan === null
           ? "Loading…"
           : plan.source === "suggested"
-            ? "Automatic until a team_admin saves this list: the SKUs seen clearly in the last 7 days."
+            ? "Automatic until an administrator saves this list: the SKUs seen clearly in the last 7 days."
             : `Saved by ${plan.updated_by ?? "—"} on ${plan.updated_at?.slice(0, 16).replace("T", " ") ?? "—"}.`}
         {plan && !plan.open_time && " Opening hours are not set, so shelf numbers are off for this store."}
       </p>
@@ -169,7 +169,7 @@ function StorePlan({
           </button>
         </div>
       ) : (
-        <p className="mt-4 text-[12px] text-[#6B7280]">Only team_admin can change the shelf plan.</p>
+        <p className="mt-4 text-[12px] text-[#6B7280]">Only an administrator can change the shelf plan.</p>
       )}
     </section>
   );

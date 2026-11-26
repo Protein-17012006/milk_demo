@@ -39,7 +39,7 @@ export const HEALTH_METRICS: HealthMetricInfo[] = [
       "Share of readings flagged that hour. A reading is one SKU in one capture; it is flagged when its confidence " +
       "is under 0.70 or its boxes matched no SKU.",
     read:
-      "Lower is better. Flagged readings go to the review queue on Products. Near 100% means the model doubts almost " +
+      "Lower is better. Flagged readings go to the review queue on Category. Near 100% means the model doubts almost " +
       "everything it sees, as when the light is off or the shelf holds goods it does not know.",
     percent: true,
     format: (v) => `${Math.round(v)}%`,

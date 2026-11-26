@@ -29,6 +29,7 @@ import {
   type TimeframeOption,
 } from "@/lib/reports-ui";
 import { alertAccuracyByTypeText, alertAccuracyText, blockedText, displayBanner } from "@/lib/shelf-ui";
+import { showStoreFilter } from "@/lib/products-ui";
 
 const TREND_METRICS: TrendMetric[] = ["total_stock", "oos", "accuracy", "restock_volume", "osa"];
 type Trends = Record<TrendMetric, ApiTrendPoint[] | null>;
@@ -121,8 +122,7 @@ export function ReportsDashboard() {
           <h1 className="text-[22px] font-normal leading-tight text-black">Dashboard</h1>
           {kpi && (
             <p className="mt-1 text-[12px] text-[#6B7280]">
-              Live AWS data, {kpi.captures_count} captures synced. Shelf numbers are worked out every 5 minutes from
-              the store&apos;s checks in opening hours.
+              Shelf numbers are worked out every 5 minutes from the store&apos;s checks in opening hours.
             </p>
           )}
         </div>
@@ -142,6 +142,7 @@ export function ReportsDashboard() {
           store={store}
           category={category}
           storeOptions={storeOptions}
+          showStore={showStoreFilter(stores?.length ?? 0)}
           onTimeframeChange={setTimeframe}
           onStoreChange={setStore}
           onCategoryChange={setCategory}

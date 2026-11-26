@@ -20,7 +20,7 @@ test("badge labels", () => {
   assert.equal(badgeLabel("high"), "High");
   assert.equal(badgeLabel("medium"), "Medium");
   assert.equal(badgeLabel("low"), "Low");
-  assert.equal(badgeLabel("insufficient"), "Not enough samples");
+  assert.equal(badgeLabel("insufficient"), "Not rated");
 });
 
 test("the details say what was found right, how many cans and frames, and what it is often read as", () => {
@@ -34,11 +34,11 @@ test("nothing is said of a confusion that is not there, and singular counts read
 test("not enough samples gives the counts and no percent", () => {
   assert.equal(
     reliabilityText(rel({ badge: "insufficient", found_right: 0.9, true_units: 8, frames: 3 })),
-    "Not enough samples (n = 8 cans, 3 frames)"
+    "Not rated yet: too few checked frames (8 cans, 3 frames)"
   );
   assert.equal(
     reliabilityText(rel({ badge: "insufficient", found_right: null, true_units: 0, frames: 0, confused_as: null })),
-    "Not enough samples (n = 0 cans, 0 frames)"
+    "Not rated yet: too few checked frames (0 cans, 0 frames)"
   );
 });
 
