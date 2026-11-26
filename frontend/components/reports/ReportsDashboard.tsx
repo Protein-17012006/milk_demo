@@ -31,9 +31,10 @@ import { alertAccuracyByTypeText, alertAccuracyText, blockedText, displayBanner 
 import { showStoreFilter } from "@/lib/products-ui";
 import { shelfNowRows, shelfNowSummary, updatedText } from "@/lib/shelf-now";
 
-const TREND_METRICS: TrendMetric[] = ["total_stock", "oos", "accuracy", "restock_volume", "osa"];
-type Trends = Record<TrendMetric, ApiTrendPoint[] | null>;
-const NO_TRENDS: Trends = { total_stock: null, oos: null, accuracy: null, restock_volume: null, osa: null };
+// osa feeds the availability card's sparkline; the model's accuracy by day is on the Model page, not asked for here.
+const TREND_METRICS = ["total_stock", "oos", "restock_volume", "osa"] as const satisfies readonly TrendMetric[];
+type Trends = Record<(typeof TREND_METRICS)[number], ApiTrendPoint[] | null>;
+const NO_TRENDS: Trends = { total_stock: null, oos: null, restock_volume: null, osa: null };
 // A signed photo link lives 15 minutes: a product list older than this is read again before the photo opens.
 const PHOTO_LINK_FRESH_MS = 600_000;
 
@@ -258,7 +259,6 @@ export function ReportsDashboard() {
             trends={{
               total_stock: trends.total_stock,
               oos: trends.oos,
-              accuracy: trends.accuracy,
               restock_volume: trends.restock_volume,
             }}
             blockedText={shelfBlocked}

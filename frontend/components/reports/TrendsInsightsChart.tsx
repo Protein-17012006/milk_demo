@@ -2,11 +2,12 @@
 
 import React, { useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Box, CircleDollarSign, Filter, Repeat } from "lucide-react";
+import { Box, CircleDollarSign, Repeat } from "lucide-react";
 import type { ApiTrendPoint } from "@/lib/api";
 import { trendRows } from "@/lib/trend-rows";
 
-export type TrendTab = "total_stock" | "oos" | "accuracy" | "restock_volume";
+// The model's accuracy by day is a number for the team: it is on the Model page ("By day"), not here.
+export type TrendTab = "total_stock" | "oos" | "restock_volume";
 
 const METRIC_TABS: {
   key: TrendTab;
@@ -26,13 +27,6 @@ const METRIC_TABS: {
     label: "Out-of-Stock (OOS)",
     icon: CircleDollarSign,
     explain: "Times an expected SKU ran out: 0 units for two checks in a row (10 minutes).",
-  },
-  {
-    key: "accuracy",
-    label: "Detection Accuracy",
-    icon: Filter,
-    explain: "Share of boxes the model named right, from frames the team labelled on the Model page (KPI 2).",
-    unit: "%",
   },
   {
     key: "restock_volume",
@@ -57,10 +51,8 @@ export function TrendsInsightsChart({ trends, blockedText }: TrendsInsightsChart
   const hasData = rows.some((r) => r.value !== null);
   const emptyText =
     points === null
-      ? "Sign in with an approved account to see trends."
-      : active === "accuracy"
-        ? "No labelled frames in this period. Label frames on the Model page."
-        : (blockedText ?? "Nothing counted in this period yet.");
+      ? "Trends appear once your account is approved."
+      : (blockedText ?? "Nothing counted in this period yet.");
 
   return (
     <div className="flex h-[440px] flex-col rounded-[18px] border border-[#EFF0F6] bg-white px-[24px] pt-[22px] pb-[18px]">

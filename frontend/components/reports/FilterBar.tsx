@@ -127,6 +127,7 @@ export function FilterBar({
   onCategoryChange,
 }: FilterBarProps) {
   return (
+    <>
     <div className={`grid grid-cols-1 gap-3 ${showStore ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
       <FilterDropdown
         label="Timeframe"
@@ -149,5 +150,11 @@ export function FilterBar({
         onChange={onCategoryChange}
       />
     </div>
+    {timeframe.includes("cycle") && (
+      <p data-cycle-note className="mt-[6px] px-[6px] text-[11.5px] leading-[1.4] text-[#9CA3AF]">
+        One cycle is two weeks, the period Datagent measures over.
+      </p>
+    )}
+    </>
   );
 }
