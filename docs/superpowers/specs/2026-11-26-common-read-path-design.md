@@ -1,6 +1,6 @@
 # Một đường đọc chung cho mọi nhóm hàng: tìm → xác nhận → gộp cửa sổ — thiết kế
 
-Ngày 26/11/2026. Trạng thái: chờ hoang duyệt. Nhánh: `feat/common-read-path`, tách từ `feat/auto-label-part2`
+Ngày 26/11/2026. Trạng thái: hoang duyệt ngày 26/11 ("ok duyệt thiết kế"). Nhánh: `feat/common-read-path`, tách từ `feat/auto-label-part2`
 (63caa5a, PR #15 đang mở).
 
 **Quan hệ với các thiết kế khác:**
