@@ -3,6 +3,7 @@
 import { AWS_CONFIG } from "./config";
 import { retryRead } from "./retry";
 import { dashboardQuery, type DashboardQuery } from "./shelf-ui";
+import type { ExportKind, ExportRange } from "./export-ui";
 
 export class ApiError extends Error {
   status: number;
@@ -202,6 +203,17 @@ export interface ApiAlertAccuracy {
   unsure: number;
   by_type?: Record<string, Record<ShelfVerdict, number>>;
   blocked_reason: "few_verified" | null;
+}
+
+/** A CSV export written to storage: `url` downloads it for `expires_in` seconds. rows does not count the header. */
+export interface ApiExportLink {
+  url: string;
+  filename: string;
+  rows: number;
+  bytes: number;
+  from: string | null;
+  to: string | null;
+  expires_in: number;
 }
 
 /** Links (valid 15 minutes) to the two photos of a shelf event; null for a photo that was not kept. */
@@ -665,11 +677,12 @@ export function createApiClient(getIdToken: TokenGetter) {
         body: JSON.stringify(payload),
       }),
 
-    exportCvOutputCsv: () =>
-      requestWithAuth("/exports/cv-output.csv", getIdToken, {}, true) as Promise<string>,
-
-    exportCaptureLogCsv: () =>
-      requestWithAuth("/exports/capture-log.csv", getIdToken, {}, true) as Promise<string>,
+    // The backend writes the file and answers with a link: an answer over 6 MB cannot come back directly.
+    exportCsvLink: (kind: ExportKind, range: ExportRange) =>
+      requestWithAuth(
+        `/exports/${kind}.csv?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}&link=1`,
+        getIdToken
+      ) as Promise<ApiExportLink>,
 
     // oldRule: only the done scoring frames labelled under an older rule, for "Relabel them"
     listAudits: (status?: AuditStatus, days = 7, options: { oldRule?: boolean } = {}) => {

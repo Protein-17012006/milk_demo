@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Download } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import {
   createApiClient,
@@ -13,6 +12,7 @@ import {
   type ApiTrendsResponse,
   type TrendMetric,
 } from "@/lib/api";
+import { ExportCsvButton } from "@/components/common/ExportCsvButton";
 import { FilterBar } from "./FilterBar";
 import { KpiGrid } from "./KpiGrid";
 import { MonthlyStockChart } from "./MonthlyStockChart";
@@ -112,45 +112,6 @@ export function ReportsDashboard() {
     [api, query]
   );
 
-  const handleDownloadCsv = async () => {
-    if (isApproved) {
-      try {
-        const csvText = await api.exportCaptureLogCsv();
-        const blob = new Blob([csvText], { type: "text/csv;charset=utf-8;" });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = "capture-log.csv";
-        link.click();
-        URL.revokeObjectURL(url);
-        return;
-      } catch {
-        // fall through to the summary export
-      }
-    }
-    const show = (v: number | string | null, suffix = "") => (v === null ? "—" : `${v}${suffix}`);
-    const rows = [
-      ["Metric", "Value"],
-      ["Timeframe", timeframe],
-      ["Store", store],
-      ["Category", category],
-      ["Active Stores Monitored", kpis.activeStores === null ? "—" : `${kpis.activeStores}/${kpis.totalStores ?? "—"}`],
-      ["Total On-Shelf Units (now)", show(kpis.totalOnShelfUnits)],
-      ["Avg. Inference Time", show(kpis.avgInferenceTime)],
-      ["On-Shelf Availability (OSA)", show(kpis.osaPercent, "%")],
-      ["Top 50 SKU Accuracy", show(kpis.top50SkuAccuracy, "%")],
-      ["Restock Rate (vs Last Cycle)", show(kpis.restockRateDelta)],
-    ];
-    const csv = rows.map((r) => r.map((v) => `"${v}"`).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `reports-${days}-days.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
   const displayLine = displayBanner(kpi?.displays ?? []);
 
   return (
@@ -165,14 +126,14 @@ export function ReportsDashboard() {
             </p>
           )}
         </div>
-        <button
-          type="button"
-          onClick={handleDownloadCsv}
-          className="inline-flex items-center gap-[6px] rounded-[8px] px-2.5 py-1.5 text-[13px] font-semibold text-[#4D4D4D] hover:bg-black/[0.04] hover:text-black transition-colors cursor-pointer"
-        >
-          <Download className="h-[16px] w-[16px]" strokeWidth={2} />
-          <span>Download</span>
-        </button>
+        {isApproved && (
+          <ExportCsvButton
+            kind="capture-log"
+            label="Download capture log"
+            request={api.exportCsvLink}
+            className="inline-flex items-center gap-[6px] whitespace-nowrap rounded-[8px] px-2.5 py-1.5 text-[13px] font-semibold text-[#4D4D4D] hover:bg-black/[0.04] hover:text-black transition-colors cursor-pointer"
+          />
+        )}
       </header>
 
       <section aria-label="Report filters" className="mt-[16px]">

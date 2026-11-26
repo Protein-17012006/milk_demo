@@ -6,7 +6,6 @@ import {
   ArrowUp,
   Check,
   ChevronDown,
-  Download,
   Search,
   Upload,
   X,
@@ -33,6 +32,7 @@ import {
   type SortOption,
   type StatusFilterOption,
 } from "@/lib/products-ui";
+import { ExportCsvButton } from "@/components/common/ExportCsvButton";
 import { ProductDetailsModal } from "./ProductDetailsModal";
 import { ProductRow } from "./ProductRow";
 import { ProductGroupRow } from "./ProductGroupRow";
@@ -436,88 +436,6 @@ export function CategoryProductsView() {
     });
   };
 
-  const handleExportCsv = async (rows?: SkuProduct[]) => {
-    // When authenticated in live mode and exporting full table, download directly from AWS API
-    if (liveMode && !rows) {
-      try {
-        const api = createApiClient(getIdToken);
-        const csvText = await api.exportCvOutputCsv();
-        const blob = new Blob([csvText], { type: "text/csv;charset=utf-8;" });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = "cv-output.csv";
-        link.click();
-        URL.revokeObjectURL(url);
-        showToast("Downloaded live CV Output CSV (16 cols, UTF-8 BOM) from AWS");
-        return;
-      } catch (err) {
-        showToast(
-          err instanceof Error ? err.message : "Failed to export CSV from AWS"
-        );
-        return;
-      }
-    }
-    const targetRows = rows ?? filteredProducts;
-    // Exact 16-column Datagent CV Output format with UTF-8 BOM for Vietnamese Excel support
-    const header = [
-      "reading_id",
-      "capture_id",
-      "store_id",
-      "camera_id",
-      "capture_timestamp",
-      "capture_source",
-      "image_filename",
-      "sku_id",
-      "sku_name",
-      "unit_count",
-      "confidence_score",
-      "detection_method",
-      "bounding_box",
-      "is_flagged",
-      "flag_reason",
-      "processing_time_ms",
-    ];
-    const body = targetRows.map((p) => {
-      const cv = p.cvOutput;
-      return [
-        cv.reading_id,
-        cv.capture_id,
-        cv.store_id,
-        cv.camera_id,
-        cv.capture_timestamp,
-        cv.capture_source,
-        cv.image_filename,
-        cv.sku_id ?? "",
-        cv.sku_name ?? "",
-        cv.unit_count,
-        cv.confidence_score.toFixed(2),
-        cv.detection_method,
-        JSON.stringify(cv.bounding_box),
-        cv.is_flagged ? "TRUE" : "FALSE",
-        cv.flag_reason,
-        cv.processing_time_ms,
-      ];
-    });
-    const csv =
-      "\uFEFF" +
-      [header, ...body]
-        .map((r) =>
-          r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")
-        )
-        .join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "cv-output.csv";
-    link.click();
-    URL.revokeObjectURL(url);
-    showToast(
-      `Exported ${targetRows.length} CV Output rows (16 cols, UTF-8 BOM)`
-    );
-  };
-
   // Fetches GET /products/{sku} into the open card; returns the reading id it now shows (null on failure).
   const loadProductDetail = async (item: SkuProduct): Promise<string | null> => {
     if (!liveMode) return null;
@@ -717,14 +635,14 @@ export function CategoryProductsView() {
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={() => handleExportCsv()}
-            className="flex h-[36px] items-center gap-[8px] rounded-[8px] border border-[#E5E7EB] bg-white pl-[14px] pr-[16px] text-[13px] font-medium text-[#111827] hover:bg-[#F9FAFB] hover:border-[#D1D5DB] transition-colors cursor-pointer"
-          >
-            <Download className="h-[15px] w-[15px]" strokeWidth={1.9} />
-            <span>Export CV Output</span>
-          </button>
+          {liveMode && (
+            <ExportCsvButton
+              kind="cv-output"
+              label="Export CV Output"
+              request={(kind, range) => createApiClient(getIdToken).exportCsvLink(kind, range)}
+              className="flex h-[36px] items-center gap-[8px] rounded-[8px] border border-[#E5E7EB] bg-white pl-[14px] pr-[16px] text-[13px] font-medium text-[#111827] hover:bg-[#F9FAFB] hover:border-[#D1D5DB] transition-colors cursor-pointer"
+            />
+          )}
         </header>
 
         {/* Toolbar */}
@@ -917,7 +835,7 @@ export function CategoryProductsView() {
                             navigator.clipboard?.writeText(item.skuCode);
                             showToast(`Copied ${item.skuCode}`);
                           }}
-                          onExportRow={() => handleExportCsv([item])}
+                          onExportRow={() => undefined}
                         />
                       ))}
                   </React.Fragment>
