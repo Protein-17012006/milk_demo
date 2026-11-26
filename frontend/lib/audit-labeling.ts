@@ -130,3 +130,50 @@ export function toPayload(
     misses_checked: true,
   };
 }
+
+// --- Faster labelling: number keys, one button for the boxes that are right, and moving to the next box ---
+
+/** A box as the labeller lists it: a ? box (needs_flavour) has no suggestion to call right. */
+export interface LabelBox extends AuditBox {
+  needs_flavour?: boolean;
+}
+
+const VERDICT_KEYS: Record<string, Verdict> = { "1": "correct", "2": "wrong_sku", "3": "not_product", "4": "out_of_scope" };
+
+/** The verdict a key gives the highlighted box: 1 Right, 2 Wrong SKU, 3 Not our SKU, 4 Out of scope; null for any
+ * other key, and for 1 on a ? box. */
+export function verdictForKey(key: string, needsFlavour = false): Verdict | null {
+  const verdict = VERDICT_KEYS[key] ?? null;
+  return needsFlavour && verdict === "correct" ? null : verdict;
+}
+
+const unjudgedWithSuggestion = (box: LabelBox, labels: Record<number, BoxLabel>) =>
+  !box.needs_flavour && !labels[box.box_id]?.verdict;
+
+/** How many boxes "mark the rest right" would mark: unjudged boxes that have a suggestion. */
+export function restCount(aiBoxes: LabelBox[], labels: Record<number, BoxLabel>): number {
+  return aiBoxes.filter((box) => unjudgedWithSuggestion(box, labels)).length;
+}
+
+/** The labels with those boxes marked right; judged boxes and ? boxes are left as they are. */
+export function markRestCorrect(aiBoxes: LabelBox[], labels: Record<number, BoxLabel>): Record<number, BoxLabel> {
+  const next = { ...labels };
+  for (const box of aiBoxes) {
+    if (unjudgedWithSuggestion(box, labels)) next[box.box_id] = { verdict: "correct", trueSku: null };
+  }
+  return next;
+}
+
+/** The next box without a verdict after box `after` in list order, wrapping round; null when all are judged. */
+export function nextUnjudged(
+  aiBoxes: AuditBox[],
+  labels: Record<number, BoxLabel>,
+  after: number | null
+): number | null {
+  const start = after === null ? -1 : aiBoxes.findIndex((box) => box.box_id === after);
+  for (let step = 1; step <= aiBoxes.length; step++) {
+    const box = aiBoxes[(start + step) % aiBoxes.length];
+    if (!labels[box.box_id]?.verdict) return box.box_id;
+  }
+  return null;
+}

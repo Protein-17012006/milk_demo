@@ -146,3 +146,54 @@ test("a review frame saves with its pre-filled Right boxes and every ? box decid
   assert.equal(canSave(boxes, labels, true), true);
   assert.equal(canSave(boxes, { 2: labels[2] }, true), false);
 });
+
+// --- faster labelling (plan 2026-11-27-website-optimization-batch3, Task 2) ---
+import { markRestCorrect, nextUnjudged, restCount, verdictForKey } from "./audit-labeling.ts";
+
+test("keys 1 to 4 give the four verdicts; a ? box has no Right", () => {
+  assert.equal(verdictForKey("1"), "correct");
+  assert.equal(verdictForKey("2"), "wrong_sku");
+  assert.equal(verdictForKey("3"), "not_product");
+  assert.equal(verdictForKey("4"), "out_of_scope");
+  assert.equal(verdictForKey("5"), null);
+  assert.equal(verdictForKey("Enter"), null);
+  assert.equal(verdictForKey("1", true), null);
+  assert.equal(verdictForKey("2", true), "wrong_sku");
+});
+
+test("marking the rest right leaves judged boxes and ? boxes alone", () => {
+  const boxes = [
+    { box_id: 1, sku_id: "a" },
+    { box_id: 2, sku_id: "a" },
+    { box_id: 3, sku_id: null, needs_flavour: true },
+    { box_id: 4, sku_id: "b" },
+  ];
+  const labels: Record<number, BoxLabel> = { 2: { verdict: "wrong_sku", trueSku: "b" } };
+  assert.equal(restCount(boxes, labels), 2);
+  const marked = markRestCorrect(boxes, labels);
+  assert.deepEqual(marked, {
+    1: { verdict: "correct", trueSku: null },
+    2: { verdict: "wrong_sku", trueSku: "b" },
+    4: { verdict: "correct", trueSku: null },
+  });
+  assert.equal(restCount(boxes, marked), 0);
+  assert.equal(canSave(boxes, marked, true), false); // the ? box still needs its flavour
+});
+
+test("the next box to judge follows the list and wraps round", () => {
+  const boxes = [
+    { box_id: 1, sku_id: "a" },
+    { box_id: 2, sku_id: "a" },
+    { box_id: 3, sku_id: "b" },
+  ];
+  const labels: Record<number, BoxLabel> = { 2: { verdict: "correct", trueSku: null } };
+  assert.equal(nextUnjudged(boxes, labels, null), 1);
+  assert.equal(nextUnjudged(boxes, labels, 1), 3);
+  assert.equal(nextUnjudged(boxes, labels, 3), 1);
+  const all: Record<number, BoxLabel> = {
+    ...labels,
+    1: { verdict: "correct", trueSku: null },
+    3: { verdict: "not_product", trueSku: null },
+  };
+  assert.equal(nextUnjudged(boxes, all, 1), null);
+});
