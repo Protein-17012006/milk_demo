@@ -12,6 +12,7 @@ import {
   type TrendMetric,
 } from "@/lib/api";
 import { ExportCsvButton } from "@/components/common/ExportCsvButton";
+import { ShelfFrameViewer } from "@/components/common/ShelfFrameViewer";
 import { FilterBar } from "./FilterBar";
 import { KpiGrid } from "./KpiGrid";
 import { ShelfNowTable } from "./ShelfNowTable";
@@ -33,6 +34,8 @@ import { shelfNowRows, shelfNowSummary, updatedText } from "@/lib/shelf-now";
 const TREND_METRICS: TrendMetric[] = ["total_stock", "oos", "accuracy", "restock_volume", "osa"];
 type Trends = Record<TrendMetric, ApiTrendPoint[] | null>;
 const NO_TRENDS: Trends = { total_stock: null, oos: null, accuracy: null, restock_volume: null, osa: null };
+// A signed photo link lives 15 minutes: a product list older than this is read again before the photo opens.
+const PHOTO_LINK_FRESH_MS = 600_000;
 
 /** The product list as the Dashboard holds it: the answer, when it was read, and the line that says how fresh the
  * numbers are (worked out when the answer arrives, so drawing the page never reads the clock). */
@@ -57,6 +60,9 @@ export function ReportsDashboard() {
   const [liveProducts, setLiveProducts] = useState<LoadedProducts | null>(null);
   const [productsFailed, setProductsFailed] = useState(false);
   const [liveTrends, setLiveTrends] = useState<Trends>(NO_TRENDS);
+  const [photoOpen, setPhotoOpen] = useState(false);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoFailed, setPhotoFailed] = useState(false);
 
   const api = useMemo(() => createApiClient(getIdToken), [getIdToken]);
   const days = daysOf(timeframe);
@@ -139,6 +145,34 @@ export function ReportsDashboard() {
 
   const displayLine = displayBanner(kpi?.displays ?? []);
 
+  // The shelf photo: the newest capture's frame, which came with the product list (one store, one camera today).
+  const frame = products?.data.frames?.find((f) => f.frame_presigned_url) ?? null;
+  const photoReason = !products
+    ? null
+    : !frame
+      ? "No photo was stored for the latest reading."
+      : photoFailed
+        ? "The photo could not be loaded."
+        : null;
+  const openPhoto = async () => {
+    if (!products || !frame) return;
+    setPhotoFailed(false);
+    if (Date.now() - products.loadedAt > PHOTO_LINK_FRESH_MS) {
+      setPhotoBusy(true);
+      try {
+        const data = await api.getProducts({ category: query.category });
+        const now = new Date();
+        setLiveProducts({ data, loadedAt: now.getTime(), updated: updatedText(data.as_of, now) });
+      } catch {
+        setPhotoBusy(false);
+        setPhotoFailed(true);
+        return;
+      }
+      setPhotoBusy(false);
+    }
+    setPhotoOpen(true);
+  };
+
   return (
     <div className="mx-auto w-full px-4 pt-6 pb-8 sm:px-6 lg:px-7">
       {/* On a phone the button sits under the title, at the right, so its panel opens inside the screen. */}
@@ -208,7 +242,13 @@ export function ReportsDashboard() {
           />
         </div>
         <div className="order-1 xl:order-2 xl:col-span-7">
-          <ShelfNowTable rows={isApproved ? rows : []} failed={isApproved && productsFailed} />
+          <ShelfNowTable
+            rows={isApproved ? rows : []}
+            failed={isApproved && productsFailed}
+            onOpenPhoto={products ? () => void openPhoto() : undefined}
+            photoReason={photoReason}
+            photoBusy={photoBusy}
+          />
         </div>
       </section>
 
@@ -237,6 +277,17 @@ export function ReportsDashboard() {
           />
         </div>
       </section>
+
+      {photoOpen && frame && (
+        <ShelfFrameViewer
+          frame={frame}
+          onClose={() => setPhotoOpen(false)}
+          onImageError={() => {
+            setPhotoOpen(false);
+            setPhotoFailed(true);
+          }}
+        />
+      )}
     </div>
   );
 }
