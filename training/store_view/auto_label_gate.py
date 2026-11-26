@@ -10,9 +10,11 @@ whose box holds its centre (cans the machine accepted are matched before the oth
     coverage      truth rows (not ignore) matched by a can that is accepted, masked or sent to review
     review_share  segments that need a new review frame (after reusing decisions, design 5.4b), among segments not too
                   short to decide; without that list, segments with any can sent to review
-    reuse_right   reused decisions whose label is the truth's at that can, over reused cans in segments with a truth;
-                  counts.reuse_kinds splits the wrong ones (flavour_swap, flavour_where_unknown,
-                  flavour_where_no_can, no_flavour_where_flavour, out_of_scope_vs_not_product)
+    reuse_right   reused decisions that do not name a flavour the truth contradicts (another flavour, or no can
+                  there), over reused cans in segments with a truth (hoang, 26/11). A reused "no label" never teaches
+                  background (it masks), and a flavour where the truth says unknown (a half-hidden lid) is reported in
+                  counts.reuse_kinds, not counted wrong; reuse_kinds splits every mismatch (flavour_swap,
+                  flavour_where_no_can, flavour_where_unknown, no_flavour_where_flavour, out_of_scope_vs_not_product)
 
 simulate() plays the person with the truth: a can on a new review frame of a segment whose keyframe has a truth gets
 the truth's label at once, and later segments may reuse it; segments without a truth leave their cans waiting.
@@ -34,6 +36,7 @@ GATE1 = {
     "reuse_right": (">=", 0.99),
 }
 COVERED = ("accept", "review", "masked")
+WRONG_REUSE = ("flavour_swap", "flavour_where_no_can")  # a reused label the truth contradicts
 
 
 def _ratio(a: int, b: int) -> float | None:
@@ -168,7 +171,8 @@ def simulate(
             continue
         t = next(t for t in p["tracks"] if t.id == tid)
         kinds[reuse_kind(label, truth_label(truth[p["keyframe"]], box_at(p, t)))] += 1
-    checked, right = sum(kinds.values()), kinds["right"]
+    checked = sum(kinds.values())
+    right = checked - sum(kinds[k] for k in WRONG_REUSE)
     summary["reuse_right"] = _ratio(right, checked)
     summary["counts"].update(
         new_frames=len(r.new_frames),

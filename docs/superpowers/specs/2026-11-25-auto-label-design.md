@@ -253,7 +253,7 @@ Các ngưỡng 30%, 60% và 80% được chọn trên các đoạn phía train c
   - 8 lần: một keyframe vẽ dòng `ignore`, keyframe kia không vẽ gì;
   - 2 lần: lon Hot tầng dưới có mặt từ 06:40 ngày 25/11 (đã xem ảnh) nhưng đáp án 06:40 thiếu dòng của nó; luật mới chỉ che xám lon này;
   - 2 lần: nắp Sour Cream lúc 07:25 thấy rõ, lúc 09:35 và 11:05 bị gói kẹo che một nửa nên đáp án ghi `unknown`; vẫn là lon đó.
-- Cách chấm `reuse_right` cho trường hợp đáp án tự mâu thuẫn chờ hoang quyết.
+- **Cách chấm `reuse_right` mới**, hoang chọn ngày 26/11, xem 5.7. Kèm theo, đáp án keyframe 25/11 06:40 được thêm dòng lon Hot tầng dưới (`[975, 561, 67, 77]`, `lower`, đã xem ảnh). Bản sao lưu là `truth.json.bak-20261126` trên cả hai máy.
 
 **Hàng chờ thật ngày 26/11** (`store_eval\autolabel_train\queue.json`, kế hoạch Task 7):
 - Đầu vào là 22 đoạn ban ngày phía train, dùng kho ảnh eval.
@@ -329,7 +329,13 @@ Các ngưỡng 30%, 60% và 80% được chọn trên các đoạn phía train c
 - **Mô phỏng người:**
   - đoạn có keyframe trong đáp án: người quyết đúng như đáp án;
   - đoạn không có keyframe trong đáp án: không mô phỏng quyết định, chỉ đếm xem đoạn đó có cần frame review mới hay không.
-- **"Dùng lại đúng"** chấm trên các cặp lon được nối bởi luật 5.4b mà cả hai đoạn đều có keyframe trong đáp án. Đúng nghĩa là hai dòng đáp án ở hai đầu có cùng vị, hoặc cùng là nắp không rõ vị (`unknown` hoặc `ignore`).
+- **"Dùng lại đúng"** chấm trên các lon nhận lại quyết định trong những đoạn có keyframe trong đáp án.
+  - **Sai** chỉ khi quyết định nhận lại gán một vị mà đáp án ở lon đó nói khác: vị khác, hoặc chỗ đó không có lon.
+  - **Báo riêng, không tính sai:**
+    - nhận lại một vị mà đáp án ghi `unknown`, ví dụ nắp bị che một nửa;
+    - nhận lại "không nhãn" mà đáp án có lon (luật mới chỉ che xám, không dạy nền);
+    - "out of scope" đối với "không phải sản phẩm".
+  - hoang quyết định ngày 26/11. Cách chấm cũ (hai đầu cùng vị hoặc cùng không rõ) tính cả các chỗ đáp án tự mâu thuẫn giữa hai keyframe.
 - Các cặp keyframe phía train cũng được chấm để chọn τ. Đó chỉ là đo phép so khớp, không đưa đáp án vào kho ảnh hay làm box mẫu.
 
 Nếu độ đúng không đạt thì dời ngưỡng về phía "đưa người xem", không hạ ngưỡng của cổng.

@@ -150,3 +150,21 @@ def test_simulate_splits_reuse_by_kind():
     unknown = [{**ROW, "sku": "unknown"}]
     s = simulate([tracked("s1", "K1", YELLOW), tracked("s2", "K2", YELLOW)], {"K1": [ROW], "K2": unknown}, [], 0.95)
     assert s["counts"]["reuse_kinds"] == {"flavour_where_unknown": 1}
+
+
+def test_reuse_right_counts_only_a_flavour_the_truth_contradicts():
+    # hoang 26/11: a reused flavour where the truth says unknown (a half-hidden lid) is reported, not counted wrong
+    unknown = [{**ROW, "sku": "unknown"}]
+    s = simulate([tracked("s1", "K1", YELLOW), tracked("s2", "K2", YELLOW)], {"K1": [ROW], "K2": unknown}, [], 0.95)
+    assert s["reuse_right"] == 1.0 and s["counts"]["reuse_kinds"] == {"flavour_where_unknown": 1}
+
+
+def test_a_reused_flavour_where_the_truth_has_no_can_is_wrong():
+    s = simulate([tracked("s1", "K1", YELLOW), tracked("s2", "K2", YELLOW)], {"K1": [ROW], "K2": []}, [], 0.95)
+    assert s["reuse_right"] == 0.0 and s["counts"]["reuse_kinds"] == {"flavour_where_no_can": 1}
+
+
+def test_no_label_against_no_label_is_not_wrong():
+    ignore = [{**ROW, "sku": "unknown", "kind": "ignore"}]
+    s = simulate([tracked("s1", "K1", YELLOW), tracked("s2", "K2", YELLOW)], {"K1": [], "K2": ignore}, [], 0.95)
+    assert s["reuse_right"] == 1.0 and s["counts"]["reuse_kinds"] == {"out_of_scope_vs_not_product": 1}
