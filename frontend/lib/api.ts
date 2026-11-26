@@ -53,6 +53,10 @@ export interface ApiProduct {
   capture_timestamp: string | null;
   processing_time_ms: number;
   reliability?: ApiReliability; // older backends leave it out
+  // On the saved shelf plan of a store, or on the suggested one; and how its stock stands by the shelf rule
+  // (0 out, 1-2 low). null off the plan. Older backends leave both out.
+  in_shelf_plan?: boolean;
+  stock_status?: "OOS" | "LOW" | "IN_STOCK" | null;
 }
 
 export interface ApiProductsResponse {
@@ -62,6 +66,20 @@ export interface ApiProductsResponse {
   stores_total: number;
   flag_threshold: number;
   displays?: ApiDisplayStatus[]; // one per camera; older backends leave it out
+  as_of?: string | null; // the newest capture time among the stock rows (ISO, UTC+7)
+  frames?: ApiShelfFrame[]; // per camera, the frame the numbers were read from
+}
+
+/** The newest capture of one camera: a signed link (15 minutes) to its face-blurred frame, null when none was
+ * stored, and the boxes of each product counted in it, as [x, y, width, height] in frame pixels. */
+export interface ApiShelfFrame {
+  store_id: string | null;
+  camera_id: string;
+  capture_id: string;
+  capture_timestamp: string | null;
+  frame_presigned_url: string | null;
+  faces_blurred: number;
+  products: { sku_id: string; sku_name: string; boxes: [number, number, number, number][] }[];
 }
 
 /** Whether a camera sees the display cabinet. `since` is when the current state began (ISO, UTC+7). */
