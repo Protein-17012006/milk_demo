@@ -87,7 +87,12 @@ laptop.
 def test_th_confirm_setting(monkeypatch):
     monkeypatch.delenv("MILK_LONG_TH_CONFIRM", raising=False)
     assert _th_confirm() == "database"
-    for raw, want in (("", "database"), ("detector", "detector"), (" Detector\r", "detector"), ("DATABASE", "database")):
+    for raw, want in (
+        ("", "database"),
+        ("detector", "detector"),
+        (" Detector\r", "detector"),
+        ("DATABASE", "database"),
+    ):
         monkeypatch.setenv("MILK_LONG_TH_CONFIRM", raw)
         assert _th_confirm() == want
 
@@ -109,7 +114,10 @@ def test_only_merged_th_boxes_skip_the_database():
 def test_detector_confirm_keeps_a_th_box_the_database_rejects():
     assert decide("th_true_milk", 0.83, "unknown", {}, False, "detector") == ("TMP-MLK-TH-00", pytest.approx(0.83))
     share = {"th_true_milk": 0.5, "vinamilk_soy": 0.5}
-    assert decide("th_true_milk", 0.8, "th_true_milk", share, False, "detector") == ("TMP-MLK-TH-00", pytest.approx(0.8))
+    assert decide("th_true_milk", 0.8, "th_true_milk", share, False, "detector") == (
+        "TMP-MLK-TH-00",
+        pytest.approx(0.8),
+    )
 
 
 def test_detector_confirm_leaves_every_other_class_to_the_database():

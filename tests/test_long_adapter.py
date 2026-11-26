@@ -8,7 +8,7 @@ import pytest
 
 from milk.catalog import product_names
 from milk.cvoutput import Detection
-from milk.long_adapter import LABEL_OF_CLASS, _settings, decide, readings
+from milk.long_adapter import LABEL_OF_CLASS, LongPipeline, _settings, _th_confirm, decide, needs_lookup, readings
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
@@ -85,3 +85,134 @@ def test_tile_and_variants_settings(monkeypatch):
 
 def test_worker_and_backend_name_the_merged_th_row_alike():
     assert product_names()["TMP-MLK-TH-00"] == common.DEFAULT_ALIAS_MAP["TMP-MLK-TH-00"]["sku_name_vi"]
+
+
+def test_th_confirm_setting(monkeypatch):
+    monkeypatch.delenv("MILK_LONG_TH_CONFIRM", raising=False)
+    assert _th_confirm() == "database"
+    for raw, want in (
+        ("", "database"),
+        ("detector", "detector"),
+        (" Detector\r", "detector"),
+        ("DATABASE", "database"),
+    ):
+        monkeypatch.setenv("MILK_LONG_TH_CONFIRM", raw)
+        assert _th_confirm() == want
+
+
+def test_a_misspelt_th_confirm_stops_the_worker(monkeypatch):
+    monkeypatch.setenv("MILK_LONG_TH_CONFIRM", "detecter")
+    with pytest.raises(ValueError, match="MILK_LONG_TH_CONFIRM"):
+        _th_confirm()
+
+
+def test_only_merged_th_boxes_skip_the_database():
+    assert needs_lookup("th_true_milk", False, "detector") is False
+    assert needs_lookup("th_true_milk", True, "detector") is True  # variants: the database names the type
+    assert needs_lookup("th_true_milk", False, "database") is True
+    assert needs_lookup("vinamilk_soy", False, "detector") is True
+    assert needs_lookup("th_true_milk_sweetened", False, "detector") is True  # the old 12-class model
+
+
+def test_detector_confirm_keeps_a_th_box_the_database_rejects():
+    assert decide("th_true_milk", 0.83, "unknown", {}, False, "detector") == ("TMP-MLK-TH-00", pytest.approx(0.83))
+    share = {"th_true_milk": 0.5, "vinamilk_soy": 0.5}
+    assert decide("th_true_milk", 0.8, "th_true_milk", share, False, "detector") == (
+        "TMP-MLK-TH-00",
+        pytest.approx(0.8),
+    )
+
+
+def test_detector_confirm_leaves_every_other_class_to_the_database():
+    for cls in ("th_true_milk_sweetened", "vinamilk_soy"):
+        assert decide(cls, 0.9, "unknown", {cls: 1.0}, False, "detector") == (None, 0.0)
+    share = {"vinamilk_soy": 0.5, "vinamilk_melon": 0.5}
+    assert decide("vinamilk_soy", 0.8, "vinamilk", share, False, "detector") == ("TMP-MLK-VNM-07", pytest.approx(0.4))
+    assert decide("th_true_milk_sweetened", 0.9, "vinamilk", {"vinamilk_soy": 1.0}, False, "detector") == (
+        "TMP-MLK-TH-01",
+        0.0,
+    )
+
+
+def test_detector_confirm_with_variants_names_but_never_rejects():
+    lead = {"th_true_milk_sweetened": 0.8, "th_true_milk_less_sugar": 0.2}
+    assert decide("th_true_milk", 0.9, "th_true_milk", lead, True, "detector") == ("TMP-MLK-TH-01", pytest.approx(0.9))
+    assert decide("th_true_milk", 0.9, "unknown", lead, True, "detector") == ("TMP-MLK-TH-00", pytest.approx(0.9))
+
+
+def test_readings_pass_the_confirm_mode_on():
+    rows = np.array([[100.2, 50.0, 140.4, 110.0, 0.9, 0, 0], [300.0, 50.0, 330.0, 110.0, 0.7, 2, 1]])
+    names = {0: "th_true_milk", 2: "vinamilk_soy"}
+    lookups = [{"brand": "unknown"}, {"brand": "unknown"}]
+    out = readings(rows, names, lookups, [{}, {"vinamilk_soy": 1.0}], {"TMP-MLK-TH-00": "TH gộp"}, False, "detector")
+    assert out == [
+        Detection("TMP-MLK-TH-00", "TH gộp", pytest.approx(0.9), (100, 50, 40, 60)),
+        Detection(None, None, 0.0, (300, 50, 30, 60)),
+    ]
+
+
+ROWS = np.array([[100.0, 50.0, 140.0, 110.0, 0.9, 0, 0], [300.0, 50.0, 330.0, 110.0, 0.7, 2, 0]])  # TH, Vinamilk
+
+
+def _pipeline_with_fakes(rows, th_confirm, variants=False):
+    """A LongPipeline around stand-ins for the detector, the embedder and the database; calls["crops"] counts the
+    crops sent to the database."""
+    calls = {"crops": 0}
+
+    class Embedder:
+        device = "cpu"
+
+        def embed(self, crops):
+            calls["crops"] += len(crops)
+            return np.zeros((len(crops), 4), np.float32)
+
+    class Rec:
+        embedder = Embedder()
+
+        def lookup(self, vectors):
+            return [{"brand": "vinamilk"} for _ in vectors]
+
+    class Cvo:
+        detect = staticmethod(lambda image, yolo, device, conf, imgsz, tile=0: rows)
+        one_box_per_unit = staticmethod(lambda det: det)
+        crop_box = staticmethod(lambda image, box: np.zeros((2, 2, 3), np.uint8))
+        type_support = staticmethod(lambda rec, vectors: [{"vinamilk_soy": 1.0} for _ in vectors])
+
+    class Yolo:
+        names = {0: "th_true_milk", 2: "vinamilk_soy"}
+
+    pipe = object.__new__(LongPipeline)
+    pipe._cvo, pipe._rec, pipe._yolo, pipe._product = Cvo, Rec(), Yolo(), {}
+    pipe._conf, pipe._imgsz, pipe._tile, pipe._variants, pipe._th_confirm = 0.25, 1280, 0, variants, th_confirm
+    return pipe, calls
+
+
+FRAME = np.zeros((8, 8, 3), np.uint8)
+
+
+def test_detector_mode_sends_only_other_classes_to_the_database():
+    pipe, calls = _pipeline_with_fakes(ROWS, "detector")
+    out = pipe.detect(FRAME)
+    assert calls["crops"] == 1
+    assert [(d.sku_id, d.confidence) for d in out] == [
+        ("TMP-MLK-TH-00", pytest.approx(0.9)),
+        ("TMP-MLK-VNM-07", pytest.approx(0.7)),
+    ]
+
+
+def test_a_frame_of_only_th_boxes_never_calls_the_database():
+    pipe, calls = _pipeline_with_fakes(ROWS[:1], "detector")
+    assert [d.sku_id for d in pipe.detect(FRAME)] == ["TMP-MLK-TH-00"]
+    assert calls["crops"] == 0
+
+
+def test_database_mode_still_sends_every_box():
+    pipe, calls = _pipeline_with_fakes(ROWS, "database")
+    pipe.detect(FRAME)
+    assert calls["crops"] == 2
+
+
+def test_detector_mode_with_variants_asks_the_database_for_the_name():
+    pipe, calls = _pipeline_with_fakes(ROWS[:1], "detector", variants=True)
+    assert [d.sku_id for d in pipe.detect(FRAME)] == ["TMP-MLK-TH-00"]
+    assert calls["crops"] == 1

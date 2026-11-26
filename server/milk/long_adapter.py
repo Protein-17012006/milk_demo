@@ -15,7 +15,11 @@ Settings:
     MILK_LONG_VARIANTS  0 (default): every TH carton of the store-view model is the merged row TMP-MLK-TH-00.
                         1: name Có đường / Ít đường when the database clearly leans to one, for cameras close enough
                         to read the label
-    MILK_DEVICE         "cuda" or "cpu"; give "cuda", not "cuda:0": the pipeline turns on
+    MILK_LONG_TH_CONFIRM  database (default): the database may reject any box, as before. detector: a box of the
+                        merged TH class is kept without asking the database and scored by the detector alone; on a
+                        store camera the database rejects real cartons of an arrangement it has not stored
+                        (design 2026-11-26). Every other class still goes through the database
+    MILK_DEVICE        "cuda" or "cpu"; give "cuda", not "cuda:0": the pipeline turns on
                         half precision only for the exact string "cuda"
 """
 
@@ -33,6 +37,7 @@ from .cvoutput import Detection
 
 TH_BRAND = "th_true_milk"  # the store-view model's one TH class; Long's type classes start with it too
 VARIANT_SHARE = 0.7  # share of the TH backing one type must hold before a TH carton is named by type
+TH_CONFIRMS = ("database", "detector")  # who may reject a box of the merged TH class (MILK_LONG_TH_CONFIRM)
 
 # Detector class -> model label (the backend maps labels to product names). The 12 type classes are Long's SKUS.
 LABEL_OF_CLASS = {
@@ -57,27 +62,49 @@ def _settings() -> tuple[int, bool]:
     return int(os.environ.get("MILK_LONG_TILE") or 0), os.environ.get("MILK_LONG_VARIANTS", "0") == "1"
 
 
+def _th_confirm() -> str:
+    """MILK_LONG_TH_CONFIRM from the environment: "database" (also when unset or empty) or "detector". Any other
+    value stops the worker: a misspelt setting must not quietly count as the default."""
+    value = (os.environ.get("MILK_LONG_TH_CONFIRM") or "").strip().lower() or "database"
+    if value not in TH_CONFIRMS:
+        raise ValueError(f"MILK_LONG_TH_CONFIRM must be one of {TH_CONFIRMS}, not {value!r}")
+    return value
+
+
+def needs_lookup(cls_name: str, variants: bool, th_confirm: str) -> bool:
+    """Whether a box of this detector class is sent to the database. Only a merged-TH box in detector mode is not,
+    unless the database is still wanted to name its type."""
+    return not (cls_name == TH_BRAND and th_confirm == "detector" and not variants)
+
+
 def decide(
-    cls_name: str, yolo_conf: float, brand: str, kind_share: Mapping[str, float], variants: bool
+    cls_name: str,
+    yolo_conf: float,
+    brand: str,
+    kind_share: Mapping[str, float],
+    variants: bool,
+    th_confirm: str = "database",
 ) -> tuple[str | None, float]:
     """(model label, unit score) of one box. brand is the database's answer ("unknown": not one of our cartons);
     kind_share the share of the box's nearest stored cartons of each kind.
 
     - unknown to the database: (None, 0.0), an unrecognised box;
     - the merged TH class: backed by every TH kind; named by type only with `variants` and one type leading;
+    - the merged TH class with th_confirm "detector": never rejected, scored by the detector alone;
     - a type class: named by the detector, backed by the share of that type, as cv_output.read_units does."""
-    if brand == "unknown":
+    by_detector = cls_name == TH_BRAND and th_confirm == "detector"
+    if brand == "unknown" and not by_detector:
         return None, 0.0
     if cls_name == TH_BRAND:
         th = {kind: share for kind, share in kind_share.items() if kind.startswith(TH_BRAND)}
         support = sum(th.values())
         label = LABEL_OF_CLASS[TH_BRAND]
         typed = [(share, kind) for kind, share in th.items() if kind != TH_BRAND and kind in LABEL_OF_CLASS]
-        if variants and typed and support > 0:
+        if variants and brand != "unknown" and typed and support > 0:
             share, kind = max(typed)
             if share / support >= VARIANT_SHARE:
                 label = LABEL_OF_CLASS[kind]
-        return label, round(yolo_conf * support, 3)
+        return label, round(yolo_conf if by_detector else yolo_conf * support, 3)
     return LABEL_OF_CLASS.get(cls_name, cls_name), round(yolo_conf * kind_share.get(cls_name, 0.0), 3)
 
 
@@ -88,13 +115,14 @@ def readings(
     shares: list[Mapping[str, float]],
     product: Mapping[str, str],
     variants: bool,
+    th_confirm: str = "database",
 ) -> list[Detection]:
     """Detections of one frame from the detector's rows (x0, y0, x1, y1, confidence, class, ...), the database's
     answer for each box and its kind shares."""
     out = []
     for row, found, share in zip(rows, lookups, shares, strict=True):
         x0, y0, x1, y1, conf, cls = (float(v) for v in row[:6])
-        label, score = decide(names[int(cls)], conf, found["brand"], share, variants)
+        label, score = decide(names[int(cls)], conf, found["brand"], share, variants, th_confirm)
         box = (int(round(x0)), int(round(y0)), int(round(x1 - x0)), int(round(y1 - y0)))
         out.append(Detection(label, product.get(label) if label else None, score, box))
     return out
@@ -119,6 +147,7 @@ class LongPipeline:
         self._conf = float(os.environ.get("MILK_LONG_CONF", "0.25"))
         self._imgsz = int(os.environ.get("MILK_LONG_IMGSZ", "1280"))
         self._tile, self._variants = _settings()
+        self._th_confirm = _th_confirm()
         self._product = product_names()
         self.device = str(self._rec.embedder.device)
         self._warm_up()
@@ -146,6 +175,13 @@ class LongPipeline:
         det = self._cvo.one_box_per_unit(det)
         if not len(det):
             return []
-        vectors = self._rec.embedder.embed([self._cvo.crop_box(image, b) for b in det[:, :4]])
-        lookups, shares = self._rec.lookup(vectors), self._cvo.type_support(self._rec, vectors)
-        return readings(det, self._yolo.names, lookups, shares, self._product, self._variants)
+        names = self._yolo.names
+        ask = [i for i, row in enumerate(det) if needs_lookup(names[int(row[5])], self._variants, self._th_confirm)]
+        lookups: list[dict] = [{"brand": "unknown"} for _ in det]  # the answer decide() ignores for a box not asked
+        shares: list[Mapping[str, float]] = [{} for _ in det]
+        if ask:
+            vectors = self._rec.embedder.embed([self._cvo.crop_box(image, det[i, :4]) for i in ask])
+            found, support = self._rec.lookup(vectors), self._cvo.type_support(self._rec, vectors)
+            for i, lookup, share in zip(ask, found, support, strict=True):
+                lookups[i], shares[i] = lookup, share
+        return readings(det, names, lookups, shares, self._product, self._variants, self._th_confirm)
