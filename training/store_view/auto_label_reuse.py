@@ -9,8 +9,9 @@ Reuse stays within a day: the shop rearranges between days, and decisions from o
 disagreed 20 times on the held-out segments (26/11). A decision "not a product" is reused as a grey mask, never as
 background, so a can that stands there now is not taught as background.
 
-The queue takes the segments in time order. A can no decision covers either waits on a can already waiting at the
-same place with the same colour in an earlier segment of the same day, or needs a new review frame for its segment.
+The queue takes the segments in time order. A can no decision covers (or whose decisions disagree) either waits on a
+can already waiting at the same place with the same colour in an earlier segment of the same day, or needs a new
+review frame for its segment. Once a person decides it there, that decision outranks the disagreeing ones.
 """
 
 from __future__ import annotations
@@ -69,14 +70,19 @@ def day_of(capture_id: str) -> str:
     return m.group(0) if m else ""
 
 
+LOOKED = ("review:", "sim:")  # decisions a person made on a review frame of this very arrangement
+
+
 def _reused(track: Track, precedents: Sequence[Precedent], min_sim: float) -> Precedent | str | None:
-    """The latest matching decision, "conflict" when the matching decisions disagree, None when none matches."""
+    """The latest matching decision, "conflict" when the matching decisions disagree, None when none matches. A
+    decision made on a review frame outranks the truth and TRN verdicts: the person looked because they disagreed."""
     found = matching(track, precedents, min_sim)
     if not found:
         return None
-    if len({p.label for p in found}) > 1:
+    pool = [p for p in found if p.source.startswith(LOOKED)] or found
+    if len({p.label for p in pool}) > 1:
         return "conflict"
-    return max(found, key=lambda p: p.key)
+    return max(pool, key=lambda p: p.key)
 
 
 def _apply(p: Precedent) -> Decision:
@@ -215,19 +221,18 @@ def queue(
                 decisions[t.id] = _apply(found)
                 out.links.append((seg, t.id, found.source, found.label))
                 continue
-            if found is None:
-                waits_on = next(
-                    (
-                        w
-                        for wday, w in pending
-                        if wday == day and same_place(t.box, w.box) and _same_colour(t.colour, w.colour, min_sim)
-                    ),
-                    None,
-                )
-                if waits_on is not None:
-                    decisions[t.id] = Decision("review", None, f"waits:{waits_on.id}")
-                    continue
-            else:
+            waits_on = next(
+                (
+                    w
+                    for wday, w in pending
+                    if wday == day and same_place(t.box, w.box) and _same_colour(t.colour, w.colour, min_sim)
+                ),
+                None,
+            )
+            if waits_on is not None:
+                decisions[t.id] = Decision("review", None, f"waits:{waits_on.id}")
+                continue
+            if found == "conflict":
                 decisions[t.id] = Decision("review", None, "reuse_conflict")
             out.new_frames.setdefault(seg, []).append(t.id)
             label = human(p, t) if human else None

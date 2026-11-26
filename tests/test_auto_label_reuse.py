@@ -268,3 +268,25 @@ def test_a_can_waits_only_on_a_can_of_the_same_day():
 def test_links_carry_the_reused_label():
     r = queue([waiting("s1", "CAP-1")], [precedent("not_product")], 0.95)
     assert r.links == [("s1", "s1-t0", "truth:K#0", "not_product")]
+
+
+def test_a_person_s_decision_settles_a_conflict_for_later_segments():
+    old = [
+        precedent("cheese145", key="K1", source="truth:K1#0"),
+        precedent("original145", key="K2", source="trn:K2@1,1"),
+    ]
+    r = queue(
+        [waiting("s1", "CAP-1"), waiting("s2", "CAP-2")],
+        old,
+        0.95,
+        human=lambda p, t: "original145" if p["segment"] == "s1" else None,
+    )
+    assert r.new_frames == {"s1": ["s1-t0"]}
+    assert r.decisions["s2"]["s2-t0"] == Decision("accept", "original145", "reused:sim:s1-t0")
+
+
+def test_a_conflict_waits_on_the_same_conflict_in_an_earlier_segment():
+    old = [precedent("cheese145", key="K1"), precedent("original145", key="K2")]
+    r = queue([waiting("s1", "CAP-1"), waiting("s2", "CAP-2")], old, 0.95)
+    assert r.new_frames == {"s1": ["s1-t0"]}
+    assert r.decisions["s2"]["s2-t0"] == Decision("review", None, "waits:s1-t0")
