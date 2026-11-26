@@ -29,10 +29,29 @@ export interface MissedPoint {
 }
 
 const CYCLE: (Verdict | null)[] = [null, "correct", "wrong_sku", "not_product", "out_of_scope"];
+// a ? box of a review frame (needs_flavour) has no suggestion to call right: pick its flavour, or say what it is not
+const CYCLE_NEEDS_FLAVOUR: (Verdict | null)[] = [null, "wrong_sku", "not_product", "out_of_scope"];
 
-/** The verdict after one more click on a box: unlabelled → correct → wrong SKU → not our SKU → out of scope → unlabelled. */
-export function nextVerdict(verdict: Verdict | null): Verdict | null {
-  return CYCLE[(CYCLE.indexOf(verdict) + 1) % CYCLE.length];
+/** The verdict after one more click on a box: unlabelled → correct → wrong SKU → not our SKU → out of scope →
+ * unlabelled; a box that needs a flavour skips correct. */
+export function nextVerdict(verdict: Verdict | null, needsFlavour = false): Verdict | null {
+  const cycle = needsFlavour ? CYCLE_NEEDS_FLAVOUR : CYCLE;
+  return cycle[(cycle.indexOf(verdict) + 1) % cycle.length];
+}
+
+const QUEUE_RANK: Record<string, number> = { scoring: 0, training: 1, review: 2 };
+
+/** The order "Label frames" opens pending frames in: scoring, then training, then review frames, each oldest first. */
+export function labelQueueOrder(
+  items: Pick<ApiAuditListItem, "audit_id" | "purpose" | "capture_timestamp">[]
+): string[] {
+  return [...items]
+    .sort(
+      (a, b) =>
+        (QUEUE_RANK[a.purpose] ?? 3) - (QUEUE_RANK[b.purpose] ?? 3) ||
+        a.capture_timestamp.localeCompare(b.capture_timestamp)
+    )
+    .map((a) => a.audit_id);
 }
 
 /** Model units and true units per SKU (model label) for the labels given so far. */

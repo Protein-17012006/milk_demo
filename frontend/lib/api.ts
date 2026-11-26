@@ -286,16 +286,20 @@ export interface ApiReportsSeriesResponse {
 
 export type AuditStatus = "pending" | "done" | "skipped";
 
-/** One box the model drew on a sampled frame; sku_id is the model label (null = UNRECOGNIZED). */
+/** One box the model drew on a sampled frame; sku_id is the model label (null = UNRECOGNIZED). On a review frame a box
+ * may need a flavour (the auto-labeller could not name it: sku_id null, no Right) and names its can (track_id). */
 export interface ApiAuditBox {
   box_id: number;
   sku_id: string | null;
   conf: number;
   box: [number, number, number, number]; // x, y, w, h in frame pixels
+  needs_flavour?: boolean;
+  track_id?: string;
 }
 
-// scoring frames count in the accuracy numbers; training frames only teach the flavour gallery
-export type AuditPurpose = "scoring" | "training";
+// scoring frames count in the accuracy numbers; training frames only teach the flavour gallery; review frames carry
+// the cans the auto-labeller could not decide, and are never scored either
+export type AuditPurpose = "scoring" | "training" | "review";
 
 export interface ApiAuditListItem {
   audit_id: string;
