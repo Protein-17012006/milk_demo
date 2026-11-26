@@ -259,7 +259,8 @@ Các ngưỡng 30%, 60% và 80% được chọn trên các đoạn phía train c
 - Đầu vào là 22 đoạn ban ngày phía train, dùng kho ảnh eval.
 - Máy tự quyết: 123 lon chấp nhận, 103 lon bỏ. 125 lon cần xem.
 - Trong 125 lon cần xem: 52 lon nhận lại quyết định, 46 lon chờ cùng lon của đoạn trước, 15 lon xung đột trong cùng ngày.
-- **Còn 12 frame review, với 27 lon người phải chọn.** Đây là cỡ hàng chờ cho kế hoạch 2b.
+- **Còn 12 frame review, với 27 lon người phải chọn.**
+- **Sau lượt duyệt cuối:** quyết định trên frame review thắng các quyết định cũ đang bất đồng, và lon xung đột chờ cùng lon xung đột ở đoạn trước. Hàng chờ còn **4 frame, 15 lon**: 52 lon nhận lại quyết định, 58 lon chờ cùng, 3 lon xung đột mở frame. Đây là cỡ hàng chờ cho kế hoạch 2b.
 
 **Để người làm tự quyết:**
 - ngưỡng τ, chọn trên các cặp keyframe phía train;
