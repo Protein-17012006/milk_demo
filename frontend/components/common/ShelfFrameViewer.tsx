@@ -122,6 +122,12 @@ export function ShelfFrameViewer({ frame, onClose, onImageError }: ShelfFrameVie
             </span>
           </li>
         ))}
+        {legend.length > 0 && (
+          <li data-frame-note className="basis-full text-[11.5px] text-white/60">
+            Boxes are the ones in this photo. The numbers on the page are steadied over the last three readings, so one
+            can differ from the photo by a unit.
+          </li>
+        )}
       </ul>
 
       <div className="flex min-h-0 flex-1 items-center justify-center p-4">

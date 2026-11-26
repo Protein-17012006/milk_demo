@@ -12,6 +12,8 @@ interface ShelfNowTableProps {
   rows: ShelfNowRow[] | null;
   /** The product list could not be read. */
   failed: boolean;
+  /** Said in place of the rows when the account cannot read them yet (it waits for approval). */
+  notice?: string | null;
   /** Opens the latest shelf photo; left out while there is no product list to take it from. */
   onOpenPhoto?: () => void;
   /** Why the photo cannot be opened (no frame was stored, or it did not load); null when it can. */
@@ -27,14 +29,16 @@ const STATUS_COLORS: Record<StockStatus, string> = {
 };
 
 /** What is on the shelf now, product by product: the first thing a viewer opens the Dashboard for. */
-export function ShelfNowTable({ rows, failed, onOpenPhoto, photoReason = null, photoBusy = false }: ShelfNowTableProps) {
-  const message = failed
-    ? "The product list could not be loaded."
-    : rows === null
-      ? "Loading…"
-      : rows.length === 0
-        ? "No shelf plan yet. An administrator sets it in Settings."
-        : null;
+export function ShelfNowTable({ rows, failed, notice = null, onOpenPhoto, photoReason = null, photoBusy = false }: ShelfNowTableProps) {
+  const message =
+    notice ??
+    (failed
+      ? "The product list could not be loaded."
+      : rows === null
+        ? "Loading…"
+        : rows.length === 0
+          ? "No shelf plan yet. An administrator sets it in Settings."
+          : null);
 
   return (
     <div data-shelf-now className="flex h-full flex-col rounded-[18px] border border-[#EFF0F6] bg-white">
@@ -78,7 +82,9 @@ export function ShelfNowTable({ rows, failed, onOpenPhoto, photoReason = null, p
               key={row.skuId}
               data-shelf-now-row
               data-status={row.status}
-              className="flex items-center gap-[12px] py-[10px]"
+              // On a phone the name keeps the whole first line and the count sits under it: a name cut to
+              // "Slide Chees…" could be any of four products.
+              className="flex flex-wrap items-center gap-x-[12px] gap-y-[6px] py-[10px]"
             >
               <div className="h-[36px] w-[36px] shrink-0 overflow-hidden rounded-[8px] border border-black/15 bg-white">
                 <Image
@@ -89,7 +95,7 @@ export function ShelfNowTable({ rows, failed, onOpenPhoto, photoReason = null, p
                   className="h-full w-full object-cover"
                 />
               </div>
-              <div className="min-w-0 flex-1">
+              <div className="min-w-0 flex-1 basis-[calc(100%-48px)] sm:basis-0">
                 <p className="line-clamp-2 text-[13px] font-semibold leading-[17px] text-[#111827]">{row.name}</p>
                 {row.badge && (
                   <span
@@ -101,17 +107,19 @@ export function ShelfNowTable({ rows, failed, onOpenPhoto, photoReason = null, p
                   </span>
                 )}
               </div>
-              <p className="shrink-0 whitespace-nowrap text-right">
-                <span data-units className="text-[17px] font-bold leading-none text-[#111827]">
-                  {row.units}
-                </span>{" "}
-                <span className="text-[12px] text-[#6B7280]">{row.units === 1 ? "unit" : "units"}</span>
-              </p>
-              <span
-                className={`w-[92px] shrink-0 rounded-full px-[10px] py-[3px] text-center text-[11.5px] font-semibold leading-tight ${STATUS_COLORS[row.status]}`}
-              >
-                {stockStatusLabel(row.status)}
-              </span>
+              <div className="ml-[48px] flex shrink-0 items-center gap-[12px] sm:ml-0">
+                <p className="whitespace-nowrap text-right">
+                  <span data-units className="text-[17px] font-bold leading-none text-[#111827]">
+                    {row.units}
+                  </span>{" "}
+                  <span className="text-[12px] text-[#6B7280]">{row.units === 1 ? "unit" : "units"}</span>
+                </p>
+                <span
+                  className={`w-[92px] shrink-0 rounded-full px-[10px] py-[3px] text-center text-[11.5px] font-semibold leading-tight ${STATUS_COLORS[row.status]}`}
+                >
+                  {stockStatusLabel(row.status)}
+                </span>
+              </div>
             </li>
           ))}
         </ul>

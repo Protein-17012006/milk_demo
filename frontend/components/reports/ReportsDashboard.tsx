@@ -244,8 +244,9 @@ export function ReportsDashboard() {
         </div>
         <div className="order-1 xl:order-2 xl:col-span-7">
           <ShelfNowTable
-            rows={isApproved ? rows : []}
+            rows={rows}
             failed={isApproved && productsFailed}
+            notice={isApproved ? null : "Shelf numbers appear once your account is approved."}
             onOpenPhoto={products ? () => void openPhoto() : undefined}
             photoReason={photoReason}
             photoBusy={photoBusy}
