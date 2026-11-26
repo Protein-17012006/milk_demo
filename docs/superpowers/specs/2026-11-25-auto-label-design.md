@@ -2,7 +2,7 @@
 
 Ngày 25/11/2026. Trạng thái:
 - hoang duyệt ngày 25/11; phần 1 đã xây.
-- Ngày 26/11 thêm mục 5.4b (dùng lại quyết định của người) và sửa cổng 1. Phần sửa này chờ hoang duyệt.
+- Ngày 26/11 thêm mục 5.4b (dùng lại quyết định của người) và sửa cổng 1. hoang duyệt phần sửa ngày 26/11 ("ok ... tập trung tiếp phần cải thiện model và label").
 
 Liên quan:
 - `2026-11-25-slide-fusion-gallery-design.md`: kho ảnh màu và luật đọc vị dùng chung.
