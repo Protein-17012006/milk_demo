@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { ApiEventPhotos, ApiShelfEvent, ApiShelfEventsResponse, ShelfEventType, ShelfVerdict } from "@/lib/api";
 import { BADGE_COLORS, badgePillText } from "@/lib/reliability-ui";
-import { eventLabel, eventText, gapText, oosDurationText, timeAgo } from "@/lib/shelf-ui";
+import { earlierText, eventLabel, eventText, foldEvents, gapText, oosDurationText, timeAgo, type EventFold } from "@/lib/shelf-ui";
 
 export type ActivityKind = "all" | "alerts" | "restocked";
 
@@ -74,11 +74,6 @@ function EventRow({ item, now, actions }: { item: ApiShelfEvent; now: Date; acti
             {badgePillText(item.badge)}
           </span>
         )}
-        {item.uncertain && (
-          <span data-uncertain className="shrink-0 text-[11px] font-medium italic text-[#DC2626]">
-            uncertain
-          </span>
-        )}
       </div>
       <span className="text-[12px] leading-[16px] text-[#6B7280]">{item.store_name}</span>
       <span className="text-[12px] font-medium leading-[16px] text-[#374151]">
@@ -118,13 +113,51 @@ function EventRow({ item, now, actions }: { item: ApiShelfEvent; now: Date; acti
   );
 }
 
-function PhotoSlot({ title, url }: { title: string; url: string | null | undefined }) {
+/** One row for a run of repeats: the newest event, and on request the earlier ones it stands for. */
+function EventFoldRow({ fold, now, actions }: { fold: EventFold<ApiShelfEvent>; now: Date; actions: RowActions }) {
+  const [open, setOpen] = useState(false);
+  const more = earlierText(fold.earlier.length);
+  return (
+    <div data-event-fold>
+      <EventRow item={fold.head} now={now} actions={actions} />
+      {more && (
+        <button
+          type="button"
+          data-event-earlier
+          aria-expanded={open}
+          title="The same change of this product, earlier on"
+          onClick={() => setOpen((o) => !o)}
+          className="mb-[8px] rounded-full bg-[#F3F4F6] px-[10px] py-[2px] text-[11px] font-medium text-[#374151] hover:bg-[#E5E7EB] cursor-pointer"
+        >
+          {open ? "Hide earlier" : more}
+        </button>
+      )}
+      {open && (
+        <div className="mb-[8px] ml-[10px] divide-y divide-[#EFF0F6] border-l-2 border-[#EFF0F6] pl-[10px]">
+          {fold.earlier.map((item) => (
+            <EventRow key={`${item.store_id}|${item.event_key}`} item={item} now={now} actions={actions} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PhotoSlot({ title, url, onOpen }: { title: string; url: string | null | undefined; onOpen: (url: string) => void }) {
   return (
     <figure className="flex flex-1 flex-col gap-[6px]">
       <figcaption className="text-[12px] font-semibold text-[#374151]">{title}</figcaption>
       {url ? (
-        // eslint-disable-next-line @next/next/no-img-element -- a short-lived signed link, not a static asset
-        <img src={url} alt={title} className="w-full rounded-[10px] border border-[#EFF0F6] object-contain" />
+        <button
+          type="button"
+          data-photo-open
+          title="Open the photo large"
+          onClick={() => onOpen(url)}
+          className="cursor-zoom-in overflow-hidden rounded-[10px] border border-[#EFF0F6] hover:border-[#D1D5DB]"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element -- a short-lived signed link, not a static asset */}
+          <img src={url} alt={title} className="w-full object-contain" />
+        </button>
       ) : (
         <div className="flex aspect-video items-center justify-center rounded-[10px] border border-dashed border-[#E5E7EB] px-2 text-center text-[12px] text-[#9CA3AF]">
           {url === undefined ? "Loading..." : "Photo no longer kept"}
@@ -136,6 +169,16 @@ function PhotoSlot({ title, url }: { title: string; url: string | null | undefin
 
 function PhotosDialog({ item, photos, onClose }: { item: ApiShelfEvent; photos: ApiEventPhotos | null | undefined; onClose: () => void }) {
   // photos === null: the links could not be loaded, shown as not kept
+  const [large, setLarge] = useState<string | null>(null); // the photo opened large, over the dialog
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      if (large) setLarge(null);
+      else onClose();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [large, onClose]);
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
       <div
@@ -159,10 +202,26 @@ function PhotosDialog({ item, photos, onClose }: { item: ApiShelfEvent; photos: 
           </button>
         </div>
         <div className="flex flex-col gap-4 sm:flex-row">
-          <PhotoSlot title="Before" url={photos === null ? null : photos?.before_url} />
-          <PhotoSlot title="At the event" url={photos === null ? null : photos?.after_url} />
+          <PhotoSlot title="Before" url={photos === null ? null : photos?.before_url} onOpen={setLarge} />
+          <PhotoSlot title="At the event" url={photos === null ? null : photos?.after_url} onOpen={setLarge} />
         </div>
       </div>
+      {large && (
+        <div
+          data-photo-large
+          role="dialog"
+          aria-modal="true"
+          aria-label="Photo"
+          className="fixed inset-0 z-[70] flex cursor-zoom-out items-center justify-center bg-black/85 p-4"
+          onClick={(e) => {
+            e.stopPropagation();
+            setLarge(null);
+          }}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element -- a short-lived signed link, not a static asset */}
+          <img src={large} alt="" className="max-h-full max-w-full object-contain" />
+        </div>
+      )}
     </div>
   );
 }
@@ -274,12 +333,12 @@ export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLin
       <div data-shelf-events className="flex-1 overflow-y-auto px-[20px] py-[6px]">
         {!items || items.length === 0 ? (
           <div className="flex h-full items-center justify-center px-4 text-center text-[13px] text-[#9CA3AF]">
-            {items === null && !blockedText ? "Sign in with an approved account to see shelf activity." : empty}
+            {items === null && !blockedText ? "Shelf activity appears once your account is approved." : empty}
           </div>
         ) : (
           <div className="divide-y divide-[#EFF0F6]">
-            {items.map((item) => (
-              <EventRow key={idOf(item)} item={item} now={now} actions={actions} />
+            {foldEvents(items).map((fold) => (
+              <EventFoldRow key={idOf(fold.head)} fold={fold} now={now} actions={actions} />
             ))}
           </div>
         )}
@@ -333,7 +392,7 @@ export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLin
               {all.length === 0 ? (
                 <p className="py-6 text-center text-[13px] text-[#6B7280]">{empty}</p>
               ) : (
-                all.map((item) => <EventRow key={idOf(item)} item={item} now={now} actions={actions} />)
+                foldEvents(all).map((fold) => <EventFoldRow key={idOf(fold.head)} fold={fold} now={now} actions={actions} />)
               )}
             </div>
             {cursor && (

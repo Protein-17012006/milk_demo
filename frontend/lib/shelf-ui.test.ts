@@ -165,3 +165,32 @@ test("the restock card says over how many days with checks its rate is", () => {
   assert.equal(restockDefinition(1, 1), "Units restocked today, against yesterday.");
   assert.equal(restockDefinition(14, undefined), "Units restocked per day, against the 14 days before.");
 });
+
+// --- folding repeated events (plan 2026-11-27-website-optimization-batch2, Task 6) ---
+import { earlierText, foldEvents } from "./shelf-ui.ts";
+
+test("repeated events of one product fold into the newest; another type in between keeps them apart", () => {
+  const e = (sku_id: string, type: string, at: string) => ({ store_id: "S1", sku_id, type, at });
+  const items = [
+    e("Cheese", "LOW_STOCK", "5"),
+    e("Original", "LOW_STOCK", "4"),
+    e("Cheese", "LOW_STOCK", "3"),
+    e("Cheese", "RESTOCKED", "2"),
+    e("Cheese", "LOW_STOCK", "1"),
+  ];
+  const folds = foldEvents(items);
+  assert.deepEqual(
+    folds.map((f) => [f.head.sku_id, f.head.at, f.earlier.map((x) => x.at)]),
+    [
+      ["Cheese", "5", ["3"]],
+      ["Original", "4", []],
+      ["Cheese", "2", []],
+      ["Cheese", "1", []],
+    ]
+  );
+  assert.deepEqual(foldEvents([]), []);
+  // the same product and type in another store is another row
+  assert.equal(foldEvents([e("A", "OOS", "2"), { ...e("A", "OOS", "1"), store_id: "S2" }]).length, 2);
+  assert.equal(earlierText(0), null);
+  assert.equal(earlierText(3), "+3 earlier");
+});

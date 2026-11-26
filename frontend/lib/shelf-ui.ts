@@ -200,3 +200,37 @@ export function restockDefinition(days: number, measuredDays: number | undefined
   const over = measuredDays === undefined ? "" : ` that has checks (${measuredDays} of the last ${days} days)`;
   return `Units restocked per day${over}, against the ${days} days before.`;
 }
+
+/** A shelf event with the earlier events it stands for. */
+export interface EventFold<T> {
+  head: T;
+  earlier: T[];
+}
+
+/**
+ * Folds repeats in a list of events (newest first): an event joins the fold of the same store, product and type
+ * unless an event of another type for that store and product lies between them. So five LOW STOCK rows of one
+ * product read as one row with "+4 earlier", while LOW, RESTOCKED, LOW stay three rows. Folds keep the place of
+ * their newest event.
+ */
+export function foldEvents<T extends { store_id: string; sku_id: string; type: string }>(items: T[]): EventFold<T>[] {
+  const folds: EventFold<T>[] = [];
+  const latest = new Map<string, EventFold<T>>(); // per store and product: the fold a same-type event still joins
+  for (const item of items) {
+    const key = `${item.store_id}|${item.sku_id}`;
+    const fold = latest.get(key);
+    if (fold && fold.head.type === item.type) {
+      fold.earlier.push(item);
+      continue;
+    }
+    const started: EventFold<T> = { head: item, earlier: [] };
+    folds.push(started);
+    latest.set(key, started);
+  }
+  return folds;
+}
+
+/** The label of the button that unfolds a row; null when there is nothing to unfold. */
+export function earlierText(count: number): string | null {
+  return count > 0 ? `+${count} earlier` : null;
+}
