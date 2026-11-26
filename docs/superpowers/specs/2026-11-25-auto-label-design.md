@@ -242,6 +242,19 @@ Các ngưỡng 30%, 60% và 80% được chọn trên các đoạn phía train c
 
 **Rủi ro còn lại:** hai lon khác vị nhưng trông giống hệt nhau đổi chỗ cho nhau, ví dụ nắp Original và nắp Hot trên camera này. Chỉ số "dùng lại đúng" ở cổng 1 (5.7) đo rủi ro này.
 
+**Chạy thật ngày 26/11** (kế hoạch `2026-11-26-auto-label-reuse.md`, Task 6):
+- **Ngưỡng màu:** `reuse-pairs` trên đáp án phía train cho 134 cặp cùng chỗ cùng nhãn (phân vị 5% là 0,69, trung vị 0,87) và 76 cặp cùng chỗ khác nhãn (giống nhất 0,7498). `REUSE_MIN_SIM` = 0,755.
+- **Dùng lại khác ngày thì hỏng:** cửa hàng xếp lại giữa các ngày, nên quyết định của các ngày khác nhau ở cùng một chỗ bất đồng 20 lần, và 30/36 đoạn cần frame review.
+  - Người làm quyết định giới hạn **dùng lại trong cùng một ngày**. Cách này cho 0 xung đột và 12/36 đoạn cần frame review.
+  - Nâng ngưỡng màu thì không đỡ: 0,99 vẫn cần 27/36 frame.
+- **"Không phải sản phẩm" khi được dùng lại thì che xám, không bỏ.** Một lon thật xuất hiện ở chỗ đó sau này sẽ không bị dạy thành nền.
+- **Cổng 1** (`store_eval\gate1_reuse_20261126.txt`): real 1,000; flavour 1,000; coverage 0,993; review_share 0,333 (đạt); reuse_right 0,818 = 54/66 (trượt).
+- **Không lần dùng lại nào gán nhầm vị này thành vị khác.** 12 lần lệch so với đáp án đều do đáp án không nhất quán giữa các keyframe:
+  - 8 lần: một keyframe vẽ dòng `ignore`, keyframe kia không vẽ gì;
+  - 2 lần: lon Hot tầng dưới có mặt từ 06:40 ngày 25/11 (đã xem ảnh) nhưng đáp án 06:40 thiếu dòng của nó; luật mới chỉ che xám lon này;
+  - 2 lần: nắp Sour Cream lúc 07:25 thấy rõ, lúc 09:35 và 11:05 bị gói kẹo che một nửa nên đáp án ghi `unknown`; vẫn là lon đó.
+- Cách chấm `reuse_right` cho trường hợp đáp án tự mâu thuẫn chờ hoang quyết.
+
 **Để người làm tự quyết:**
 - ngưỡng τ, chọn trên các cặp keyframe phía train;
 - có giới hạn khoảng thời gian dùng lại hay không;
