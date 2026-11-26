@@ -514,3 +514,151 @@ Nếu ảnh mới trượt cổng: không làm Task 6 Step 2–5. Báo số và 
 
 - [ ] **Step 7: Ghi chép.** Cập nhật `TRAINING.md` trên HUYHOANG (sao lưu trước), nhật ký HOANG-P10, memory. Nhắc team
   gắn nhãn lại frame AUD theo quy tắc B.
+
+### Task 7: Luật bỏ box TH trùng, rồi đo lại (thêm ngày 26/11)
+
+Thêm sau khi Task 5 cho thấy ảnh mới trượt cổng vì đếm thừa (spec mục 1e). hoang chọn ngày 26/11: "thử cách 1 trước".
+Task này chạy **trước** Task 6. Ở Task 6 Step 4, thêm `MILK_LONG_TH_OVERLAP=0.5` vào các biến đặt cho worker.
+
+**Files:**
+- Modify: `server/milk/long_adapter.py`, `training/store_view/evaluate.py` (`LONG_KEYS`)
+- Test: `tests/test_long_adapter.py`, `tests/test_store_view_evaluate.py`
+
+**Interfaces:**
+- Consumes: `LongPipeline.detect`, `_pipeline_with_fakes` trong test (Task 1); `LONG_KEYS`, `apply_env` (Task 2).
+- Produces:
+  - `_th_overlap() -> float`: đọc `MILK_LONG_TH_OVERLAP`. Không đặt hoặc rỗng là `0.0`.
+  - `drop_shared(det: np.ndarray, is_th: Sequence[bool], limit: float) -> np.ndarray`: các dòng được giữ, theo thứ tự cũ.
+  - `LongPipeline` giữ giá trị ở `self._th_overlap` và gọi `drop_shared` ngay sau `one_box_per_unit`.
+  - `LONG_KEYS` có thêm `MILK_LONG_TH_OVERLAP`.
+
+**Review Focus của task này:**
+1. Giá trị dính khoảng trắng hoặc CR vẫn đọc được; giá trị không phải số trong khoảng 0–1 làm worker dừng.
+2. Lốc thật: 8 hộp sát nhau của kiểu xếp E2 không hộp nào bị bỏ ở mức 0,5.
+3. Model cũ 12 lớp, hoặc box Vinamilk: không bao giờ bị bỏ, và không làm box TH bị bỏ.
+
+- [ ] **Step 1: Viết test** (thêm vào `tests/test_long_adapter.py`; import thêm `_th_overlap`, `drop_shared`;
+  `_pipeline_with_fakes` nhận thêm tham số `th_overlap=0.0` và đặt `pipe._th_overlap`)
+
+```python
+def _rows(*boxes):
+    """Detector rows (x0, y0, x1, y1, confidence, class 0, 0) from (x0, y0, x1, y1, confidence)."""
+    return np.array([[*b, 0, 0] for b in boxes], dtype=float)
+
+
+ACROSS = _rows((0, 0, 30, 24, 0.94), (26, 0, 56, 24, 0.92), (12, 0, 44, 24, 0.80))  # two cartons, a box across the seam
+
+
+def test_a_box_lying_across_two_cartons_is_dropped():
+    # its IoU with each carton is 0.41, so one_box_per_unit keeps it; it shares 0.6 of the box of each carton
+    assert drop_shared(ACROSS, [True, True, True], 0.5)[:, 4].tolist() == [0.94, 0.92]
+
+
+def test_the_cartons_of_a_real_pack_are_all_kept():
+    # the eight cells of the pack as it lay on 25/11 (keyframe truth): neighbours overlap, never by half
+    from training.store_view.labels import grid_boxes
+
+    cells = grid_boxes([(876, 84), (918, 70), (972, 128), (930, 146)], 4, 2)
+    det = _rows(*[(x, y, x + w, y + h, 0.95 - 0.01 * n) for n, (x, y, w, h) in enumerate(cells)])
+    assert len(drop_shared(det, [True] * 8, 0.5)) == 8
+
+
+def test_the_surer_box_stays_and_the_order_of_rows_is_kept():
+    det = _rows((12, 0, 44, 24, 0.80), (26, 0, 56, 24, 0.92), (0, 0, 30, 24, 0.94))
+    assert drop_shared(det, [True, True, True], 0.5)[:, 4].tolist() == [0.92, 0.94]
+
+
+def test_only_merged_th_boxes_are_compared():
+    det = _rows((0, 0, 30, 24, 0.94), (2, 2, 28, 22, 0.60), (4, 4, 26, 20, 0.50))  # each inside the one before
+    assert drop_shared(det, [True, False, True], 0.5)[:, 4].tolist() == [0.94, 0.60]  # the other class stays
+    assert len(drop_shared(det, [False, False, True], 0.5)) == 3  # another class never removes a TH box
+    assert len(drop_shared(det, [False, False, False], 0.5)) == 3
+
+
+def test_limit_zero_turns_the_rule_off():
+    assert np.array_equal(drop_shared(ACROSS, [True, True, True], 0.0), ACROSS)
+
+
+def test_th_overlap_setting(monkeypatch):
+    monkeypatch.delenv("MILK_LONG_TH_OVERLAP", raising=False)
+    assert _th_overlap() == 0.0
+    for raw, want in (("", 0.0), ("0", 0.0), ("0.5", 0.5), (" 0.5\r", 0.5), ("1", 1.0)):
+        monkeypatch.setenv("MILK_LONG_TH_OVERLAP", raw)
+        assert _th_overlap() == want
+
+
+@pytest.mark.parametrize("raw", ["half", "-0.1", "1.5", "50", "nan"])
+def test_a_bad_th_overlap_stops_the_worker(monkeypatch, raw):
+    monkeypatch.setenv("MILK_LONG_TH_OVERLAP", raw)
+    with pytest.raises(ValueError, match="MILK_LONG_TH_OVERLAP"):
+        _th_overlap()
+
+
+def test_the_pipeline_drops_th_duplicates_before_the_database():
+    pipe, calls = _pipeline_with_fakes(ACROSS, "detector", th_overlap=0.5)
+    assert [d.confidence for d in pipe.detect(FRAME)] == [pytest.approx(0.94), pytest.approx(0.92)]
+    pipe, calls = _pipeline_with_fakes(ACROSS, "database", th_overlap=0.5)
+    pipe.detect(FRAME)
+    assert calls["crops"] == 2
+
+
+def test_the_pipeline_keeps_every_box_with_the_rule_off():
+    pipe, _ = _pipeline_with_fakes(ACROSS, "detector")
+    assert len(pipe.detect(FRAME)) == 3
+```
+
+  Thêm vào `tests/test_store_view_evaluate.py`:
+
+```python
+def test_the_overlap_setting_is_cleared_between_pipelines(monkeypatch):
+    monkeypatch.setenv("MILK_LONG_TH_OVERLAP", "0.5")
+    apply_env({}, {})
+    assert "MILK_LONG_TH_OVERLAP" not in os.environ
+```
+
+- [ ] **Step 2: Chạy test, phải FAIL**
+
+Run: `PYTEST tests/test_long_adapter.py tests/test_store_view_evaluate.py`
+Expected: FAIL khi import ở file đầu; file sau fail ở test mới.
+
+- [ ] **Step 3: Viết code**
+
+  - `_th_overlap()`: bỏ khoảng trắng; rỗng là `0.0`; không đổi được sang số, hoặc số ngoài khoảng 0–1 (kể cả `nan`),
+    thì `raise ValueError` có tên biến và giá trị.
+  - `drop_shared`: `limit <= 0` thì trả lại `det`. Ngược lại duyệt các dòng có `is_th` theo độ tin cậy giảm dần; bỏ dòng
+    nào có (phần chung ÷ diện tích box nhỏ hơn) ≥ `limit` với một dòng TH đã giữ. Dòng không phải TH luôn được giữ.
+    Trả các dòng được giữ theo thứ tự ban đầu.
+  - `LongPipeline.detect`: gọi sau `one_box_per_unit`, với `is_th` là "lớp của dòng bằng `TH_BRAND`".
+  - Thêm biến vào docstring đầu file và vào `LONG_KEYS`.
+
+- [ ] **Step 4: Chạy test, phải PASS**
+
+Run: `PYTEST tests/test_long_adapter.py tests/test_store_view_evaluate.py`, rồi `PYTEST tests`, `ruff check .`,
+`ruff format --check .`
+Expected: PASS và sạch.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add server/milk/long_adapter.py training/store_view/evaluate.py tests/test_long_adapter.py tests/test_store_view_evaluate.py
+git commit -m "Milk adapter: MILK_LONG_TH_OVERLAP drops a merged TH box that shares half of a surer one"
+```
+
+- [ ] **Step 6: Gom ảnh chụp sau 14:07 ngày 26/11 và vẽ đáp án**, theo đúng cách của Task 4.
+  - Trước khi chia đoạn lại, chép `segments.json` thành `segments_20261126_1407.json` (844 frame mới của Task 5).
+  - Sau khi ghi nhãn, tạo `segments_after1407.json`: bản `segments.json` mới, mỗi đoạn chỉ giữ thành viên chụp từ
+    `2026-11-26T14:07:00+07:00`; đoạn không còn thành viên nào thì bỏ.
+  - Chép frame, nhãn, ba file segments và code của commit Step 5 sang HUYHOANG.
+
+- [ ] **Step 7: Đo bằng code thật trên HUYHOANG.** `OV` = chuỗi `DET` của Task 5 cộng `;MILK_LONG_TH_OVERLAP=0.5`.
+
+  | Lượt | `--segments` | Thêm | Expected |
+  |---|---|---|---|
+  | a | `segments_20261125.json` | | `gate passed`; cách 0,948 / 0,968 / 0,960 không quá 0,02; Slide differs on 0 |
+  | b | `segments_20261126_1407.json` | `--since 2026-11-25T13:00:00+07:00 --per-segment 200` | `gate passed`; cách 0,926 / 0,921 / 0,994 không quá 0,02; night 194 frame, per 100 ≤ 1,0 |
+  | c | `segments_after1407.json` | `--per-segment 200` | `gate passed`. Đây là ảnh chưa ai nhìn, chụp sau khi luật đã chốt |
+
+  Chạy lại `vinamilk_same.py` với `MILK_LONG_TH_OVERLAP=0.5` ở phía `detector`. Expected: 0 detection Vinamilk khác.
+
+- [ ] **Step 8: Báo hoang** số của ba lượt, theo frame, theo đoạn và theo `arrangement`. Lượt c trượt thì không bật: báo
+  số và dừng. Cả ba qua thì sang Task 6.

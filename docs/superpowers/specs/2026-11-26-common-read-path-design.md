@@ -1,6 +1,7 @@
 # Một đường đọc chung cho mọi nhóm hàng: tìm → xác nhận → gộp cửa sổ — thiết kế
 
-Ngày 26/11/2026. Trạng thái: hoang duyệt ngày 26/11 ("ok duyệt thiết kế"). Nhánh: `feat/common-read-path`, tách từ `feat/auto-label-part2`
+Ngày 26/11/2026. Trạng thái: hoang duyệt ngày 26/11 ("ok duyệt thiết kế"). Sửa cùng ngày, sau khi ảnh mới trượt cổng
+(mục 1e): thêm luật bỏ box trùng vào mục 5.2; hoang chọn "thử cách 1 trước". Nhánh: `feat/common-read-path`, tách từ `feat/auto-label-part2`
 (63caa5a, PR #15 đang mở).
 
 **Quan hệ với các thiết kế khác:**
@@ -66,8 +67,26 @@ ngưỡng 0,9825, 94 không có box.
 *d) Box thừa của detector ở kiểu xếp mới* (trước bước `one_box_per_unit`): 332 box, trong đó 330 là box thứ hai trên
 cùng một hộp và 2 nằm ngoài mọi hộp. Detector gần như không khoanh thứ khác thành TH.
 
+*e) Đo bằng code thật, chiều 26/11* (giai đoạn 1, sau khi có biến `MILK_LONG_TH_CONFIRM`). Ảnh mới là 844 frame từ
+25/11 13:30 đến 26/11 14:05: chiều 25/11 lốc vẫn nằm kiểu E2, ngày 26/11 là kiểu xếp mới F0 (lốc dịch sang trái, một
+hộp bánh che phía trước, còn 7 hộp lộ ra), và 194 frame đêm 25/11.
+
+| Cách đọc | Ảnh | Tìm đúng | Box đúng | Số hộp lệch ≤ 1 |
+|---|---|---|---|---|
+| Không hỏi database | 594 frame cũ | 0,951 | 0,945 | 0,973 |
+| Không hỏi database | 844 frame mới | 0,941 | 0,806 | 0,595 |
+| Database v2 như bản 25/11 | 844 frame mới | 0,729 | 0,864 | 0,557 |
+| Không hỏi database, thêm luật bỏ box chồng ≥ 0,5 box nhỏ (tính ngoài code, một lần) | 844 frame mới | 0,926 | 0,921 | 0,994 |
+
+- Ban đêm: 0 box sữa trên 194 frame. Vinamilk: 357 detection giống hệt. Box Slide không đổi.
+- Ảnh mới trượt cổng vì đếm thừa. Ở khoảng 75% số frame model báo 9–10 hộp khi thật có 8: detector vẽ thêm một box
+  nằm vắt qua hai hộp sát nhau. Box đó chồng mỗi hộp dưới một nửa theo IoU, nên `one_box_per_unit` không bỏ nó.
+- Luật "chồng ≥ 0,5 box nhỏ" đã được nêu ở mục 1b, với mức 0,5 chọn trên ảnh sáng 25/11 trong bốn luật đã thử. Trên ảnh
+  mới nó chỉ được chấm một lần, không chỉnh gì. Riêng kiểu xếp mới F0: 0,884 / 0,861 / 0,984.
+
 **Rút ra:**
 - Với TH ở camera này, database gạt hộp thật nhiều hơn box sai. Nó là thứ làm trượt cổng.
+- Bỏ database là chưa đủ: lưới hộp sát nhau cần thêm một luật bỏ box trùng (mục 5.2).
 - Chỉ cần thôi hỏi database cho lớp TH, không thêm luật hay ngưỡng nào, là qua mọi ngưỡng của cổng TH trên tập 25/11.
 - Tôi (Claude) đã nói sai với hoang hôm 26/11 rằng lỗi nằm ở cách đặt ngưỡng. Phép đo a cho thấy ngưỡng chỉ là phần
   nhỏ.
@@ -139,7 +158,7 @@ như hiện nay. Cuối cửa sổ, các frame được gộp thành một lần
 | Bước | Sữa TH (lớp `th_true_milk`) | Sữa Vinamilk | Slide |
 |---|---|---|---|
 | Tìm | `best_store_v1.pt`, cả khung và ô 1280, ngưỡng 0,25. Không đổi | Như TH | Slide v3. Ngưỡng 0,05 khi bước gộp bật, 0,25 khi tắt |
-| Xác nhận | Không hỏi database (mục 5.2) | Database như hiện nay | Kho ảnh màu của camera (mục 5.3) |
+| Xác nhận | Không hỏi database, và bỏ box TH trùng (mục 5.2) | Database như hiện nay | Kho ảnh màu của camera (mục 5.3) |
 | Gộp cửa sổ | Thấy ở ≥ 3 trong 6 frame (mục 5.4) | Như TH | Thấy ở ≥ 3 trong 6 frame; vị theo phiếu bầu |
 
 ### 5.2 TH: database không còn quyền gạt box của lớp gộp
@@ -151,8 +170,13 @@ như hiện nay. Cuối cửa sổ, các frame được gộp thành một lần
   vẫn đi qua database như hiện nay.
 - **Khi `MILK_LONG_VARIANTS=1`:** database vẫn được hỏi, nhưng chỉ để gọi tên loại. Nó không được gạt box.
   CAM-S01-A để `MILK_LONG_VARIANTS=0`.
-- **Không thêm luật bỏ box trùng.** Bước `one_box_per_unit` giữ nguyên. Luật "chồng ≥ 0,5 box nhỏ" đã thử ở mục 1b: box
-  đúng tăng nhưng số hộp lệch ≤ 1 giảm, và không cần nó để qua cổng.
+- **Luật bỏ box TH trùng** (thêm ngày 26/11, theo mục 1e):
+  - Biến mới `MILK_LONG_TH_OVERLAP`: `0` (mặc định) là tắt, y hệt hiện nay. CAM-S01-A đặt `0.5`.
+  - Chạy sau `one_box_per_unit`, là bước vẫn giữ nguyên, và trước khi hỏi database.
+  - Chỉ xét các box lớp gộp `th_true_milk` với nhau. Đi từ box chắc nhất: một box bị bỏ khi phần chung của nó với một
+    box đã giữ chiếm từ `MILK_LONG_TH_OVERLAP` trở lên diện tích của box nhỏ hơn trong hai box.
+  - Box của lớp khác không bao giờ bị bỏ và không làm box TH bị bỏ.
+  - Giá trị không phải số trong khoảng 0 đến 1 làm worker dừng lúc khởi động, như với `MILK_LONG_TH_CONFIRM`.
 - **Worker tiếp tục đọc database v1** (`carton_recognition`, ngưỡng 0,9556) cho Vinamilk. Database v2 không lên live:
   ngưỡng 0,9825 của nó sẽ làm đổi kết quả Vinamilk, và TH không còn cần nó.
 - **Thứ chặn box sai thay cho database:**
@@ -199,6 +223,7 @@ lên 85% trên một frame), và được kiểm lại ở cổng của giai đo
 |---|---|---|
 | Chạy lại bằng code thật (`evaluate run`) | 594 frame giữ riêng hiện có | Qua cổng. Số phải gần mục 1b; lệch quá 2 điểm thì dừng và tìm nguyên nhân |
 | Ngày chưa ai nhìn | Frame 26/11 | Qua cổng. Đây là số báo cho hoang |
+| Ảnh chụp sau khi luật bỏ box trùng đã chốt | Frame từ 26/11 14:07 trở đi, chưa ai nhìn | Qua cổng. Đây là số sạch nhất của cấu hình cuối |
 | Ban đêm | Frame lúc tủ đã cất của đêm 25/11 và 26/11. Các đêm 22–24/11 đã dùng để train nên không tính | ≤ 1 box sữa trên 100 frame |
 | Vinamilk không đổi | 200 ảnh val tổng hợp có hộp Vinamilk | Giữa `database` và `detector`: nhãn và box giống hệt, điểm lệch không quá 0,002 (ảnh được embed theo lô khác nhau ở half precision) |
 | Slide không đổi | 594 frame giữ riêng | Box Slide giống hệt bản đang chạy |
@@ -229,7 +254,7 @@ Mọi phép đo trên chạy với đúng các biến sẽ bật live ở mục 
 3. Khi hoang OK, bật live theo mục 5.5 của thiết kế TH, với các khác biệt sau:
    - `MILK_LONG_DIR` giữ nguyên (database v1);
    - `MILK_LONG_YOLO=…\yolo\best_store_v1.pt`, `MILK_LONG_TILE=1280`, `MILK_LONG_VARIANTS=0`,
-     `MILK_LONG_TH_CONFIRM=detector`;
+     `MILK_LONG_TH_CONFIRM=detector`, `MILK_LONG_TH_OVERLAP=0.5`;
    - `MILK_MODEL_VERSION=long-store-v1-det+slide-v3`.
 4. Bước này cần backend và website của PR #15 đã deploy (mục 3).
 
@@ -268,8 +293,7 @@ Trên HUYHOANG, không vào repo:
 ## 7. Để sau
 
 - **Train lại bằng "xếp lại nhân tạo" (cách 3).** Làm khi một cổng trượt, hoặc khi cần nâng tỉ lệ box đúng ở kiểu xếp
-  mới (hiện 0,84, phần sai là box thứ hai trên cùng một hộp).
-- **Luật bỏ box trùng cho lưới hộp sát nhau.**
+  mới (0,86 ở kiểu xếp F0 sau khi có luật bỏ box trùng).
 - **Train lại embedder bằng ảnh thật.** Cần cho việc gọi tên Có đường và Ít đường, và để database có thể làm bước xác
   nhận theo luật 5.5.
 - **Database v2:** giữ làm dữ liệu, không dùng trên live.
