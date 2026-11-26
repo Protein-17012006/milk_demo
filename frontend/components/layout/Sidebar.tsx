@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -9,7 +9,6 @@ import {
   Box,
   Gauge,
   Settings,
-  Search,
   ArrowUpDown,
   ArrowLeftToLine,
   LogIn,
@@ -17,7 +16,7 @@ import {
   UserPlus,
 } from "lucide-react";
 import { useAuth, type CognitoGroup } from "@/lib/auth";
-import { useSidebarSearch } from "./SidebarContext";
+import { NARROW_QUERY, isCollapsed, isNavActive } from "@/lib/sidebar-ui";
 
 export type NavItemId = "dashboard" | "category" | "model" | "settings";
 
@@ -34,13 +33,23 @@ const PRIMARY_NAV_ITEMS: {
   { id: "model", label: "Model", href: "/model", icon: Gauge, groups: ["team_admin", "field_team"] },
 ];
 
+function subscribeNarrow(onChange: () => void) {
+  const query = window.matchMedia(NARROW_QUERY);
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+}
+const readNarrow = () => window.matchMedia(NARROW_QUERY).matches;
+// The prerendered page has no screen: it is drawn wide, and the CSS below narrows it on a phone before React starts.
+const narrowWhenPrerendered = () => false;
+
 export function Sidebar() {
-  const [collapsed, setCollapsed] = useState(false);
+  // null until the user presses the collapse button; from then on their choice wins over the screen width.
+  const [choice, setChoice] = useState<boolean | null>(null);
+  const narrow = useSyncExternalStore(subscribeNarrow, readNarrow, narrowWhenPrerendered);
+  const collapsed = isCollapsed(choice, narrow);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
-  const { searchQuery, setSearchQuery } = useSidebarSearch();
   const { user, isAuthenticated, signOut, hasGroup } = useAuth();
   const pathname = usePathname();
-  const searchInputRef = useRef<HTMLInputElement>(null);
   const accountMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -58,40 +67,26 @@ export function Sidebar() {
     return () => document.removeEventListener("mousedown", handleOutside);
   }, [accountMenuOpen]);
 
-  const isPathActive = (href: string) => {
-    if (href === "/") return pathname === "/";
-    return pathname === href || pathname.startsWith(`${href}/`);
-  };
-
   const handleToggleCollapse = () => {
     setAccountMenuOpen(false);
-    setCollapsed((prev) => !prev);
+    setChoice(!collapsed);
   };
 
-  const handleSearchBoxClick = () => {
-    if (collapsed) {
-      setCollapsed(false);
-      setTimeout(() => {
-        searchInputRef.current?.focus();
-      }, 220);
-    } else {
-      searchInputRef.current?.focus();
-    }
-  };
-
-  const settingsActive = isPathActive("/settings");
+  const settingsActive = isNavActive("/settings", pathname);
+  // Until the user chooses, the width also follows the screen in CSS, so a phone never shows the wide bar first.
+  const widthClass =
+    choice === null ? "w-[216px] max-md:w-[56px]" : collapsed ? "w-[56px]" : "w-[216px]";
 
   return (
     <aside
       aria-label="Primary navigation"
-      className={`relative flex h-full shrink-0 flex-col overflow-hidden bg-white border-r border-[#676767]/25 transition-[width] duration-200 ease-[cubic-bezier(0.2,0,0,1)] will-change-[width] select-none ${
-        collapsed ? "w-[56px]" : "w-[216px]"
-      }`}
+      data-sidebar={collapsed ? "collapsed" : "open"}
+      className={`relative flex h-full shrink-0 flex-col overflow-hidden bg-white border-r border-[#676767]/25 transition-[width] duration-200 ease-[cubic-bezier(0.2,0,0,1)] will-change-[width] select-none ${widthClass}`}
     >
       {/* Top Account / Brand Section — icon stays locked at x=14px (centered in 56px) */}
       <div
         ref={accountMenuRef}
-        className="relative flex h-[61px] shrink-0 items-center px-[14px]"
+        className="relative flex h-[61px] shrink-0 items-center border-b border-[#676767]/15 px-[14px]"
       >
         <Link href="/" className="relative h-[28px] w-[28px] shrink-0">
           <Image
@@ -115,7 +110,7 @@ export function Sidebar() {
           title="Account options"
         >
           <span className="truncate text-[12px] font-normal text-black">
-            {isAuthenticated && user?.email ? user.email : "Guest preview"}
+            {isAuthenticated && user?.email ? user.email : "Not signed in"}
           </span>
           <ArrowUpDown
             className="h-[13px] w-[13px] shrink-0 text-black/55"
@@ -134,7 +129,7 @@ export function Sidebar() {
                   <p className="mt-0.5 text-[10.5px] font-medium text-[#EE730A]">
                     {user.groups.length > 0
                       ? user.groups.join(", ")
-                      : "Pending role"}
+                      : "Waiting for approval"}
                   </p>
                 </div>
                 <button
@@ -173,53 +168,12 @@ export function Sidebar() {
         )}
       </div>
 
-      {/* Quick Search Bar — icon stays locked in the 32px left slot at x=12px */}
-      <div className="flex h-[50px] shrink-0 items-center border-y border-[#676767]/15 px-[12px]">
-        <div
-          onClick={handleSearchBoxClick}
-          role={collapsed ? "button" : undefined}
-          tabIndex={collapsed ? 0 : undefined}
-          onKeyDown={
-            collapsed
-              ? (e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    handleSearchBoxClick();
-                  }
-                }
-              : undefined
-          }
-          title={collapsed ? "Quick search..." : undefined}
-          aria-label={collapsed ? "Quick search" : undefined}
-          className={`flex h-[30px] w-full items-center overflow-hidden rounded-[6px] transition-colors duration-150 ${
-            collapsed
-              ? "border border-transparent hover:bg-black/[0.05] cursor-pointer"
-              : "border border-[#676767]/25 bg-white focus-within:border-[#EE730A]/60"
-          }`}
-        >
-          <span className="flex h-[30px] w-[32px] shrink-0 items-center justify-center text-black/55">
-            <Search className="h-[15px] w-[15px]" strokeWidth={1.75} />
-          </span>
-          <input
-            ref={searchInputRef}
-            type="text"
-            tabIndex={collapsed ? -1 : 0}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Quick search..."
-            className={`min-w-0 flex-1 bg-transparent pr-2 text-[11px] font-normal text-black placeholder:text-black/65 outline-none transition-opacity duration-150 ${
-              collapsed ? "pointer-events-none opacity-0" : "opacity-100"
-            }`}
-          />
-        </div>
-      </div>
-
       {/* Navigation Items — every icon stays locked in a 32px left slot at x=12px */}
       <nav className="flex flex-1 flex-col pt-[10px] overflow-y-auto overflow-x-hidden">
         <ul className="flex flex-col gap-[5px] px-[12px]">
           {PRIMARY_NAV_ITEMS.filter((item) => !item.groups || hasGroup(...item.groups)).map((item) => {
             const Icon = item.icon;
-            const isActive = isPathActive(item.href);
+            const isActive = isNavActive(item.href, pathname);
             return (
               <li key={item.id}>
                 <Link

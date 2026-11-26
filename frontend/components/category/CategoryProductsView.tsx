@@ -10,7 +10,6 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useSidebarSearch } from "@/components/layout/SidebarContext";
 import { useAuth } from "@/lib/auth";
 import {
   createApiClient,
@@ -206,7 +205,6 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
 }
 
 export function CategoryProductsView() {
-  const { searchQuery: sidebarSearch } = useSidebarSearch();
   const { isApproved, hasGroup, getIdToken } = useAuth();
 
   // Rows exist only once the live API answers; signed out, the table stays empty (no sample rows).
@@ -323,7 +321,7 @@ export function CategoryProductsView() {
   };
 
   const filteredProducts = useMemo(() => {
-    const q = (localSearch || sidebarSearch).trim().toLowerCase();
+    const q = localSearch.trim().toLowerCase();
 
     const list = products.filter((item) => {
       if (
@@ -370,14 +368,13 @@ export function CategoryProductsView() {
   }, [
     products,
     localSearch,
-    sidebarSearch,
     storeFilter,
     categoryFilter,
     statusFilter,
     sortBy,
   ]);
 
-  const searchText = (localSearch || sidebarSearch).trim();
+  const searchText = localSearch.trim();
   const groups = useMemo(
     () => groupProducts(filteredProducts, sortBy),
     [filteredProducts, sortBy]

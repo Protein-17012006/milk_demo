@@ -6,7 +6,6 @@ import { AlertTriangle } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { WAITING_TEXT, shellState } from "@/lib/shell-ui";
 import { Sidebar } from "./Sidebar";
-import { SidebarSearchProvider } from "./SidebarContext";
 
 interface DashboardShellProps {
   children: React.ReactNode;
@@ -42,27 +41,25 @@ export function DashboardShell({ children }: DashboardShellProps) {
 
   return (
     <InsideDashboardShellContext.Provider value={true}>
-      <SidebarSearchProvider>
-        <div className="flex h-screen w-full overflow-hidden bg-white">
-          <Sidebar />
-          <main className="flex-1 min-w-0 h-full overflow-y-auto bg-white">
-            {state === "waiting" && (
-              <div
-                data-waiting-banner
-                role="status"
-                className="flex flex-wrap items-center gap-2 border-b border-[#FED7AA] bg-[#FFF7ED] px-5 py-2.5 text-[12.5px] text-[#7C2D12]"
-              >
-                <AlertTriangle className="h-4 w-4 shrink-0 text-[#C2560A]" />
-                <span>
-                  Signed in as <strong>{user?.email}</strong>. {WAITING_TEXT}
-                </span>
-              </div>
-            )}
+      <div className="flex h-screen w-full overflow-hidden bg-white">
+        <Sidebar />
+        <main className="flex-1 min-w-0 h-full overflow-y-auto bg-white">
+          {state === "waiting" && (
+            <div
+              data-waiting-banner
+              role="status"
+              className="flex flex-wrap items-center gap-2 border-b border-[#FED7AA] bg-[#FFF7ED] px-5 py-2.5 text-[12.5px] text-[#7C2D12]"
+            >
+              <AlertTriangle className="h-4 w-4 shrink-0 text-[#C2560A]" />
+              <span>
+                Signed in as <strong>{user?.email}</strong>. {WAITING_TEXT}
+              </span>
+            </div>
+          )}
 
-            {children}
-          </main>
-        </div>
-      </SidebarSearchProvider>
+          {children}
+        </main>
+      </div>
     </InsideDashboardShellContext.Provider>
   );
 }
