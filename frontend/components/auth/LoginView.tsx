@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import QRCode from "qrcode";
 import { Eye, EyeOff, KeyRound, Loader2, ShieldCheck } from "lucide-react";
 import { useAuth, type SignInResult } from "@/lib/auth";
+import { AFTER_SIGN_IN } from "@/lib/shell-ui";
 
 function GoogleIcon() {
   return (
@@ -113,7 +114,7 @@ export function LoginView() {
     try {
       const result = await signIn(email, password);
       if (result.status === "SIGNED_IN") {
-        router.push("/category");
+        router.push(AFTER_SIGN_IN);
       } else if (result.status === "NEW_PASSWORD_REQUIRED") {
         setStep("NEW_PASSWORD_REQUIRED");
         setInfoMsg(
@@ -145,7 +146,7 @@ export function LoginView() {
     try {
       const result = await completeNewPassword(newPassword);
       if (result.status === "SIGNED_IN") {
-        router.push("/category");
+        router.push(AFTER_SIGN_IN);
       } else if (result.status === "TOTP_REQUIRED") {
         setStep("TOTP_REQUIRED");
         setInfoMsg("Enter the 6-digit code from your Authenticator app.");
@@ -173,7 +174,7 @@ export function LoginView() {
       const result = await verifyTotpSetup(setupCode);
       if (result.status === "SIGNED_IN") {
         setMfaSetup(null);
-        router.push("/category");
+        router.push(AFTER_SIGN_IN);
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Could not verify the code.");
@@ -193,7 +194,7 @@ export function LoginView() {
     try {
       const result = await submitTotpCode(totpCode);
       if (result.status === "SIGNED_IN") {
-        router.push("/category");
+        router.push(AFTER_SIGN_IN);
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Invalid MFA code.");
@@ -596,11 +597,6 @@ export function LoginView() {
             Sign up
           </Link>
         </p>
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px]">
-          <Link href="/" className="text-[#0051C3] hover:underline">
-            Back to Workspace
-          </Link>
-        </div>
       </div>
     </div>
   );

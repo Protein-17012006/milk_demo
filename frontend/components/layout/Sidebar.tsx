@@ -5,7 +5,6 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  Home,
   PieChart,
   Box,
   Gauge,
@@ -20,7 +19,7 @@ import {
 import { useAuth, type CognitoGroup } from "@/lib/auth";
 import { useSidebarSearch } from "./SidebarContext";
 
-export type NavItemId = "home" | "dashboard" | "category" | "model" | "settings";
+export type NavItemId = "dashboard" | "category" | "model" | "settings";
 
 const PRIMARY_NAV_ITEMS: {
   id: NavItemId;
@@ -30,7 +29,6 @@ const PRIMARY_NAV_ITEMS: {
   /** Only these groups see the item; none means everyone. */
   groups?: CognitoGroup[];
 }[] = [
-  { id: "home", label: "Home", href: "/", icon: Home },
   { id: "dashboard", label: "Dashboard", href: "/dashboard", icon: PieChart },
   { id: "category", label: "Category", href: "/category", icon: Box },
   { id: "model", label: "Model", href: "/model", icon: Gauge, groups: ["team_admin", "field_team"] },

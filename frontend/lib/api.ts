@@ -589,12 +589,6 @@ export function createApiClient(getIdToken: TokenGetter) {
     getStores: () =>
       requestWithAuth("/stores", getIdToken) as Promise<ApiStoresResponse>,
 
-    searchCatalog: (q: string) =>
-      requestWithAuth(
-        `/search?q=${encodeURIComponent(q)}`,
-        getIdToken
-      ) as Promise<{ products: ApiProduct[]; total: number }>,
-
     getReviewQueue: (status?: string) =>
       requestWithAuth(
         `/review-queue${status ? `?status=${encodeURIComponent(status)}` : ""}`,
