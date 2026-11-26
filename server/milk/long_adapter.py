@@ -22,7 +22,7 @@ Settings:
     MILK_LONG_TH_OVERLAP  0 (default): off. 0.5: after the one-box-per-unit step, among boxes of the merged TH class,
                         drop a box that shares this much of the smaller box with a surer one: in a pack the detector
                         also draws a box across two neighbouring cartons, too little IoU with either to be merged
-    MILK_DEVICE        "cuda" or "cpu"; give "cuda", not "cuda:0": the pipeline turns on
+    MILK_DEVICE         "cuda" or "cpu"; give "cuda", not "cuda:0": the pipeline turns on
                         half precision only for the exact string "cuda"
 """
 

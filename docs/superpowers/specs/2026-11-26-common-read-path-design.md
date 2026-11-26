@@ -84,9 +84,34 @@ hộp bánh che phía trước, còn 7 hộp lộ ra), và 194 frame đêm 25/11
 - Luật "chồng ≥ 0,5 box nhỏ" đã được nêu ở mục 1b, với mức 0,5 chọn trên ảnh sáng 25/11 trong bốn luật đã thử. Trên ảnh
   mới nó chỉ được chấm một lần, không chỉnh gì. Riêng kiểu xếp mới F0: 0,884 / 0,861 / 0,984.
 
+*f) Đo lại bằng code thật sau khi thêm luật bỏ box trùng, chiều 26/11* (kế hoạch giai đoạn 1, Task 7). Cách đọc là
+`MILK_LONG_TH_CONFIRM=detector` cùng `MILK_LONG_TH_OVERLAP=0.5`.
+
+| Ảnh | Tìm đúng | Box đúng | Số hộp lệch ≤ 1 |
+|---|---|---|---|
+| 594 frame cũ | 0,964 | 0,984 | 0,960 |
+| 844 frame mới | 0,998 | 0,992 | 0,992 |
+| trong đó chiều 25/11, kiểu E2 (467 frame) | 0,998 | 0,999 | 0,998 |
+| trong đó 26/11, kiểu mới F0 (183 frame) | 0,998 | 0,973 | 0,978 |
+| 67 frame chụp sau 14:07 ngày 26/11, chưa ai nhìn trước khi luật được thêm vào code | 1,000 | 0,985 | 1,000 |
+| Database v2 như bản 25/11, trên 844 frame mới | 0,775 | 0,919 | 0,557 |
+
+- Ban đêm: 0 box sữa trên 194 frame. Vinamilk: 357 detection giống hệt. Box Slide không đổi ở cả ba lượt.
+- **Bộ chấm điểm đã được sửa trong lần đo này.** Hàm `evaluate.match` cũ gán một box cho khung đáp án *đầu tiên* chứa
+  tâm của nó. Khung bao quanh các hộp nằm chéo chồng lên nhau, nên box của một hộp lấy mất khung của hộp bên cạnh, và
+  box của hộp bên cạnh thành box sai: 7 box đúng bị chấm thành 6 đúng, 1 sai, 1 sót (frame 14:10 ngày 26/11). Nay box
+  lấy khung có tâm gần nhất trong các khung còn trống chứa tâm của nó. Ngưỡng của cổng không đổi.
+- Cùng cách đọc, chấm theo hàm cũ: 594 frame cũ 0,947 / 0,967 / 0,960; 844 frame mới 0,920 / 0,915 / 0,992; 67 frame sau
+  14:07 là 0,887 / 0,874 / 1,000. Mọi số tìm đúng và box đúng ở các mục 1b–1e đều tính theo hàm cũ, nên thấp hơn thực
+  tế. Số hộp lệch ≤ 1 không phụ thuộc cách khớp.
+- Giới hạn: 67 frame sau 14:07 chỉ là một đoạn 35 phút của cùng kiểu xếp F0, và không có frame trống. 844 frame mới đã
+  được nhìn trước khi luật vào code (luật đã nêu từ trước và chỉ được chấm một lần). Hàm chấm được sửa sau khi thấy một
+  số trượt, vì vậy cả hai cách chấm đều ghi ở đây.
+
 **Rút ra:**
 - Với TH ở camera này, database gạt hộp thật nhiều hơn box sai. Nó là thứ làm trượt cổng.
 - Bỏ database là chưa đủ: lưới hộp sát nhau cần thêm một luật bỏ box trùng (mục 5.2).
+- Với cả hai thay đổi, cách đọc mới qua cổng trên ảnh cũ lẫn ảnh mới (mục 1f).
 - Chỉ cần thôi hỏi database cho lớp TH, không thêm luật hay ngưỡng nào, là qua mọi ngưỡng của cổng TH trên tập 25/11.
 - Tôi (Claude) đã nói sai với hoang hôm 26/11 rằng lỗi nằm ở cách đặt ngưỡng. Phép đo a cho thấy ngưỡng chỉ là phần
   nhỏ.
@@ -217,7 +242,8 @@ lên 85% trên một frame), và được kiểm lại ở cổng của giai đo
 
 ### 5.6 Đo và cổng
 
-**TH (giai đoạn 1).** Ngưỡng của cổng giữ nguyên như mục 5.4 của thiết kế TH.
+**TH (giai đoạn 1).** Ngưỡng của cổng giữ nguyên như mục 5.4 của thiết kế TH. Cách khớp box cũng vậy, thêm một điều:
+khi tâm của một box nằm trong hai khung đáp án, box lấy khung có tâm gần nhất (mục 1f).
 
 | Phép đo | Trên ảnh nào | Yêu cầu |
 |---|---|---|
