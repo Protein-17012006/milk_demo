@@ -43,6 +43,7 @@ class Track:
     box: tuple[float, float, float, float]
     seen: dict[str, dict[str, Proposal]] = field(default_factory=dict)
     votes: dict[str, GalleryVote] = field(default_factory=dict)
+    colour: np.ndarray | None = None  # mean colour of the boxes the track uses (auto-label design 5.4b)
 
     def proposals(self) -> list[Proposal]:
         return [p for slot in self.seen.values() for p in slot.values()]

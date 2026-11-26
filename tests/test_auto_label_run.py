@@ -5,7 +5,8 @@ import json
 import cv2
 import numpy as np
 
-from training.store_view.auto_label_run import load_group, propose, run_segment
+from training.store_view.auto_label import Track
+from training.store_view.auto_label_run import _track_from, _track_json, load_group, propose, run_segment
 from training.store_view.proposers import Proposal
 from training.store_view.slide_gallery import Gallery, colour
 
@@ -51,6 +52,34 @@ def test_run_segment_with_fake_sources_accepts_an_agreed_can_and_reviews_a_dispu
     by_box = {t.box: decisions[t.id] for t in tracks}
     assert by_box[CAN1].status == "accept" and by_box[CAN1].sku == "cheese145"
     assert by_box[CAN2].status == "review" and by_box[CAN2].reason == "disagree"
+
+
+def two_tone_scene():
+    """Grey-world turns a one-colour crop grey, so each can here has two colours: yellow over blue, green over red."""
+    img = scene()
+    img[30:50, 10:30] = BLUE
+    img[30:50, 40:60] = (40, 40, 200)
+    return img
+
+
+def test_run_segment_gives_each_can_the_colour_of_its_boxes():
+    img = two_tone_scene()
+    own1, own2 = colour(img[10:50, 10:30]), colour(img[10:50, 40:60])
+    assert float(own1 @ own2) < 0.9
+    tracks, _, _ = run_segment("seg-1", ["C1", "C2"], lambda c: two_tone_scene(), FakeSources(), gallery())
+    by_box = {tuple(t.box): t for t in tracks}
+    assert float(by_box[CAN1].colour @ own1) > 0.99
+    assert float(by_box[CAN2].colour @ own2) > 0.99
+
+
+def test_a_track_round_trips_with_and_without_colour():
+    t = Track("s-t0", (1.0, 2.0, 3.0, 4.0))
+    t.colour = patch(YELLOW)
+    back = _track_from(json.loads(json.dumps(_track_json(t))))
+    assert np.allclose(back.colour, t.colour, atol=1e-4)
+    old = _track_json(t)
+    del old["colour"]
+    assert _track_from(old).colour is None
 
 
 def test_propose_skips_scoring_frames_and_writes_one_file_per_segment(tmp_path):

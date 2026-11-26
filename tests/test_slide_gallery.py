@@ -5,7 +5,7 @@ import json
 import cv2
 import numpy as np
 
-from training.store_view.slide_gallery import MIN_IMAGES, Gallery, build, colour, read, trn_rows
+from training.store_view.slide_gallery import MIN_IMAGES, Gallery, build, colour, mean_colour, read, trn_rows
 
 RNG = np.random.default_rng(7)
 
@@ -158,3 +158,11 @@ def test_build_names_each_can_once(tmp_path):
     segments = [{"id": "s", "kind": "day", "split": "train", "keyframe": "K", "members": ["K", "M1", "M2"]}]
     g = build(truth, segments, frames, [], exclude_holdout=True)
     assert len(g.labels) == 3 and g.counts() == {"cheese145": 1}
+
+
+
+def test_mean_colour_is_a_unit_vector_and_none_for_nothing():
+    m = mean_colour([axis(0), axis(0), axis(1)])
+    assert abs(float(np.linalg.norm(m)) - 1.0) < 1e-6
+    assert float(m @ axis(0)) > float(m @ axis(1)) > 0
+    assert mean_colour([]) is None

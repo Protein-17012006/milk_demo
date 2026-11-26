@@ -28,7 +28,7 @@ from training.store_view.auto_label import Decision, Track, cluster, decide
 from training.store_view.auto_label_gate import failures, score
 from training.store_view.auto_label_labels import apply_review, write_segment
 from training.store_view.proposers import Proposal, region_prompts
-from training.store_view.slide_gallery import Gallery, GalleryVote, colour, crop_of, read
+from training.store_view.slide_gallery import Gallery, GalleryVote, colour, crop_of, mean_colour, read
 
 FRAME_SIZE = (2560, 1440)
 
@@ -64,10 +64,13 @@ def run_segment(
     tracks = cluster(props, segment_id)
     counts = gallery.counts()
     for t in tracks:
+        own = []
         for cid, slot in t.seen.items():
             p = slot.get("A") or slot.get("B")
             if (cid, p) in feats:
                 t.votes[cid] = read(gallery, feats[(cid, p)])
+                own.append(feats[(cid, p)])
+        t.colour = mean_colour(own)
     return tracks, {t.id: decide(t, used, counts) for t in tracks}, used
 
 
@@ -77,6 +80,7 @@ def _track_json(t: Track) -> dict:
         "box": list(t.box),
         "seen": {c: {s: [list(p.box), p.conf, p.sku] for s, p in slot.items()} for c, slot in t.seen.items()},
         "votes": {c: [v.sku, v.share, v.votes, v.none_hit] for c, v in t.votes.items()},
+        "colour": None if t.colour is None else [round(float(v), 5) for v in t.colour],
     }
 
 
@@ -84,6 +88,7 @@ def _track_from(d: dict) -> Track:
     t = Track(d["id"], tuple(d["box"]))
     t.seen = {c: {s: Proposal(s, tuple(b), conf, sku) for s, (b, conf, sku) in slot.items()} for c, slot in d["seen"].items()}
     t.votes = {c: GalleryVote(*v) for c, v in d["votes"].items()}
+    t.colour = None if d.get("colour") is None else np.array(d["colour"], dtype=float)
     return t
 
 

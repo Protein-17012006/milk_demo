@@ -49,6 +49,14 @@ def colour(crop: np.ndarray) -> np.ndarray:
     return hist / max(float(np.linalg.norm(hist)), 1e-9)
 
 
+def mean_colour(feats: list[np.ndarray]) -> np.ndarray | None:
+    """The colour of a can seen in several crops: their mean, of unit length again; None when there is no crop."""
+    if not feats:
+        return None
+    m = np.mean(np.stack(feats), axis=0)
+    return m / max(float(np.linalg.norm(m)), 1e-9)
+
+
 @dataclass
 class Gallery:
     features: np.ndarray
