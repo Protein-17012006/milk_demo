@@ -31,7 +31,7 @@ from audit_scoring import (
     summarize,
     validate_labels,
 )
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 from common import (
     CAPTURE_LOG_COLUMNS,
@@ -40,6 +40,7 @@ from common import (
     MILK_FLAG_THRESHOLD,
     UNRECOGNIZED,
     compute_validation_result,
+    csv_rows,
     from_dynamodb,
     to_csv,
     to_dynamodb_safe,
@@ -661,40 +662,108 @@ def _handle_presigned_upload(event: dict[str, Any], user: dict[str, Any], s3) ->
     )
 
 
-def _handle_export_csv(kind: str, event: dict[str, Any], ddb) -> dict[str, Any]:
+EXPORT_MAX_DAYS = 7  # the ingest keeps a capture for 7 days (CAPTURE_TTL_DAYS), so a longer range has nothing more
+EXPORT_LINK_SECONDS = 600
+# kind -> (the capture attribute that holds its lines, the CSV columns)
+EXPORT_SOURCES = {"cv-output": ("rows_json", CV_OUTPUT_COLUMNS), "capture-log": ("log_json", CAPTURE_LOG_COLUMNS)}
+
+
+def _export_day(value: str) -> datetime | None:
+    """A real day written exactly as YYYY-MM-DD, or None."""
+    try:
+        day = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return day if day.strftime("%Y-%m-%d") == value else None
+
+
+def _handle_export_csv(kind: str, event: dict[str, Any], s3, ddb) -> dict[str, Any]:
+    """The CV Output or the capture log as CSV, for the ICT days `from`..`to` (both included; `date` is one day).
+
+    With `link=1` the file goes to S3 and the answer is a download link: an API answer over 6 MB is refused by
+    Lambda, and a week of CV Output is larger than that. Without dates every capture is read, as before.
+    """
     params = event.get("queryStringParameters") or {}
     camera = params.get("camera") or ""
-    date_prefix = params.get("date") or ""  # YYYY-MM-DD
+    first = params.get("from") or params.get("to") or params.get("date") or ""
+    last = params.get("to") or params.get("from") or params.get("date") or ""
+    field, columns = EXPORT_SOURCES[kind]
 
-    captures = _scan_all(ddb.Table(CAPTURES_TABLE))
+    # only the attributes the file needs: whole items (boxes, detections) are several times larger and slower to read
+    scan: dict[str, Any] = {"ProjectionExpression": f"camera_id, capture_timestamp, {field}"}
+    if first:
+        first_day, last_day = _export_day(first), _export_day(last)
+        if first_day is None or last_day is None:
+            return _json_response(400, {"error": "INVALID_DATE", "message": "Days are written YYYY-MM-DD."}, event)
+        if first_day > last_day:
+            return _json_response(400, {"error": "INVALID_RANGE", "message": "from is after to."}, event)
+        if (last_day - first_day).days + 1 > EXPORT_MAX_DAYS:
+            return _json_response(
+                400,
+                {
+                    "error": "RANGE_TOO_LONG",
+                    "max_days": EXPORT_MAX_DAYS,
+                    "message": f"At most {EXPORT_MAX_DAYS} days per file.",
+                },
+                event,
+            )
+        # capture_timestamp is ISO in UTC+7, so the days compare as text
+        day_after = (last_day + timedelta(days=1)).strftime("%Y-%m-%d")
+        scan["FilterExpression"] = Attr("capture_timestamp").gte(first) & Attr("capture_timestamp").lt(day_after)
+
+    captures = _scan_all(ddb.Table(CAPTURES_TABLE), **scan)
     if camera:
         captures = [c for c in captures if c.get("camera_id") == camera]
-    if date_prefix:
-        captures = [c for c in captures if str(c.get("capture_timestamp", "")).startswith(date_prefix)]
     captures.sort(key=lambda c: str(c.get("capture_timestamp", "")))
 
-    if kind == "capture-log":
-        logs = [json.loads(c["log_json"]) for c in captures if c.get("log_json")]
-        csv_text = to_csv(logs, CAPTURE_LOG_COLUMNS, bom=True)
+    # one capture at a time: a list of every row of a week would not fit in the Lambda's memory
+    parts = [to_csv([], columns, bom=True)]
+    rows = 0
+    for capture in captures:
+        if not capture.get(field):
+            continue
+        loaded = json.loads(capture[field])
+        records = loaded if isinstance(loaded, list) else [loaded]
+        rows += len(records)
+        parts.append(csv_rows(records, columns))
+    csv_text = "".join(parts)
+
+    span = "all" if not first else first if first == last else f"{first}_{last}"
+    filename = f"{kind}_{span}.csv"
+    if (params.get("link") or "") != "1":
         return _json_response(
             200,
             csv_text,
             event,
             content_type="text/csv; charset=utf-8",
-            extra_headers={"Content-Disposition": 'attachment; filename="capture-log.csv"'},
+            extra_headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
-    all_rows: list[dict[str, Any]] = []
-    for c in captures:
-        if c.get("rows_json"):
-            all_rows.extend(json.loads(c["rows_json"]))
-    csv_text = to_csv(all_rows, CV_OUTPUT_COLUMNS, bom=True)
+    body = csv_text.encode("utf-8")
+    key = f"exports/{kind}/{uuid.uuid4().hex}/{filename}"
+    s3.put_object(Bucket=ANALYTICS_BUCKET, Key=key, Body=body, ContentType="text/csv; charset=utf-8")
+    url = s3.generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": ANALYTICS_BUCKET,
+            "Key": key,
+            "ResponseContentDisposition": f'attachment; filename="{filename}"',
+            "ResponseContentType": "text/csv; charset=utf-8",
+        },
+        ExpiresIn=EXPORT_LINK_SECONDS,
+    )
     return _json_response(
         200,
-        csv_text,
+        {
+            "url": url,
+            "filename": filename,
+            "rows": rows,
+            "bytes": len(body),
+            "from": first or None,
+            "to": last or None,
+            "expires_in": EXPORT_LINK_SECONDS,
+        },
         event,
-        content_type="text/csv; charset=utf-8",
-        extra_headers={"Content-Disposition": 'attachment; filename="cv-output.csv"'},
     )
 
 
@@ -1828,10 +1897,10 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
             return _handle_seed_initial_data(event, ddb)
 
         if method == "GET" and route_path == "/exports/cv-output.csv":
-            return _handle_export_csv("cv-output", event, ddb)
+            return _handle_export_csv("cv-output", event, s3, ddb)
 
         if method == "GET" and route_path == "/exports/capture-log.csv":
-            return _handle_export_csv("capture-log", event, ddb)
+            return _handle_export_csv("capture-log", event, s3, ddb)
 
         if method == "GET" and route_path == "/kpi":
             return _handle_kpi(event, ddb)

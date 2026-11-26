@@ -174,12 +174,25 @@ paths:
         - name: camera
           in: query
           schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, description: "First day, YYYY-MM-DD in UTC+7. With only one of from/to, the other is the same day." }
+        - name: to
+          in: query
+          schema: { type: string, description: "Last day (included), YYYY-MM-DD in UTC+7. At most 7 days from `from`." }
         - name: date
           in: query
-          schema: { type: string, description: "YYYY-MM-DD" }
+          schema: { type: string, description: "One day, YYYY-MM-DD; the same as from = to." }
+        - name: link
+          in: query
+          schema: { type: string, enum: ["1"], description: "Write the file to S3 and answer with a download link (valid 10 minutes) instead of the CSV text. An answer over 6 MB cannot be returned directly." }
       responses:
         "200":
-          description: text/csv with UTF-8 BOM
+          description: >-
+            text/csv with UTF-8 BOM; with link=1, JSON {url, filename, rows, bytes, from, to, expires_in}.
+            Without any day every capture is read.
+        "400":
+          description: INVALID_DATE, INVALID_RANGE (from after to) or RANGE_TOO_LONG (more than 7 days)
   /exports/capture-log.csv:
     get:
       summary: Export 10-column Capture Log CSV (UTF-8 BOM)
@@ -187,12 +200,25 @@ paths:
         - name: camera
           in: query
           schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, description: "First day, YYYY-MM-DD in UTC+7. With only one of from/to, the other is the same day." }
+        - name: to
+          in: query
+          schema: { type: string, description: "Last day (included), YYYY-MM-DD in UTC+7. At most 7 days from `from`." }
         - name: date
           in: query
-          schema: { type: string }
+          schema: { type: string, description: "One day, YYYY-MM-DD; the same as from = to." }
+        - name: link
+          in: query
+          schema: { type: string, enum: ["1"], description: "Write the file to S3 and answer with a download link (valid 10 minutes) instead of the CSV text. An answer over 6 MB cannot be returned directly." }
       responses:
         "200":
-          description: text/csv with UTF-8 BOM
+          description: >-
+            text/csv with UTF-8 BOM; with link=1, JSON {url, filename, rows, bytes, from, to, expires_in}.
+            Without any day every capture is read.
+        "400":
+          description: INVALID_DATE, INVALID_RANGE (from after to) or RANGE_TOO_LONG (more than 7 days)
   /kpi:
     get:
       summary: Return Reports KPI summary (active stores, total smoothed units, avg processing_time_ms)

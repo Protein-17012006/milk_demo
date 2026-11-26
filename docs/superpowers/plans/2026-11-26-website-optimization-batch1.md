@@ -155,15 +155,26 @@ def _put_capture(day: str, hhmmss: str, units: int, camera_id: str = "CAM-S01-A"
     capture_id = f"CAP-S01-{day.replace('-', '')}-{hhmmss.replace(':', '')}"
     ts = f"{day}T{hhmmss}+07:00"
     row = {col: "" for col in common.CV_OUTPUT_COLUMNS} | {
-        "reading_id": f"RD-{capture_id}", "capture_id": capture_id, "store_id": "DEMO-S01", "camera_id": camera_id,
-        "capture_timestamp": ts, "sku_id": CHEESE, "sku_name": "Sữa, có dấu phẩy", "unit_count": units,
+        "reading_id": f"RD-{capture_id}",
+        "capture_id": capture_id,
+        "store_id": "DEMO-S01",
+        "camera_id": camera_id,
+        "capture_timestamp": ts,
+        "sku_id": CHEESE,
+        "sku_name": "Sữa, có dấu phẩy",
+        "unit_count": units,
     }
     log = {col: "" for col in common.CAPTURE_LOG_COLUMNS} | {"capture_id": capture_id, "capture_timestamp": ts}
-    _table("test-captures").put_item(Item={
-        "camera_id": camera_id, "capture_id": capture_id, "capture_timestamp": ts,
-        "rows_json": json.dumps([row], ensure_ascii=False), "log_json": json.dumps(log, ensure_ascii=False),
-        "detections_json": "x" * 1000,
-    })
+    _table("test-captures").put_item(
+        Item={
+            "camera_id": camera_id,
+            "capture_id": capture_id,
+            "capture_timestamp": ts,
+            "rows_json": json.dumps([row], ensure_ascii=False),
+            "log_json": json.dumps(log, ensure_ascii=False),
+            "detections_json": "x" * 1000,
+        }
+    )
     return capture_id
 
 
@@ -187,9 +198,9 @@ def test_export_date_range_keeps_only_those_days(monkeypatch):
     lines = body.lstrip("﻿").splitlines()
     assert lines[0].split(",") == common.CV_OUTPUT_COLUMNS
     assert len(lines) == 3 and "20261123" not in body
-    assert len(_export(api)["body"].splitlines()) == 4                      # no dates: everything, as before
-    assert len(_export(api, date="2026-11-23")["body"].splitlines()) == 2   # old single-day parameter
-    assert len(_export(api, to="2026-11-25")["body"].splitlines()) == 2     # one end given: that day only
+    assert len(_export(api)["body"].splitlines()) == 4  # no dates: everything, as before
+    assert len(_export(api, date="2026-11-23")["body"].splitlines()) == 2  # old single-day parameter
+    assert len(_export(api, to="2026-11-25")["body"].splitlines()) == 2  # one end given: that day only
 
 
 @mock_aws
@@ -205,7 +216,9 @@ def test_export_link_writes_file_and_returns_link(monkeypatch):
     assert (out["rows"], out["from"], out["to"], out["expires_in"]) == (2, "2026-11-24", "2026-11-25", 600)
     assert "exports/cv-output/" in out["url"] and "response-content-disposition" in out["url"].lower()
     s3 = boto3.client("s3", region_name="ap-southeast-1")
-    keys = [o["Key"] for o in s3.list_objects_v2(Bucket="test-analytics-bucket", Prefix="exports/cv-output/")["Contents"]]
+    keys = [
+        o["Key"] for o in s3.list_objects_v2(Bucket="test-analytics-bucket", Prefix="exports/cv-output/")["Contents"]
+    ]
     assert len(keys) == 1 and keys[0].endswith("/" + out["filename"])
     stored = s3.get_object(Bucket="test-analytics-bucket", Key=keys[0])["Body"].read()
     assert stored.decode("utf-8") == _export(api, **query)["body"]
@@ -224,14 +237,16 @@ def test_export_empty_day_gives_header_only(monkeypatch):
 @mock_aws
 def test_export_rejects_bad_ranges(monkeypatch):
     api, _ = _backend(monkeypatch)
+
     def error(**query):
         resp = _export(api, **query)
         return resp["statusCode"], json.loads(resp["body"])["error"]
+
     assert error(**{"from": "2026-11-25", "to": "2026-11-24"}) == (400, "INVALID_RANGE")
     assert error(**{"from": "2026-11-01", "to": "2026-11-26"}) == (400, "RANGE_TOO_LONG")
     assert error(**{"from": "26/11/2026"}) == (400, "INVALID_DATE")
     assert error(date="2026-02-30") == (400, "INVALID_DATE")
-    assert _export(api, **{"from": "2026-11-20", "to": "2026-11-26"})["statusCode"] == 200   # exactly 7 days
+    assert _export(api, **{"from": "2026-11-20", "to": "2026-11-26"})["statusCode"] == 200  # exactly 7 days
 
 
 @mock_aws

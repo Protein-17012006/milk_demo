@@ -2367,3 +2367,127 @@ def test_a_review_frame_is_labelled_but_never_scored(monkeypatch: pytest.MonkeyP
     status, saved = _call(api, "PUT", f"/v1/model/audits/{review_id}", body=chosen)
     assert status == 200 and saved["status"] == "done" and saved["ai_boxes"][0]["needs_flavour"] is True
     assert _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["n_audits"] == 0
+
+
+# --- Export by date range, answered with a download link (plan 2026-11-26-website-optimization-batch1, Task 1) ---
+
+
+def _put_capture(day: str, hhmmss: str, units: int, camera_id: str = "CAM-S01-A") -> str:
+    """One capture straight into the table, so the test picks its day."""
+    capture_id = f"CAP-S01-{day.replace('-', '')}-{hhmmss.replace(':', '')}"
+    ts = f"{day}T{hhmmss}+07:00"
+    row = {col: "" for col in common.CV_OUTPUT_COLUMNS} | {
+        "reading_id": f"RD-{capture_id}",
+        "capture_id": capture_id,
+        "store_id": "DEMO-S01",
+        "camera_id": camera_id,
+        "capture_timestamp": ts,
+        "sku_id": CHEESE,
+        "sku_name": "Sữa, có dấu phẩy",
+        "unit_count": units,
+    }
+    log = {col: "" for col in common.CAPTURE_LOG_COLUMNS} | {"capture_id": capture_id, "capture_timestamp": ts}
+    _table("test-captures").put_item(
+        Item={
+            "camera_id": camera_id,
+            "capture_id": capture_id,
+            "capture_timestamp": ts,
+            "rows_json": json.dumps([row], ensure_ascii=False),
+            "log_json": json.dumps(log, ensure_ascii=False),
+            "detections_json": "x" * 1000,
+        }
+    )
+    return capture_id
+
+
+def _export(api, kind="cv-output", **query):
+    return api.lambda_handler(_auth_event("GET", f"/v1/exports/{kind}.csv", groups="datagent", query=query))
+
+
+def test_csv_rows_matches_to_csv():
+    cols = ["a", "b"]
+    recs = [{"a": "Sữa, tươi", "b": None}, {"a": 1, "b": True}]
+    assert "\ufeff" + "a,b\n" + common.csv_rows(recs, cols) == common.to_csv(recs, cols)
+    assert common.csv_rows([], cols) == ""
+
+
+@mock_aws
+def test_export_date_range_keeps_only_those_days(monkeypatch):
+    api, _ = _backend(monkeypatch)
+    for day in ("2026-11-23", "2026-11-24", "2026-11-25"):
+        _put_capture(day, "10:00:00", 2)
+    body = _export(api, **{"from": "2026-11-24", "to": "2026-11-25"})["body"]
+    lines = body.lstrip("\ufeff").splitlines()
+    assert lines[0].split(",") == common.CV_OUTPUT_COLUMNS
+    assert len(lines) == 3 and "20261123" not in body
+    assert len(_export(api)["body"].splitlines()) == 4  # no dates: everything, as before
+    assert len(_export(api, date="2026-11-23")["body"].splitlines()) == 2  # the old single-day parameter
+    assert len(_export(api, to="2026-11-25")["body"].splitlines()) == 2  # one end given: that day only
+
+
+@mock_aws
+def test_export_link_writes_file_and_returns_link(monkeypatch):
+    api, _ = _backend(monkeypatch)
+    _put_capture("2026-11-24", "10:00:00", 2)
+    _put_capture("2026-11-25", "10:00:00", 3)
+    query = {"from": "2026-11-24", "to": "2026-11-25"}
+    resp = _export(api, link="1", **query)
+    assert resp["statusCode"] == 200
+    out = json.loads(resp["body"])
+    assert out["filename"] == "cv-output_2026-11-24_2026-11-25.csv"
+    assert (out["rows"], out["from"], out["to"], out["expires_in"]) == (2, "2026-11-24", "2026-11-25", 600)
+    assert "exports/cv-output/" in out["url"] and "response-content-disposition" in out["url"].lower()
+    s3 = boto3.client("s3", region_name="ap-southeast-1")
+    listed = s3.list_objects_v2(Bucket="test-analytics-bucket", Prefix="exports/cv-output/")["Contents"]
+    keys = [o["Key"] for o in listed]
+    assert len(keys) == 1 and keys[0].endswith("/" + out["filename"])
+    stored = s3.get_object(Bucket="test-analytics-bucket", Key=keys[0])["Body"].read()
+    assert stored.decode("utf-8") == _export(api, **query)["body"]
+    assert out["bytes"] == len(stored)
+
+
+@mock_aws
+def test_export_empty_day_gives_header_only(monkeypatch):
+    api, _ = _backend(monkeypatch)
+    _put_capture("2026-11-24", "10:00:00", 2)
+    out = json.loads(_export(api, link="1", date="2026-11-20")["body"])
+    assert out["rows"] == 0 and out["filename"] == "cv-output_2026-11-20.csv"
+    assert _export(api, date="2026-11-20")["body"] == "\ufeff" + ",".join(common.CV_OUTPUT_COLUMNS) + "\n"
+
+
+@mock_aws
+def test_export_rejects_bad_ranges(monkeypatch):
+    api, _ = _backend(monkeypatch)
+
+    def error(**query):
+        resp = _export(api, **query)
+        return resp["statusCode"], json.loads(resp["body"])["error"]
+
+    assert error(**{"from": "2026-11-25", "to": "2026-11-24"}) == (400, "INVALID_RANGE")
+    assert error(**{"from": "2026-11-01", "to": "2026-11-26"}) == (400, "RANGE_TOO_LONG")
+    assert error(**{"from": "26/11/2026"}) == (400, "INVALID_DATE")
+    assert error(date="2026-02-30") == (400, "INVALID_DATE")
+    assert _export(api, **{"from": "2026-11-20", "to": "2026-11-26"})["statusCode"] == 200  # exactly 7 days
+
+
+@mock_aws
+def test_export_capture_log_link(monkeypatch):
+    api, _ = _backend(monkeypatch)
+    _put_capture("2026-11-24", "10:00:00", 2)
+    out = json.loads(_export(api, kind="capture-log", link="1", date="2026-11-24")["body"])
+    assert (out["filename"], out["rows"]) == ("capture-log_2026-11-24.csv", 1)
+    header = _export(api, kind="capture-log", date="2026-11-24")["body"].lstrip("\ufeff").splitlines()[0]
+    assert header.split(",") == common.CAPTURE_LOG_COLUMNS
+
+
+@mock_aws
+def test_export_scan_is_filtered_and_projected(monkeypatch):
+    api, _ = _backend(monkeypatch)
+    seen = {}
+    real = api._scan_all
+    monkeypatch.setattr(api, "_scan_all", lambda table, **kw: seen.update(kw) or real(table, **kw))
+    _export(api, date="2026-11-24")
+    assert seen["ProjectionExpression"] == "camera_id, capture_timestamp, rows_json" and "FilterExpression" in seen
+    seen.clear()
+    _export(api, kind="capture-log")
+    assert seen["ProjectionExpression"] == "camera_id, capture_timestamp, log_json" and "FilterExpression" not in seen

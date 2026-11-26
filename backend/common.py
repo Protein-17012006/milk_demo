@@ -337,14 +337,20 @@ def _csv_cell(value: Any) -> str:
     return str(value)
 
 
+def csv_rows(records: list[dict[str, Any]], columns: list[str]) -> str:
+    """The data lines alone (no header, no BOM), each ending in a newline: an export adds them capture by capture."""
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    for rec in records:
+        writer.writerow([_csv_cell(rec.get(col)) for col in columns])
+    return out.getvalue()
+
+
 def to_csv(records: list[dict[str, Any]], columns: list[str], bom: bool = True) -> str:
     """Serialize rows to Datagent CSV format with UTF-8 BOM for Vietnamese Excel."""
     out = io.StringIO()
-    writer = csv.writer(out, lineterminator="\n")
-    writer.writerow(columns)
-    for rec in records:
-        writer.writerow([_csv_cell(rec.get(col)) for col in columns])
-    return ("\ufeff" if bom else "") + out.getvalue()
+    csv.writer(out, lineterminator="\n").writerow(columns)
+    return ("\ufeff" if bom else "") + out.getvalue() + csv_rows(records, columns)
 
 
 def to_dynamodb_safe(obj: Any) -> Any:

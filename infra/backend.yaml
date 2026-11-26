@@ -397,6 +397,13 @@ Resources:
             Status: Enabled
             Prefix: athena-results/
             ExpirationInDays: 14
+          # CSV files the API writes for a download link that lives 10 minutes
+          - Id: expire-exports-1d
+            Status: Enabled
+            Prefix: exports/
+            ExpirationInDays: 1
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
 
   AnalyticsBucketPolicy:
     Type: AWS::S3::BucketPolicy
