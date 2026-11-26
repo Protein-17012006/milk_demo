@@ -3,31 +3,8 @@
 import React, { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Check, Circle, Eye, EyeOff, KeyRound, Loader2 } from "lucide-react";
+import { Check, Circle, Eye, EyeOff, Loader2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-
-function GoogleIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
-      <path
-        fill="#4285F4"
-        d="M17.64 9.205c0-.639-.057-1.252-.164-1.841H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"
-      />
-      <path
-        fill="#34A853"
-        d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"
-      />
-      <path
-        fill="#FBBC05"
-        d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"
-      />
-      <path
-        fill="#EA4335"
-        d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"
-      />
-    </svg>
-  );
-}
 
 export function RegisterView() {
   const router = useRouter();
@@ -143,52 +120,13 @@ export function RegisterView() {
       </h1>
       <p className="mt-1.5 text-[13.5px] font-normal text-[#595959]">
         {step === "DONE"
-          ? "Your Cognito account is verified. A team_admin must assign your role group (datagent / field_team) before data access unlocks."
+          ? "Your email is verified. An administrator has to approve the account before it can see shelf data."
           : "Get started with shelf monitoring and store analytics in minutes."}
       </p>
 
       {step === "FORM" && (
         <>
-          <div className="mt-6 flex flex-col gap-2.5">
-            <button
-              type="button"
-              onClick={() =>
-                setInfoMsg(
-                  "Google Sign-up is not enabled in Phase 1 — register with Cognito email & password below."
-                )
-              }
-              className="flex h-[42px] w-full items-center justify-center gap-2.5 rounded-[6px] border border-[#D1D5DB] bg-white px-4 text-[14px] font-medium text-[#1D1F20] hover:bg-[#F9FAFB] hover:border-[#9CA3AF] transition-colors cursor-pointer"
-            >
-              <GoogleIcon />
-              <span>Sign up with Google</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() =>
-                setInfoMsg(
-                  "Enterprise SSO is managed via IAM Identity Center for AWS operators."
-                )
-              }
-              className="flex h-[42px] w-full items-center justify-center gap-2.5 rounded-[6px] border border-[#D1D5DB] bg-white px-4 text-[14px] font-medium text-[#1D1F20] hover:bg-[#F9FAFB] hover:border-[#9CA3AF] transition-colors cursor-pointer"
-            >
-              <KeyRound
-                className="h-[16px] w-[16px] text-[#4B5563]"
-                strokeWidth={1.9}
-              />
-              <span>Sign up with SSO</span>
-            </button>
-          </div>
-
-          <div className="my-6 flex items-center gap-3">
-            <div className="h-px flex-1 bg-[#E5E7EB]" />
-            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-[#6B7280]">
-              or
-            </span>
-            <div className="h-px flex-1 bg-[#E5E7EB]" />
-          </div>
-
-          <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+          <form onSubmit={handleSubmit} className="mt-6 space-y-4" noValidate>
             <div>
               <label
                 htmlFor="register-email"
@@ -300,9 +238,7 @@ export function RegisterView() {
             </div>
 
             <p className="pt-0.5 text-[12px] leading-relaxed text-[#595959]">
-              New self-registered accounts stay in{" "}
-              <strong>Pending Role Assignment</strong> until a{" "}
-              <code>team_admin</code> grants group permissions.
+              A new account needs an administrator&apos;s approval before it can see shelf data.
             </p>
 
             <button
@@ -348,9 +284,8 @@ export function RegisterView() {
       {step === "DONE" && (
         <div className="mt-5 space-y-4">
           <div className="rounded-[8px] border border-[#BBF7D0] bg-[#F0FDF4] p-4 text-[13px] text-[#166534]">
-            Email verified for <strong>{email}</strong>. You can sign in now —
-            API access activates once <code>team_admin</code> adds you to a
-            Cognito group.
+            Email verified for <strong>{email}</strong>. You can sign in now; shelf data appears once an
+            administrator approves the account.
           </div>
           <button
             type="button"

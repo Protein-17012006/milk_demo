@@ -4,32 +4,9 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import QRCode from "qrcode";
-import { Eye, EyeOff, KeyRound, Loader2, ShieldCheck } from "lucide-react";
+import { Eye, EyeOff, Loader2, ShieldCheck } from "lucide-react";
 import { useAuth, type SignInResult } from "@/lib/auth";
 import { AFTER_SIGN_IN } from "@/lib/shell-ui";
-
-function GoogleIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
-      <path
-        fill="#4285F4"
-        d="M17.64 9.205c0-.639-.057-1.252-.164-1.841H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"
-      />
-      <path
-        fill="#34A853"
-        d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"
-      />
-      <path
-        fill="#FBBC05"
-        d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"
-      />
-      <path
-        fill="#EA4335"
-        d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"
-      />
-    </svg>
-  );
-}
 
 type LoginStep =
   | "CREDENTIALS"
@@ -64,7 +41,6 @@ export function LoginView() {
   const [totpCode, setTotpCode] = useState("");
   const [resetCode, setResetCode] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [rememberDevice, setRememberDevice] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
@@ -122,7 +98,6 @@ export function LoginView() {
         );
       } else if (result.status === "TOTP_REQUIRED") {
         setStep("TOTP_REQUIRED");
-        setInfoMsg("Enter the 6-digit code from your Authenticator app.");
       } else if (result.status === "MFA_SETUP_REQUIRED") {
         enterMfaSetup(result);
       }
@@ -149,7 +124,6 @@ export function LoginView() {
         router.push(AFTER_SIGN_IN);
       } else if (result.status === "TOTP_REQUIRED") {
         setStep("TOTP_REQUIRED");
-        setInfoMsg("Enter the 6-digit code from your Authenticator app.");
       } else if (result.status === "MFA_SETUP_REQUIRED") {
         enterMfaSetup(result);
       }
@@ -264,46 +238,7 @@ export function LoginView() {
 
       {step === "CREDENTIALS" && (
         <>
-          <div className="mt-6 flex flex-col gap-2.5">
-            <button
-              type="button"
-              onClick={() =>
-                setInfoMsg(
-                  "Google federated login is not enabled in Phase 1 — sign in with your Cognito email & password below."
-                )
-              }
-              className="flex h-[42px] w-full items-center justify-center gap-2.5 rounded-[6px] border border-[#D1D5DB] bg-white px-4 text-[14px] font-medium text-[#1D1F20] hover:bg-[#F9FAFB] hover:border-[#9CA3AF] transition-colors cursor-pointer"
-            >
-              <GoogleIcon />
-              <span>Continue with Google</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() =>
-                setInfoMsg(
-                  "Enterprise SSO (IAM Identity Center) is for AWS operators. Website users sign in with Cognito + MFA below."
-                )
-              }
-              className="flex h-[42px] w-full items-center justify-center gap-2.5 rounded-[6px] border border-[#D1D5DB] bg-white px-4 text-[14px] font-medium text-[#1D1F20] hover:bg-[#F9FAFB] hover:border-[#9CA3AF] transition-colors cursor-pointer"
-            >
-              <KeyRound
-                className="h-[16px] w-[16px] text-[#4B5563]"
-                strokeWidth={1.9}
-              />
-              <span>Continue with SSO</span>
-            </button>
-          </div>
-
-          <div className="my-6 flex items-center gap-3">
-            <div className="h-px flex-1 bg-[#E5E7EB]" />
-            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-[#6B7280]">
-              or
-            </span>
-            <div className="h-px flex-1 bg-[#E5E7EB]" />
-          </div>
-
-          <form onSubmit={handleLoginSubmit} className="space-y-4" noValidate>
+          <form onSubmit={handleLoginSubmit} className="mt-6 space-y-4" noValidate>
             <div>
               <label
                 htmlFor="login-email"
@@ -356,17 +291,7 @@ export function LoginView() {
               </div>
             </div>
 
-            <div className="flex items-center justify-between pt-0.5 text-[13px]">
-              <label className="inline-flex items-center gap-2 text-[#374151] cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={rememberDevice}
-                  onChange={(e) => setRememberDevice(e.target.checked)}
-                  className="h-[15px] w-[15px] rounded border-[#B6B6B6] accent-[#EE730A] cursor-pointer"
-                />
-                <span>Remember this device</span>
-              </label>
-
+            <div className="flex items-center justify-end pt-0.5 text-[13px]">
               <button
                 type="button"
                 onClick={() => {
@@ -429,7 +354,7 @@ export function LoginView() {
         <form onSubmit={handleTotpSubmit} className="mt-5 space-y-4">
           <div className="flex items-center gap-2 text-[13px] text-[#374151]">
             <ShieldCheck className="h-4 w-4 text-[#EE730A]" />
-            <span>Enter your 6-digit TOTP authenticator code.</span>
+            <span>Enter the 6-digit code from your authenticator app.</span>
           </div>
           <input
             type="text"
@@ -512,8 +437,7 @@ export function LoginView() {
       {step === "FORGOT_REQUEST" && (
         <form onSubmit={handleForgotRequest} className="mt-5 space-y-4">
           <p className="text-[13px] text-[#595959]">
-            We&rsquo;ll send a verification code via AWS Cognito to reset your
-            password.
+            We&rsquo;ll email you a code to reset your password.
           </p>
           <input
             type="email"

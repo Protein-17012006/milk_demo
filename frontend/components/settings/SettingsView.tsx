@@ -1,15 +1,13 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import Image from "next/image";
 import {
   Building2,
-  Check,
   Clock,
   Loader2,
   Lock,
   ShieldCheck,
-  Sliders,
   Upload,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
@@ -17,39 +15,18 @@ import { createApiClient, type ApiStore } from "@/lib/api";
 import { parseImportFile } from "@/lib/import-parse";
 import { ShelfPlanSection } from "./ShelfPlanSection";
 
-const DATE_FORMATS = [
-  "DD MMM YYYY, HH:mm",
-  "DD/MM/YYYY HH:mm",
-  "YYYY-MM-DD HH:mm",
-] as const;
-
-const LANDING_PAGES = ["Home", "Reports", "Products"] as const;
-
-interface UserPreferences {
-  date_format: string;
-  default_landing: string;
-}
-
-const DEFAULT_PREFS: UserPreferences = {
-  date_format: "DD MMM YYYY, HH:mm",
-  default_landing: "Home",
-};
-
 // Stores come only from the live API; signed out, the list stays empty rather than claiming a status.
 const FALLBACK_STORES: ApiStore[] = [];
 
 export function SettingsView() {
   const { user, isApproved, hasGroup, getIdToken } = useAuth();
 
-  const [savedPrefs, setSavedPrefs] = useState<UserPreferences>(DEFAULT_PREFS);
-  const [draftPrefs, setDraftPrefs] = useState<UserPreferences>(DEFAULT_PREFS);
   const [stores, setStores] = useState<ApiStore[]>(FALLBACK_STORES);
   const [flagThreshold, setFlagThreshold] = useState<number>(0.7);
   const [timezoneLabel, setTimezoneLabel] = useState<string>(
     "Asia/Ho_Chi_Minh (UTC+7)"
   );
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [liveSynced, setLiveSynced] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
@@ -71,8 +48,6 @@ export function SettingsView() {
       .getSettings()
       .then((res) => {
         if (cancelled) return;
-        setSavedPrefs(res.preferences);
-        setDraftPrefs(res.preferences);
         setStores(res.stores.length > 0 ? res.stores : FALLBACK_STORES);
         setFlagThreshold(res.flag_threshold.value);
         setTimezoneLabel(res.timezone.value);
@@ -88,32 +63,6 @@ export function SettingsView() {
       cancelled = true;
     };
   }, [isApproved, getIdToken]);
-
-  const hasUnsavedChanges = useMemo(
-    () =>
-      draftPrefs.date_format !== savedPrefs.date_format ||
-      draftPrefs.default_landing !== savedPrefs.default_landing,
-    [draftPrefs, savedPrefs]
-  );
-
-  const handleSave = async () => {
-    if (!isApproved) {
-      setSavedPrefs(draftPrefs);
-      showToast("Saved preferences locally (sign in to persist to AWS)");
-      return;
-    }
-    setSaving(true);
-    try {
-      const api = createApiClient(getIdToken);
-      await api.updateSettings(draftPrefs);
-      setSavedPrefs(draftPrefs);
-      showToast("Preferences saved to AWS DynamoDB (user_prefs)");
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Failed to save settings");
-    } finally {
-      setSaving(false);
-    }
-  };
 
   // Both catalogs are imported the same way: read the file into rows, send them, say how many went in.
   const importFile = async (
@@ -178,24 +127,6 @@ export function SettingsView() {
                 : "Account identity, user preferences, inference rules, and store directory"}
             </p>
           </div>
-
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={!hasUnsavedChanges || saving}
-            className={`flex h-[36px] items-center gap-[6px] rounded-[8px] px-[16px] text-[13px] font-semibold transition-colors ${
-              hasUnsavedChanges && !saving
-                ? "bg-[#EE730A] text-white hover:bg-[#D96504] cursor-pointer"
-                : "bg-[#EE730A]/45 text-white/90 cursor-not-allowed"
-            }`}
-          >
-            {saving ? (
-              <Loader2 className="h-[15px] w-[15px] animate-spin" />
-            ) : (
-              <Check className="h-[15px] w-[15px]" strokeWidth={2.2} />
-            )}
-            <span>{saving ? "Saving..." : "Save Preferences"}</span>
-          </button>
         </header>
 
         {loading && (
@@ -262,75 +193,6 @@ export function SettingsView() {
                     </span>
                   )}
                 </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Section 2: User Preferences (Editable -> DynamoDB user_prefs) */}
-          <section className="rounded-[14px] border border-[#EFF0F6] bg-white p-6">
-            <div className="flex items-center gap-2.5 border-b border-[#EFF0F6] pb-4">
-              <Sliders className="h-[18px] w-[18px] text-[#EE730A]" />
-              <div>
-                <h2 className="text-[15px] font-semibold text-[#111827]">
-                  Personal Display Preferences
-                </h2>
-                <p className="text-[12.5px] text-[#6B7280]">
-                  Saved per user in DynamoDB (<code>user_prefs</code>).
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div>
-                <label
-                  htmlFor="pref-date-format"
-                  className="block text-[12px] font-medium text-[#374151]"
-                >
-                  Date Format
-                </label>
-                <select
-                  id="pref-date-format"
-                  value={draftPrefs.date_format}
-                  onChange={(e) =>
-                    setDraftPrefs((prev) => ({
-                      ...prev,
-                      date_format: e.target.value,
-                    }))
-                  }
-                  className="mt-1.5 h-[38px] w-full rounded-[8px] border border-[#D1D5DB] bg-white px-3 text-[13px] text-[#111827] outline-none focus:border-[#EE730A]"
-                >
-                  {DATE_FORMATS.map((fmt) => (
-                    <option key={fmt} value={fmt}>
-                      {fmt}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label
-                  htmlFor="pref-landing"
-                  className="block text-[12px] font-medium text-[#374151]"
-                >
-                  Default Landing Page
-                </label>
-                <select
-                  id="pref-landing"
-                  value={draftPrefs.default_landing}
-                  onChange={(e) =>
-                    setDraftPrefs((prev) => ({
-                      ...prev,
-                      default_landing: e.target.value,
-                    }))
-                  }
-                  className="mt-1.5 h-[38px] w-full rounded-[8px] border border-[#D1D5DB] bg-white px-3 text-[13px] text-[#111827] outline-none focus:border-[#EE730A]"
-                >
-                  {LANDING_PAGES.map((page) => (
-                    <option key={page} value={page}>
-                      {page}
-                    </option>
-                  ))}
-                </select>
               </div>
             </div>
           </section>

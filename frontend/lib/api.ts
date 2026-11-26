@@ -662,15 +662,6 @@ export function createApiClient(getIdToken: TokenGetter) {
     getSettings: () =>
       requestWithAuth("/settings", getIdToken) as Promise<ApiSettingsResponse>,
 
-    updateSettings: (payload: {
-      date_format: string;
-      default_landing: string;
-    }) =>
-      requestWithAuth("/settings", getIdToken, {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      }),
-
     // The backend writes the file and answers with a link: an answer over 6 MB cannot come back directly.
     exportCsvLink: (kind: ExportKind, range: ExportRange) =>
       requestWithAuth(
