@@ -1830,6 +1830,8 @@ def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
             "old_rule_frames": old_rule_frames,
             "model_versions": sorted(latest, key=lambda v: latest[v], reverse=True),
             "range": {"days": days, "model_version": version},
+            # model label -> product name, also for labels whose own row no longer shows in the product list
+            "sku_names": _sku_choices(ddb),
         },
         event,
     )

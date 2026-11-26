@@ -2574,3 +2574,14 @@ def test_an_event_keeps_the_products_boxes_in_its_two_photos(monkeypatch: pytest
 def from_plain(item: dict) -> dict:
     """A DynamoDB item with its Decimals as ints, so lists of boxes compare with plain lists."""
     return json.loads(json.dumps(item, default=lambda d: int(d) if d == int(d) else float(d)))
+
+
+# --- Names for the Model page (plan 2026-11-27-website-optimization-batch3, Task 1) ---
+
+
+@mock_aws
+def test_model_summary_names_every_model_label(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    names = _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["sku_names"]
+    assert names["TMP-MLK-TH-01"] == TH_OLD  # a label whose own row no longer shows in /products
+    assert names["cheese145"] == CHEESE
