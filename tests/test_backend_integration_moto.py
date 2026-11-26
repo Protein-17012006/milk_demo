@@ -2081,7 +2081,7 @@ def test_photos_route_gives_null_for_a_missing_photo(monkeypatch: pytest.MonkeyP
     _put_event(no_photo)
     query = {"store_id": "DEMO-S01", "event_key": no_photo}
     body = _call(api, "GET", "/v1/shelf-events/photos", groups="datagent", query=query)[1]
-    assert body == {"before_url": None, "after_url": None}
+    assert body == {"before_url": None, "after_url": None, "before_boxes": [], "after_boxes": []}
     query = {"store_id": "DEMO-S01", "event_key": "20261121-1500#nothing#OOS"}
     assert _call(api, "GET", "/v1/shelf-events/photos", groups="datagent", query=query)[0] == 404
 
@@ -2543,3 +2543,34 @@ def test_products_read_nothing_extra_for_a_saved_plan(monkeypatch: pytest.Monkey
     _shelf_plan(expected=(CHEESE,))
     monkeypatch.setattr(api, "_suggested_skus", lambda *a, **k: pytest.fail("a saved plan needs no suggestion"))
     assert _call(api, "GET", "/v1/products", groups="datagent")[0] == 200
+
+
+# --- The product's boxes in an event's two photos (plan 2026-11-27-website-optimization-batch2, Task 8) ---
+
+
+@mock_aws
+def test_an_event_keeps_the_products_boxes_in_its_two_photos(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _at(api, monkeypatch, "2026-11-21T14:30:00+07:00")
+    _shelf_plan()
+    _framed_cheese_then_empty(ingest)
+    _tick(ingest)
+    event = from_plain(_oos_event())
+    five = [[10 + 60 * k, 20, 50, 80] for k in range(5)]
+    assert (event["boxes_before"], event["boxes_after"]) == (five, [])  # the cheese was there, then it was not
+    query = {"store_id": "DEMO-S01", "event_key": OOS_KEY}
+    body = _call(api, "GET", "/v1/shelf-events/photos", groups="datagent", query=query)[1]
+    assert (body["before_boxes"], body["after_boxes"]) == (five, [])
+    assert body["before_url"] and body["after_url"]
+    # a recompute keeps them with the photo keys, without asking S3 again
+    _shelf_plan(expected=(CHEESE, HOT), shelf_recompute_requested_at="2026-11-21T14:22:30+07:00")
+    s3_calls = _s3_calls(monkeypatch, ingest)
+    _tick(ingest)
+    assert s3_calls == []
+    again = from_plain(_oos_event())
+    assert (again["boxes_before"], again["boxes_after"]) == (five, [])
+
+
+def from_plain(item: dict) -> dict:
+    """A DynamoDB item with its Decimals as ints, so lists of boxes compare with plain lists."""
+    return json.loads(json.dumps(item, default=lambda d: int(d) if d == int(d) else float(d)))

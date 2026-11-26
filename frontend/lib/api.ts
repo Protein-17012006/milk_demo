@@ -238,6 +238,10 @@ export interface ApiExportLink {
 export interface ApiEventPhotos {
   before_url: string | null;
   after_url: string | null;
+  // The event's product in each photo, as [x, y, width, height] in frame pixels; [] when it is not in view.
+  // Events written before boxes were kept, and older backends, have none.
+  before_boxes?: [number, number, number, number][];
+  after_boxes?: [number, number, number, number][];
 }
 
 export interface ApiCoverage {

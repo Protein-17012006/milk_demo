@@ -780,6 +780,8 @@ def _copy_photo(s3_client, source: dict, dest_key: str) -> str | None:
 
 BEFORE_LOOKBACK = 24  # checks looked through for a "before" photo: two hours of 5-minute checks
 PHOTO_KEYS = ("photo_before_key", "photo_after_key")
+# the event's product in each photo: its boxes in the frame the photo was copied from ([] when it is not in view)
+BOX_KEYS = ("boxes_before", "boxes_after")
 
 Checks = Mapping[str, dict[str, Any]]  # a recompute's checks by bucket, as it replays them
 
@@ -820,7 +822,8 @@ def _event_photos(
 ) -> dict[str, str]:
     """Copy the photos a shelf event does not have yet (hub frames expire after 7 days): the check of the event
     (after) and the last measured check with a frame before it (before). Returns photo_before_key and
-    photo_after_key of the photos copied now, or found already copied, each left out when there is no photo.
+    photo_after_key of the photos copied now, or found already copied, each left out when there is no photo; and
+    with each photo boxes_before / boxes_after, the event's product in that frame (from the check's frame_boxes).
 
     checks: the recompute's checks by bucket. It writes its check items in a batch, so until the batch is sent the
     table holds the old items (or none) and the photos must come from the checks it is replaying. None reads the
@@ -846,9 +849,11 @@ def _event_photos(
         return {}
     out: dict[str, str] = {}
     for name in wanted:
-        key = _copy_photo(s3_client, sources[name] or {}, f"{prefix}-{name}.jpg")
+        source = sources[name] or {}
+        key = _copy_photo(s3_client, source, f"{prefix}-{name}.jpg")
         if key:
             out[f"photo_{name}_key"] = key
+            out[f"boxes_{name}"] = (source.get("frame_boxes") or {}).get(event["sku_id"]) or []
     return out
 
 
@@ -997,7 +1002,10 @@ def shelf_recompute(s3_client, ddb_resource, store_id: str, days: int, now_utc: 
     old_events = _query_all(
         events_table, KeyConditionExpression=Key("store_id").eq(store_id) & Key("event_key").between(first, f"{last}~")
     )
-    kept_photos = {e["event_key"]: {k: e[k] for k in PHOTO_KEYS if e.get(k)} for e in old_events}
+    kept_photos = {
+        e["event_key"]: {**{k: e[k] for k in PHOTO_KEYS if e.get(k)}, **{k: e[k] for k in BOX_KEYS if k in e}}
+        for e in old_events
+    }
     # SKUs that started before these days stay started; the others start again from the checks replayed
     old_state = from_dynamodb(table.get_item(Key={"store_id": store_id, "key": "state"}).get("Item")) or {}
     since = {sku: bucket for sku, bucket in (old_state.get("since") or {}).items() if bucket < first}
@@ -1020,7 +1028,14 @@ def shelf_recompute(s3_client, ddb_resource, store_id: str, days: int, now_utc: 
     hours: set[str] = set()
     replayed: dict[str, dict[str, Any]] = {}  # the checks as this run writes them, for the event photos
     # what a check knew of the display; checks stored before the display check have none of these
-    display_fields = ("captures_visible", "measurable", "unmeasured_reason", "image_key", "source_bucket")
+    display_fields = (
+        "captures_visible",
+        "measurable",
+        "unmeasured_reason",
+        "image_key",
+        "source_bucket",
+        "frame_boxes",
+    )
     with table.batch_writer() as writer, events_table.batch_writer() as event_writer:
         for bucket in sorted(checks):
             stored = checks[bucket]

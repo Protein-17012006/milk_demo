@@ -1280,7 +1280,9 @@ def _find_event(ddb, store_id: str, event_key: str) -> dict[str, Any] | None:
 
 
 def _handle_shelf_event_photos(event: dict[str, Any], s3, ddb) -> dict[str, Any]:
-    """Short-lived links to an event's two photos; null for a photo that was never kept or has expired."""
+    """Short-lived links to an event's two photos; null for a photo that was never kept or has expired. With
+    them the boxes of the event's product in each photo ([x, y, width, height]); [] when it was not in view, and
+    for events written before boxes were kept."""
     params = event.get("queryStringParameters") or {}
     found = _find_event(ddb, params.get("store_id") or "", params.get("event_key") or "")
     if not found:
@@ -1291,6 +1293,7 @@ def _handle_shelf_event_photos(event: dict[str, Any], s3, ddb) -> dict[str, Any]
         urls[f"{name}_url"] = None
         if key and _object_exists(s3, key):
             urls[f"{name}_url"] = _presign_frame(s3, key, ANALYTICS_BUCKET)
+        urls[f"{name}_boxes"] = found.get(f"boxes_{name}") or []
     return _json_response(200, urls, event)
 
 

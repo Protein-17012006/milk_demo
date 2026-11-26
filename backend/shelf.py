@@ -93,6 +93,15 @@ def sees_display(capture: dict) -> bool:
     return capture.get("display_visible", True) is not False
 
 
+def _frame_boxes(capture: dict) -> dict[str, list]:
+    """Per product, its boxes ([x, y, width, height]) in one capture's frame, from the capture's rows."""
+    boxes: dict[str, list] = {}
+    for row in _rows(capture):
+        if row.get("sku_id") and row.get("bounding_box"):
+            boxes.setdefault(row["sku_id"], []).extend(row["bounding_box"])
+    return boxes
+
+
 def build_check(bucket: str, captures: list[dict]) -> dict[str, Any]:
     """One check of a store, from the captures that see the display: per SKU, the lower median of each camera's
     captures (a SKU missing from a capture counts 0 there), summed over cameras. Unrecognized rows are left out.
@@ -100,7 +109,8 @@ def build_check(bucket: str, captures: list[dict]) -> dict[str, Any]:
 
     The check is measurable when at least half of its captures see the display; otherwise it says why. image_key
     and source_bucket are the frame of the first capture (by capture_id) that sees the display and has one, for
-    event photos."""
+    event photos; frame_boxes are each product's boxes in that very frame ({} without a frame), so a photo of an
+    event can show where its product stood. They change no count."""
     seeing = [item for item in captures if sees_display(item)]
     per_camera: dict[str, list[dict[str, int]]] = defaultdict(list)
     confident: set[str] = set()
@@ -130,6 +140,7 @@ def build_check(bucket: str, captures: list[dict]) -> dict[str, Any]:
         "confident_skus": sorted(confident),
         "image_key": framed[0]["image_key"] if framed else None,
         "source_bucket": (framed[0].get("source_bucket") or None) if framed else None,
+        "frame_boxes": _frame_boxes(framed[0]) if framed else {},
     }
     if not measurable:
         check["unmeasured_reason"] = "display_not_visible"

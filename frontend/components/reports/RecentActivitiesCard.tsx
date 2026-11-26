@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { ApiEventPhotos, ApiShelfEvent, ApiShelfEventsResponse, ShelfEventType, ShelfVerdict } from "@/lib/api";
+import { focusRegion, type Box } from "@/lib/frame-geometry";
 import { BADGE_COLORS, badgePillText } from "@/lib/reliability-ui";
 import { earlierText, eventLabel, eventText, foldEvents, gapText, oosDurationText, timeAgo, type EventFold } from "@/lib/shelf-ui";
 
@@ -143,7 +144,20 @@ function EventFoldRow({ fold, now, actions }: { fold: EventFold<ApiShelfEvent>; 
   );
 }
 
-function PhotoSlot({ title, url, onOpen }: { title: string; url: string | null | undefined; onOpen: (url: string) => void }) {
+interface PhotoSlotProps {
+  title: string;
+  url: string | null | undefined;
+  /** The event's product in this photo. */
+  boxes: Box[];
+  /** The product's boxes in both photos: where the two photos zoom, so they show the same part of the shelf. */
+  focus: Box[];
+  onOpen: (url: string) => void;
+}
+
+function PhotoSlot({ title, url, boxes, focus, onOpen }: PhotoSlotProps) {
+  // the frame's real size, learnt from the image: the zoom needs it
+  const [size, setSize] = useState<{ w: number; h: number } | null>(null);
+  const region = size && focus.length > 0 ? focusRegion(focus, size.w, size.h) : null;
   return (
     <figure className="flex flex-1 flex-col gap-[6px]">
       <figcaption className="text-[12px] font-semibold text-[#374151]">{title}</figcaption>
@@ -151,17 +165,56 @@ function PhotoSlot({ title, url, onOpen }: { title: string; url: string | null |
         <button
           type="button"
           data-photo-open
-          title="Open the photo large"
+          title="Open the whole photo large"
           onClick={() => onOpen(url)}
           className="cursor-zoom-in overflow-hidden rounded-[10px] border border-[#EFF0F6] hover:border-[#D1D5DB]"
         >
-          {/* eslint-disable-next-line @next/next/no-img-element -- a short-lived signed link, not a static asset */}
-          <img src={url} alt={title} className="w-full object-contain" />
+          {region && size ? (
+            <svg
+              data-photo-zoomed
+              viewBox={`${region.x} ${region.y} ${region.w} ${region.h}`}
+              preserveAspectRatio="xMidYMid meet"
+              className="block w-full"
+              role="img"
+              aria-label={`${title}: the product's part of the shelf`}
+            >
+              <image href={url} x={0} y={0} width={size.w} height={size.h} />
+              {boxes.map(([x, y, w, h], i) => (
+                <rect
+                  key={`${i}-${x}-${y}`}
+                  data-box
+                  x={x}
+                  y={y}
+                  width={w}
+                  height={h}
+                  fill="none"
+                  stroke="#FF4000"
+                  strokeWidth={2}
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+            </svg>
+          ) : (
+            // eslint-disable-next-line @next/next/no-img-element -- a short-lived signed link, not a static asset
+            <img
+              src={url}
+              alt={title}
+              className="w-full object-contain"
+              onLoad={(e) => setSize({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
+            />
+          )}
         </button>
       ) : (
         <div className="flex aspect-video items-center justify-center rounded-[10px] border border-dashed border-[#E5E7EB] px-2 text-center text-[12px] text-[#9CA3AF]">
           {url === undefined ? "Loading..." : "Photo no longer kept"}
         </div>
+      )}
+      {url && focus.length > 0 && (
+        <p data-photo-boxes className="text-[11.5px] leading-[1.4] text-[#6B7280]">
+          {boxes.length === 0
+            ? "None of this product in view"
+            : `${boxes.length} ${boxes.length === 1 ? "box" : "boxes"} of this product`}
+        </p>
       )}
     </figure>
   );
@@ -170,6 +223,10 @@ function PhotoSlot({ title, url, onOpen }: { title: string; url: string | null |
 function PhotosDialog({ item, photos, onClose }: { item: ApiShelfEvent; photos: ApiEventPhotos | null | undefined; onClose: () => void }) {
   // photos === null: the links could not be loaded, shown as not kept
   const [large, setLarge] = useState<string | null>(null); // the photo opened large, over the dialog
+  // Events written since boxes are kept: both photos zoom on the product's part of the shelf. Older ones show whole.
+  const before = photos?.before_boxes ?? [];
+  const after = photos?.after_boxes ?? [];
+  const focus = [...before, ...after];
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
@@ -202,8 +259,8 @@ function PhotosDialog({ item, photos, onClose }: { item: ApiShelfEvent; photos: 
           </button>
         </div>
         <div className="flex flex-col gap-4 sm:flex-row">
-          <PhotoSlot title="Before" url={photos === null ? null : photos?.before_url} onOpen={setLarge} />
-          <PhotoSlot title="At the event" url={photos === null ? null : photos?.after_url} onOpen={setLarge} />
+          <PhotoSlot title="Before" url={photos === null ? null : photos?.before_url} boxes={before} focus={focus} onOpen={setLarge} />
+          <PhotoSlot title="At the event" url={photos === null ? null : photos?.after_url} boxes={after} focus={focus} onOpen={setLarge} />
         </div>
       </div>
       {large && (

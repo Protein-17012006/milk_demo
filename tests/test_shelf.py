@@ -392,3 +392,15 @@ def test_a_check_without_the_display_does_not_start_a_sku_by_its_counts():
 def test_only_plan_skus_are_expected_and_in_name_order():
     since = {"B": "20261122-0600", "A": "20261122-0600", "C": "20261122-0600"}
     assert expected_at(seen("20261126-1530"), ["B", "A"], since, {}) == ["A", "B"]
+
+
+def test_a_check_keeps_the_boxes_of_the_frame_it_shows():
+    cheese = "Slide Cheese 145g"
+    framed = cap(
+        "CAM-A", "2026-11-21T14:00:10+07:00", {cheese: 2, "Slide Hot & Spicy 160g": 1}, image_key="frames/a.jpg"
+    )
+    later = cap("CAM-A", "2026-11-21T14:01:30+07:00", {cheese: 3})
+    check = build_check("20261121-1400", [later, framed])
+    assert check["image_key"] == "frames/a.jpg"
+    assert check["frame_boxes"] == {cheese: [[0, 0, 8, 8], [10, 0, 8, 8]], "Slide Hot & Spicy 160g": [[0, 0, 8, 8]]}
+    assert build_check("20261121-1400", [later])["frame_boxes"] == {}  # no frame, so no boxes of it
