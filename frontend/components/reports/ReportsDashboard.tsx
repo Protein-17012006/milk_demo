@@ -28,7 +28,7 @@ import {
   type CategoryOption,
   type TimeframeOption,
 } from "@/lib/reports-ui";
-import { alertAccuracyByTypeText, alertAccuracyText, blockedText } from "@/lib/shelf-ui";
+import { alertAccuracyByTypeText, alertAccuracyText, blockedText, displayBanner } from "@/lib/shelf-ui";
 
 const TREND_METRICS: TrendMetric[] = ["total_stock", "oos", "accuracy", "restock_volume", "osa"];
 type Trends = Record<TrendMetric, ApiTrendPoint[] | null>;
@@ -151,11 +151,13 @@ export function ReportsDashboard() {
     URL.revokeObjectURL(url);
   };
 
+  const displayLine = displayBanner(kpi?.displays ?? []);
+
   return (
     <div className="mx-auto w-full px-4 pt-6 pb-8 sm:px-6 lg:px-7">
       <header className="flex items-center justify-between border-b border-black/10 pb-[18px]">
         <div>
-          <h1 className="text-[22px] font-normal leading-tight text-black">Reports</h1>
+          <h1 className="text-[22px] font-normal leading-tight text-black">Dashboard</h1>
           {kpi && (
             <p className="mt-1 text-[12px] text-[#6B7280]">
               Live AWS data, {kpi.captures_count} captures synced. Shelf numbers are worked out every 5 minutes from
@@ -184,6 +186,17 @@ export function ReportsDashboard() {
           onCategoryChange={setCategory}
         />
       </section>
+
+      {/* Cameras that cannot see the display: "now" on this page is the last check that did */}
+      {displayLine && (
+        <p
+          data-display-banner
+          role="status"
+          className="mt-[12px] whitespace-pre-line rounded-[10px] border border-[#FDE68A] bg-[#FFFBEB] px-[14px] py-[10px] text-[12.5px] leading-[1.45] text-[#92400E]"
+        >
+          {displayLine}
+        </p>
+      )}
 
       <section aria-label="Key metrics and stock count" className="mt-[28px] grid grid-cols-1 gap-[22px] xl:grid-cols-12">
         <div className="xl:col-span-6">

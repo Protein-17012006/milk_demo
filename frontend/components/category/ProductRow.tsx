@@ -4,7 +4,8 @@ import React, { useState } from "react";
 import Image from "next/image";
 import { Check, MoreHorizontal } from "lucide-react";
 import type { SkuProduct } from "@/lib/products-ui";
-import { BADGE_COLORS, badgeLabel, reliabilityText } from "@/lib/reliability-ui";
+import { BADGE_COLORS, badgeLabel, badgePillText, reliabilityText } from "@/lib/reliability-ui";
+import { shownConfidence } from "@/lib/products-ui";
 
 export function getConfidenceColor(confidence: number): string {
   if (confidence >= 0.7) return "#1A932E";
@@ -41,6 +42,7 @@ export function ProductRow({
 }: ProductRowProps) {
   const barWidthPct = Math.min(100, Math.max(12, Math.round(item.confidence * 100)));
   const barColor = getConfidenceColor(item.confidence);
+  const confidence = shownConfidence(item.onShelfStock, item.confidence);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const reliability = item.reliability;
 
@@ -106,9 +108,9 @@ export function ProductRow({
               aria-label={`Reliability of ${item.name}: ${badgeLabel(reliability.badge)}`}
               title={reliabilityText(reliability)}
               onClick={() => setDetailsOpen((open) => !open)}
-              className={`rounded-full px-[8px] py-[1px] text-[10.5px] font-semibold leading-tight cursor-pointer ${BADGE_COLORS[reliability.badge]}`}
+              className={`whitespace-nowrap rounded-full px-[8px] py-[1px] text-[10.5px] font-semibold leading-tight cursor-pointer ${BADGE_COLORS[reliability.badge]}`}
             >
-              {badgeLabel(reliability.badge)}
+              {badgePillText(reliability.badge)}
             </button>
           )}
         </div>
@@ -162,11 +164,15 @@ export function ProductRow({
       {/* Confidence + Progress Bar */}
       <div
         className="flex w-[140px] shrink-0 flex-col gap-[6px] pr-[12px]"
-        title={`confidence_score: ${item.confidence.toFixed(2)} · is_flagged: ${item.cvOutput.is_flagged ? "TRUE" : "FALSE"}`}
+        title={
+          confidence === null
+            ? "No units at the last check, so there is no reading to score"
+            : `confidence_score: ${confidence.toFixed(2)} · is_flagged: ${item.cvOutput.is_flagged ? "TRUE" : "FALSE"}`
+        }
       >
         <div className="flex items-center gap-[6px]">
           <span className="text-[13px] font-semibold leading-none text-[#111827]">
-            {Math.round(item.confidence * 100)}%
+            {confidence === null ? "—" : `${Math.round(confidence * 100)}%`}
           </span>
           {item.cvOutput.is_flagged && (
             <span className="rounded bg-[#FFF7ED] px-1.5 py-[1px] text-[10px] font-semibold text-[#C2560A]">
@@ -174,12 +180,14 @@ export function ProductRow({
             </span>
           )}
         </div>
-        <div className="h-[4px] w-[72px] overflow-hidden rounded-[2px] bg-[#EEF0F3]">
-          <div
-            className="h-full rounded-[2px]"
-            style={{ width: `${barWidthPct}%`, backgroundColor: barColor }}
-          />
-        </div>
+        {confidence !== null && (
+          <div className="h-[4px] w-[72px] overflow-hidden rounded-[2px] bg-[#EEF0F3]">
+            <div
+              className="h-full rounded-[2px]"
+              style={{ width: `${barWidthPct}%`, backgroundColor: barColor }}
+            />
+          </div>
+        )}
       </div>
 
       {/* Avail In Stores */}

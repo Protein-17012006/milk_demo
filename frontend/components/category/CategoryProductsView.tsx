@@ -139,7 +139,7 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
   )
     ? "Noodles"
     : catLower.includes("snack")
-      ? "Snack"
+      ? "Snacks"
       : "Milk";
 
   const status = statusOf(p.is_flagged, p.confidence_score);
@@ -298,7 +298,7 @@ export function CategoryProductsView() {
 
   // Only categories that the live rows actually contain.
   const categoryDropdownOptions = useMemo<CategoryFilterOption[]>(() => {
-    const order: PrimaryCategory[] = ["Milk", "Snack", "Noodles"];
+    const order: PrimaryCategory[] = ["Milk", "Snacks", "Noodles"];
     const present = new Set(products.map((p) => p.primaryCategory));
     return ["All", ...order.filter((c) => present.has(c))];
   }, [products]);
@@ -666,7 +666,7 @@ export function CategoryProductsView() {
         <header className="flex flex-wrap items-start justify-between gap-4 border-b border-black/10 pb-[16px]">
           <div>
             <h1 className="text-[22px] font-normal leading-tight text-black">
-              Products
+              Category
             </h1>
             <p className="mt-[4px] text-[12px] font-normal text-[#6B7280]">
               {liveMode

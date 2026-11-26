@@ -1,7 +1,7 @@
 // Unit tests for the reliability badge text (run: npm test). The badge itself is worked out by the backend.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { badgeLabel, reliabilityText } from "./reliability-ui.ts";
+import { badgeLabel, badgePillText, reliabilityText } from "./reliability-ui.ts";
 import type { ApiReliability } from "./api";
 
 function rel(over: Partial<ApiReliability>): ApiReliability {
@@ -44,4 +44,10 @@ test("not enough samples gives the counts and no percent", () => {
 
 test("a SKU with no true cans to find shows no percent either", () => {
   assert.equal(reliabilityText(rel({ found_right: null })), "21 cans · 9 frames · often read as Slide Cheese 145g");
+});
+
+test("a pill with no column header above it says what it rates", () => {
+  assert.equal(badgePillText("high"), "Reliability: High");
+  assert.equal(badgePillText("low"), "Reliability: Low");
+  assert.equal(badgePillText("insufficient"), "Reliability: not rated"); // short: the row has ~150 px for it
 });

@@ -175,8 +175,11 @@ export interface ApiKpiResponse {
     units_per_day: number | null;
     previous_units_per_day: number | null;
     change_pct: number | null;
+    measured_days?: number; // days of the period that have a counted check; older backends leave it out
     blocked_reason: BlockedReason | null;
   };
+  // one per camera of the chosen stores: whether it sees the display now (older backends leave it out)
+  displays?: ApiDisplayStatus[];
   oos_now?: { count: number | null; as_of: string | null; blocked_reason: BlockedReason | null };
   // Hours of the period: measured, open, and open hours in which the camera could not see the display.
   // null when the store has no opening hours (an older backend leaves the field out).
