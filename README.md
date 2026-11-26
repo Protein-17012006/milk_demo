@@ -47,6 +47,7 @@ CCTV 4K --RTSP/LAN--> relay --RTSPS/SRT--> MediaMTX :8322 / :8890 --RTSPS (read)
 | `server/systemd/` | Services: `mediamtx`, `milk-counter`, `milk-web`, `milk-replay` |
 | `infra/base.yaml` | CloudFormation: S3 bucket, DynamoDB table (kept on delete) |
 | `infra/server.yaml` | CloudFormation: EC2, Elastic IP, CloudFront, nightly stop |
+| `infra/server-start.yaml` | CloudFormation: morning start of the hub (its own stack, so the server stack is not updated) |
 | `infra/*.ps1` | Deploy, release, start/stop and budget scripts (Windows PowerShell + AWS CLI) |
 | `infra/remote/` | Scripts that run on the server |
 | `edge/RELAY.md` | How the store relay pushes the camera stream (Vietnamese) |
@@ -64,7 +65,7 @@ Needs AWS CLI v2 with a profile (default `milk`) and PowerShell. Nothing else on
 .\infra\deploy.ps1                      # secrets in SSM, both stacks, first release (t3.small hub)
 .\infra\release.ps1                     # after a code change: upload and apply on the server
 .\infra\remote-run.ps1 "journalctl -u milk-web -n 50 --no-pager"   # run a command on the hub (SSM)
-.\infra\server-power.ps1 -Start         # the server also stops itself at 23:00 every night
+.\infra\server-power.ps1 -Start         # the server also starts itself at 05:45 and stops itself at 23:00
 .\infra\worker-env.ps1 -OutFile <path>  # settings for a GPU worker; contains secrets, send privately
 .\infra\switch-source.ps1 -Source camera   # count the store camera; -Source replay = recorded video (demo fallback)
 .\infra\budget.ps1 -Email you@example.com -LimitUsd 100   # alerts on real usage, credits excluded

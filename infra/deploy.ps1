@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Deploys the milk demo: secrets in SSM, storage stack, app release, server stack.
+  Deploys the milk demo: secrets in SSM, storage stack, app release, server stack, morning start.
 
 .EXAMPLE
   .\infra\deploy.ps1
@@ -30,7 +30,7 @@ $script:AwsProfile = $AwsProfile
 $script:Region = $Region
 $root = Split-Path -Parent $PSScriptRoot
 
-Write-Host "1/4 secrets in SSM Parameter Store (created once, never printed)"
+Write-Host "1/5 secrets in SSM Parameter Store (created once, never printed)"
 $secrets = [ordered]@{
     "stream/publish_user"   = "pub" + (New-RandomHex 4)
     "stream/publish_pass"   = New-RandomHex 24
@@ -50,16 +50,16 @@ foreach ($name in $secrets.Keys) {
     Write-Host "   created $full"
 }
 
-Write-Host "2/4 storage stack"
+Write-Host "2/5 storage stack"
 Invoke-Aws cloudformation deploy --stack-name "$Project-base" --template-file "$root\infra\base.yaml" `
     --parameter-overrides "Project=$Project" --tags "project=$Project" --no-fail-on-empty-changeset | Out-Host
 $bucket = Get-StackOutput "$Project-base" "BucketName"
 $table = Get-StackOutput "$Project-base" "TableName"
 
-Write-Host "3/4 app release to s3://$bucket/releases/"
+Write-Host "3/5 app release to s3://$bucket/releases/"
 & "$PSScriptRoot\release.ps1" -AwsProfile $AwsProfile -Region $Region -Project $Project -UploadOnly
 
-Write-Host "4/4 server stack ($InstanceType)"
+Write-Host "4/5 server stack ($InstanceType)"
 $prefixList = Invoke-Aws ec2 describe-managed-prefix-lists `
     --filters "Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing" `
     --query "PrefixLists[0].PrefixListId" --output text
@@ -70,6 +70,12 @@ Invoke-Aws cloudformation deploy --stack-name "$Project-server" --template-file 
     --parameter-overrides "Project=$Project" "BucketName=$bucket" "TableName=$table" `
     "InstanceType=$InstanceType" "ImageId=$ImageParam" "RootVolumeGiB=$RootVolumeGiB" `
     "SsmPrefix=/$Project" "CloudFrontPrefixListId=$prefixList" "OriginSecret=$originSecret" | Out-Host
+
+Write-Host "5/5 morning start (the server stack stops the hub at 23:00; this starts it at 05:45)"
+$instance = Get-StackOutput "$Project-server" "InstanceId"
+Invoke-Aws cloudformation deploy --stack-name "$Project-server-start" --template-file "$root\infra\server-start.yaml" `
+    --capabilities CAPABILITY_IAM --tags "project=$Project" --no-fail-on-empty-changeset `
+    --parameter-overrides "Project=$Project" "InstanceId=$instance" | Out-Host
 
 Invoke-Aws cloudformation describe-stacks --stack-name "$Project-server" `
     --query "Stacks[0].Outputs[].[OutputKey,OutputValue]" --output table | Out-Host

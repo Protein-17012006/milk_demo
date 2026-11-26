@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Milk shelf demo, morning start: a schedule that starts the hub server every morning, so it is up
+  before the shelf plan opens at 06:00. server.yaml only stops it (23:00). This is a stack of its own
+  so that adding it never updates the server stack: an update re-resolves the Ubuntu image parameter
+  and, once Canonical has published a newer image, replaces the instance.
+
+Parameters:
+  Project:
+    Type: String
+    Default: milk-demo
+  InstanceId:
+    Type: AWS::EC2::Instance::Id
+    Description: The hub instance, output InstanceId of the server stack.
+  AutoStartCron:
+    Type: String
+    Default: cron(45 5 * * ? *)
+    Description: When to start the hub, Asia/Ho_Chi_Minh time.
+
+Resources:
+  StartScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: scheduler.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: start-demo-server
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ec2:StartInstances
+                Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${InstanceId}
+      Tags:
+        - Key: project
+          Value: !Ref Project
+
+  StartSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Description: Start the demo server every morning before the shelf plan opens
+      ScheduleExpression: !Ref AutoStartCron
+      ScheduleExpressionTimezone: Asia/Ho_Chi_Minh
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ec2:startInstances
+        RoleArn: !GetAtt StartScheduleRole.Arn
+        Input: !Sub '{"InstanceIds": ["${InstanceId}"]}'
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 10
+
+Outputs:
+  StartScheduleName:
+    Value: !Ref StartSchedule

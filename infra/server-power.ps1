@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-  Starts or stops the demo server. It also stops by itself every night at 23:00 (Asia/Ho_Chi_Minh).
+  Starts or stops the demo server. It also starts by itself every morning at 05:45 (stack
+  milk-demo-server-start) and stops by itself every night at 23:00 (Asia/Ho_Chi_Minh).
 
 .EXAMPLE
   .\infra\server-power.ps1 -Start
