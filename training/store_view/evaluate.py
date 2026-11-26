@@ -41,17 +41,22 @@ LONG_KEYS = (
 
 
 def match(model: list[tuple[list[int], float]], truth: list[list[int]]) -> tuple[int, int, int]:
-    """(true, false, missed): a model box (x, y, w, h) with its confidence takes the first free labelled carton its
-    centre lies in, surer boxes first."""
+    """(true, false, missed): a model box (x, y, w, h) with its confidence takes a free labelled carton its centre
+    lies in, surer boxes first. In a pack the boxes around slanted neighbours overlap, so a centre can lie in two of
+    them: the box takes the carton whose own centre is nearest. (Taking the first in the list gave the box of one
+    carton to its neighbour and left that neighbour's box without a carton: 7 right boxes scored as 6, found 26/11.)"""
     taken = [False] * len(truth)
     tp = 0
     for box, _ in sorted(model, key=lambda m: -m[1]):
         cx, cy = box[0] + box[2] / 2, box[1] + box[3] / 2
-        for k, (x, y, w, h) in enumerate(truth):
-            if not taken[k] and x <= cx <= x + w and y <= cy <= y + h:
-                taken[k] = True
-                tp += 1
-                break
+        free = [k for k, (x, y, w, h) in enumerate(truth) if not taken[k] and x <= cx <= x + w and y <= cy <= y + h]
+        if free:
+            nearest = min(
+                free,
+                key=lambda k: (truth[k][0] + truth[k][2] / 2 - cx) ** 2 + (truth[k][1] + truth[k][3] / 2 - cy) ** 2,
+            )
+            taken[nearest] = True
+            tp += 1
     return tp, len(model) - tp, len(truth) - tp
 
 

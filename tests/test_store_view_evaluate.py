@@ -116,3 +116,27 @@ def test_the_overlap_setting_is_cleared_between_pipelines(monkeypatch):
     monkeypatch.setenv("MILK_LONG_TH_OVERLAP", "0.5")
     apply_env({}, {})
     assert "MILK_LONG_TH_OVERLAP" not in os.environ
+
+
+def test_a_box_whose_centre_lies_in_two_cartons_takes_the_nearer_one():
+    # 26/11 14:10, arrangement F0: seven boxes on seven cartons. Boxes around slanted neighbours overlap, and the centre
+    # of the box on the 4th carton also lies in the 3rd carton's box, which comes first in the list
+    truth = [
+        [832, 97, 34, 23],
+        [853, 90, 35, 22],
+        [846, 112, 34, 23],
+        [866, 104, 35, 23],
+        [859, 127, 35, 23],
+        [880, 119, 25, 23],
+        [872, 142, 35, 24],
+    ]
+    model = [
+        ([832, 96, 32, 26], 0.94),
+        ([857, 129, 30, 27], 0.94),
+        ([851, 88, 32, 24], 0.93),
+        ([863, 104, 30, 26], 0.93),
+        ([845, 113, 29, 26], 0.93),
+        ([870, 146, 30, 28], 0.91),
+        ([874, 118, 33, 27], 0.91),
+    ]
+    assert match(model, truth) == (7, 0, 0)
