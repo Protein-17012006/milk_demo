@@ -1,11 +1,13 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useAuth } from "@/lib/auth";
 import {
   createApiClient,
   type ApiKpiResponse,
   type ApiProductsResponse,
+  type ApiShelfEvent,
   type ApiStore,
   type ApiTrendPoint,
   type ApiTrendsResponse,
@@ -30,6 +32,8 @@ import {
 import { alertAccuracyByTypeText, alertAccuracyText, blockedText, displayBanner } from "@/lib/shelf-ui";
 import { showStoreFilter } from "@/lib/products-ui";
 import { shelfNowRows, shelfNowSummary, updatedText } from "@/lib/shelf-now";
+import { reviewSummary } from "@/lib/review-queue";
+import { unconfirmedEvents, waitingWork } from "@/lib/waiting-work";
 
 // osa feeds the availability card's sparkline; the model's accuracy by day is on the Model page, not asked for here.
 const TREND_METRICS = ["total_stock", "oos", "restock_volume", "osa"] as const satisfies readonly TrendMetric[];
@@ -64,6 +68,10 @@ export function ReportsDashboard() {
   const [photoOpen, setPhotoOpen] = useState(false);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoFailed, setPhotoFailed] = useState(false);
+  // The team's waiting work: readings to review, frames to label, events to confirm. null = not loaded.
+  const [waitingReadings, setWaitingReadings] = useState<number | null>(null);
+  const [waitingFrames, setWaitingFrames] = useState<number | null>(null);
+  const [waitingEvents, setWaitingEvents] = useState<{ count: number; more: boolean } | null>(null);
 
   const api = useMemo(() => createApiClient(getIdToken), [getIdToken]);
   const days = daysOf(timeframe);
@@ -139,6 +147,41 @@ export function ReportsDashboard() {
   const outNames = useMemo(() => (rows ?? []).filter((r) => r.status === "OOS").map((r) => r.name), [rows]);
 
   const canVerify = (user?.groups ?? []).some((g) => g === "team_admin" || g === "field_team");
+
+  // Two more reads, for the team only, once the page's own numbers are in and one after the other: the account
+  // runs at most 10 Lambda calls at once and the page has just used 8.
+  const mainLoaded = liveKpi !== null || liveProducts !== null || productsFailed;
+  useEffect(() => {
+    if (!isApproved || !canVerify || !mainLoaded) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const queue = await api.getReviewQueue();
+        if (cancelled) return;
+        setWaitingReadings(reviewSummary(queue.items).waiting);
+        const pending = await api.listAudits("pending", 0);
+        if (!cancelled) setWaitingFrames(pending.items.length);
+      } catch {
+        // the line simply lists what could be counted
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isApproved, canVerify, mainLoaded, api]);
+  const noteEvents = useCallback(
+    (items: ApiShelfEvent[], hasMore: boolean) => setWaitingEvents({ count: unconfirmedEvents(items), more: hasMore }),
+    []
+  );
+  const waiting = canVerify
+    ? waitingWork({
+        readings: waitingReadings,
+        frames: waitingFrames,
+        events: waitingEvents?.count ?? null,
+        // "20+" only when the whole latest page waits and older events exist
+        moreEvents: Boolean(waitingEvents?.more && waitingEvents.count >= 20),
+      })
+    : [];
   const loadEvents = useCallback(
     (kind: ActivityKind, cursor?: string) => api.getShelfEvents({ ...query, kind, limit: 20, cursor }),
     [api, query]
@@ -219,6 +262,27 @@ export function ReportsDashboard() {
         />
       </section>
 
+      {/* The team's waiting work in one line; viewers have none and see nothing here */}
+      {waiting.length > 0 && (
+        <p
+          data-waiting-work
+          className="mt-[12px] flex flex-wrap items-center gap-x-[14px] gap-y-[4px] rounded-[10px] border border-[#E5E7EB] bg-[#F9FAFB] px-[14px] py-[9px] text-[12.5px] text-[#374151]"
+        >
+          <span className="font-semibold text-[#111827]">Waiting for the team:</span>
+          {waiting.map((item) =>
+            item.href.startsWith("#") ? (
+              <a key={item.key} data-waiting={item.key} href={item.href} className="font-medium text-[#0051C3] hover:underline">
+                {item.text}
+              </a>
+            ) : (
+              <Link key={item.key} data-waiting={item.key} href={item.href} className="font-medium text-[#0051C3] hover:underline">
+                {item.text}
+              </Link>
+            )
+          )}
+        </p>
+      )}
+
       {/* Cameras that cannot see the display: "now" on this page is the last check that did */}
       {displayLine && (
         <p
@@ -275,6 +339,7 @@ export function ReportsDashboard() {
             canVerify={canVerify}
             loadPhotos={isApproved ? api.getShelfEventPhotos : null}
             saveVerdict={isApproved ? api.saveShelfEventVerdict : null}
+            onFirstPage={canVerify ? noteEvents : undefined}
           />
         </div>
       </section>

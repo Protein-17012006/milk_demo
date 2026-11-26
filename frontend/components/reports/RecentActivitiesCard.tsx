@@ -24,6 +24,9 @@ interface RecentActivitiesCardProps {
   canVerify: boolean;
   loadPhotos: ((storeId: string, eventKey: string) => Promise<ApiEventPhotos>) | null;
   saveVerdict: ((storeId: string, eventKey: string, verdict: ShelfVerdict) => Promise<unknown>) | null;
+  /** Told the first page of the "All" filter when it arrives (and whether older events exist), for the team's
+   * count of events still to confirm. */
+  onFirstPage?: (items: ApiShelfEvent[], hasMore: boolean) => void;
 }
 
 const VERDICTS: { id: ShelfVerdict; label: string; active: string }[] = [
@@ -284,7 +287,7 @@ function PhotosDialog({ item, photos, onClose }: { item: ApiShelfEvent; photos: 
 }
 
 /** Shelf events of the Dashboard filters, newest first: out of stock, low stock, depleted, restocked. */
-export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLine, accuracyByType, canVerify, loadPhotos, saveVerdict }: RecentActivitiesCardProps) {
+export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLine, accuracyByType, canVerify, loadPhotos, saveVerdict, onFirstPage }: RecentActivitiesCardProps) {
   const [kind, setKind] = useState<ActivityKind>("all");
   const [items, setItems] = useState<ApiShelfEvent[] | null>(null);
   const [allOpen, setAllOpen] = useState(false);
@@ -332,7 +335,9 @@ export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLin
     let cancelled = false;
     load(kind)
       .then((res) => {
-        if (!cancelled) setItems(res.items);
+        if (cancelled) return;
+        setItems(res.items);
+        if (kind === "all") onFirstPage?.(res.items, res.next_cursor !== null);
       })
       .catch(() => {
         if (!cancelled) setItems(null);
@@ -340,7 +345,7 @@ export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLin
     return () => {
       cancelled = true;
     };
-  }, [load, kind, reloadKey]);
+  }, [load, kind, reloadKey, onFirstPage]);
 
   const loadMore = async (from?: string) => {
     if (!load) return;
@@ -352,7 +357,7 @@ export function RecentActivitiesCard({ load, reloadKey, blockedText, accuracyLin
   const empty = blockedText ?? (kind === "all" ? "No shelf activity in this period." : "No matching shelf activity in this period.");
 
   return (
-    <div className="flex h-[440px] flex-col overflow-hidden rounded-[18px] border border-[#EFF0F6] bg-white">
+    <div id="recent-shelf-activities" className="flex h-[440px] scroll-mt-4 flex-col overflow-hidden rounded-[18px] border border-[#EFF0F6] bg-white">
       <div className="shrink-0 border-b border-[#EFF0F6] px-[20px] pt-[14px] pb-[12px]">
         <h2 className="text-[18px] font-semibold leading-[1.3] text-[#111827]">Recent Shelf Activities</h2>
         <p className="mt-[2px] text-[11.5px] leading-[1.4] text-[#9CA3AF]">
