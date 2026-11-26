@@ -2491,3 +2491,55 @@ def test_export_scan_is_filtered_and_projected(monkeypatch):
     seen.clear()
     _export(api, kind="capture-log")
     assert seen["ProjectionExpression"] == "camera_id, capture_timestamp, log_json" and "FilterExpression" not in seen
+
+
+# --- Products for the Dashboard's per-product table (plan 2026-11-27-website-optimization-batch2, Task 1) ---
+
+
+@mock_aws
+def test_products_mark_the_shelf_plan_and_stock_status(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE, HOT, TH_MERGED))
+    _ingest(ingest, "CAM-S01-A", "140010", [("cheese145", 5), ("hot160", 2), ("original145", 4)])
+    items = {p["sku_id"]: p for p in _call(api, "GET", "/v1/products", groups="datagent")[1]["items"]}
+    assert (items[CHEESE]["in_shelf_plan"], items[CHEESE]["stock_status"]) == (True, "IN_STOCK")
+    assert (items[HOT]["in_shelf_plan"], items[HOT]["stock_status"]) == (True, "LOW")
+    assert (items[TH_MERGED]["in_shelf_plan"], items[TH_MERGED]["stock_status"]) == (True, "OOS")  # never seen
+    original = items["Slide Original 145g"]
+    assert (original["in_shelf_plan"], original["stock_status"]) == (False, None)
+
+
+@mock_aws
+def test_products_carry_the_newest_frame_with_each_products_boxes(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140010", [("original145", 1)], with_frame=True)
+    _ingest(ingest, "CAM-S01-A", "140510", [("cheese145", 2), ("hot160", 1)], with_frame=True)
+    body = _call(api, "GET", "/v1/products", groups="datagent")[1]
+    assert body["as_of"] == "2026-11-21T14:05:10+07:00"
+    (frame,) = body["frames"]
+    assert (frame["camera_id"], frame["capture_id"]) == ("CAM-S01-A", "CAP-S01-20261121-140510")
+    assert (frame["store_id"], frame["capture_timestamp"]) == ("DEMO-S01", "2026-11-21T14:05:10+07:00")
+    assert "CAM-S01-A_20261121_140510.jpg" in frame["frame_presigned_url"]
+    assert [(p["sku_id"], p["boxes"]) for p in frame["products"]] == [
+        (CHEESE, [[10, 20, 50, 80], [70, 20, 50, 80]]),
+        (HOT, [[10, 20, 50, 80]]),
+    ]
+    assert frame["products"][0]["sku_name"]
+
+
+@mock_aws
+def test_products_frame_without_a_stored_image_has_no_link(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    empty = _call(api, "GET", "/v1/products", groups="datagent")[1]
+    assert (empty["frames"], empty["as_of"]) == ([], None)
+    _ingest(ingest, "CAM-S01-A", "140510", [("cheese145", 2)])
+    (frame,) = _call(api, "GET", "/v1/products", groups="datagent")[1]["frames"]
+    assert frame["frame_presigned_url"] is None and len(frame["products"]) == 1
+
+
+@mock_aws
+def test_products_read_nothing_extra_for_a_saved_plan(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE,))
+    monkeypatch.setattr(api, "_suggested_skus", lambda *a, **k: pytest.fail("a saved plan needs no suggestion"))
+    assert _call(api, "GET", "/v1/products", groups="datagent")[0] == 200

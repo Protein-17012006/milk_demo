@@ -62,7 +62,13 @@ paths:
   /products:
     get:
       summary: List monitored SKUs with smoothed latest stock and SKU Master metadata
-      description: Groups allowed — datagent, field_team, team_admin
+      description: >-
+        Groups allowed — datagent, field_team, team_admin.
+        Each item also has in_shelf_plan (on the saved shelf plan of a store, or on the suggested one when none is
+        saved) and stock_status (OOS at 0 units, LOW at 1–2, IN_STOCK above; null off the plan). A plan SKU that was
+        never seen is listed at 0 units. The answer also has as_of (the newest capture time among the stock rows) and
+        frames: per camera the newest capture, with a signed link to its frame (null when none was stored) and, for
+        each product counted in it, its boxes as [x, y, width, height] in frame pixels.
       parameters:
         - name: q
           in: query

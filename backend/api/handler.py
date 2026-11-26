@@ -195,11 +195,78 @@ def _now() -> datetime:
     return datetime.now(ICT)
 
 
-def _load_products_catalog(ddb) -> tuple[list[dict[str, Any]], int, int]:
-    """Aggregate latest_stock across stores, enriched with sku_master & store_list."""
-    stock_items = _scan_all(ddb.Table(LATEST_STOCK_TABLE))
-    sku_items = _scan_all(ddb.Table(SKU_MASTER_TABLE))
-    store_items = _scan_all(ddb.Table(STORE_LIST_TABLE))
+CatalogTables = tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]
+
+
+def _catalog_tables(ddb) -> CatalogTables:
+    """The three tables a product list is made of: latest_stock, sku_master, store_list."""
+    return (
+        _scan_all(ddb.Table(LATEST_STOCK_TABLE)),
+        _scan_all(ddb.Table(SKU_MASTER_TABLE)),
+        _scan_all(ddb.Table(STORE_LIST_TABLE)),
+    )
+
+
+def _plan_skus(ddb, stores: list[dict[str, Any]]) -> set[str]:
+    """SKUs on the shelf plan of any of these stores: the saved list, else the suggested one. A saved plan costs no
+    read; a plan that cannot be read counts as none, so the product list still answers."""
+    plan: set[str] = set()
+    for store in stores:
+        saved = store.get("expected_skus") or []
+        if saved:
+            plan.update(saved)
+            continue
+        if not SHELF_TABLE:
+            continue  # no shelf numbers at all: nothing can be suggested
+        try:
+            plan.update(s["sku_id"] for s in _suggested_skus(ddb, store["store_id"]))
+        except ClientError as exc:
+            print(json.dumps({"plan_skus_failed": store.get("store_id"), "error": repr(exc)}))
+    return plan
+
+
+def _latest_frames(s3, stock_items: list[dict[str, Any]], sku_map: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per camera, the newest capture among its stock rows: a signed link to its frame (None when none was stored)
+    and, for each product counted in that very capture, its boxes. The numbers a viewer reads come from this frame."""
+    by_camera: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in stock_items:
+        if row.get("camera_id") and row.get("capture_id"):
+            by_camera[str(row["camera_id"])].append(row)
+    frames = []
+    for camera_id in sorted(by_camera):
+        rows = by_camera[camera_id]
+        newest = max(rows, key=lambda r: str(r.get("capture_timestamp", "")))
+        products = []
+        for row in rows:
+            if row["capture_id"] != newest["capture_id"] or row["sku_id"] == UNRECOGNIZED:
+                continue
+            boxes = json.loads(row["bounding_box_json"]) if row.get("bounding_box_json") else []
+            if boxes:
+                name = (sku_map.get(row["sku_id"]) or {}).get("sku_name_vi") or row.get("sku_name") or row["sku_id"]
+                products.append({"sku_id": row["sku_id"], "sku_name": name, "boxes": boxes})
+        products.sort(key=lambda p: str(p["sku_name"]).lower())
+        frames.append(
+            {
+                "store_id": newest.get("store_id"),
+                "camera_id": camera_id,
+                "capture_id": newest["capture_id"],
+                "capture_timestamp": newest.get("capture_timestamp"),
+                "frame_presigned_url": _presign_frame(s3, newest.get("image_key", ""), newest.get("source_bucket", "")),
+                "faces_blurred": int(newest.get("faces_blurred") or 0),
+                "products": products,
+            }
+        )
+    return frames
+
+
+def _load_products_catalog(
+    ddb, tables: CatalogTables | None = None, plan: set[str] | None = None
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Aggregate latest_stock across stores, enriched with sku_master & store_list.
+
+    plan: the SKUs on the shelf plan (_plan_skus). When given, each product says whether it is on the plan and, if
+    so, how its stock stands by the shelf rule; a plan SKU that was never seen is listed at 0 units."""
+    stock_items, sku_items, store_items = tables or _catalog_tables(ddb)
 
     sku_map = {s["sku_id"]: s for s in sku_items}
     total_stores = max(len(store_items), len({x["store_id"] for x in stock_items}) or 1)
@@ -212,7 +279,7 @@ def _load_products_catalog(ddb) -> tuple[list[dict[str, Any]], int, int]:
             continue
         grouped[item["sku_id"]].append(item)
 
-    all_sku_ids = sorted(set(sku_map.keys()) | set(grouped.keys()))
+    all_sku_ids = sorted(set(sku_map.keys()) | set(grouped.keys()) | (plan or set()))
     products: list[dict[str, Any]] = []
 
     for sku_id in all_sku_ids:
@@ -263,18 +330,24 @@ def _load_products_catalog(ddb) -> tuple[list[dict[str, Any]], int, int]:
                 "processing_time_ms": (latest_row or {}).get("processing_time_ms", 0),
             }
         )
+        if plan is not None:
+            on_plan = sku_id in plan
+            products[-1]["in_shelf_plan"] = on_plan
+            products[-1]["stock_status"] = shelf.status_of(total_units) if on_plan else None
 
     return products, unrecognized_max, total_stores
 
 
-def _handle_get_products(event: dict[str, Any], ddb) -> dict[str, Any]:
+def _handle_get_products(event: dict[str, Any], s3, ddb) -> dict[str, Any]:
     params = event.get("queryStringParameters") or {}
     q = (params.get("q") or "").strip().lower()
     category = params.get("category") or ""
     status_filter = params.get("status") or ""
     sort_by = params.get("sort") or "stock_desc"
 
-    products, unrecognized_units, total_stores = _load_products_catalog(ddb)
+    tables = _catalog_tables(ddb)
+    stock_items, sku_items, store_items = tables
+    products, unrecognized_units, total_stores = _load_products_catalog(ddb, tables, _plan_skus(ddb, store_items))
 
     filtered = []
     for p in products:
@@ -314,6 +387,9 @@ def _handle_get_products(event: dict[str, Any], ddb) -> dict[str, Any]:
             "stores_total": total_stores,
             "flag_threshold": MILK_FLAG_THRESHOLD,
             "displays": _display_statuses(ddb, _stores_for(ddb, params)),
+            # when the numbers were read, and the frame they were read from (with each product's boxes)
+            "as_of": max((str(r.get("capture_timestamp") or "") for r in stock_items), default="") or None,
+            "frames": _latest_frames(s3, stock_items, {s["sku_id"]: s for s in sku_items}),
         },
         event,
     )
@@ -1841,7 +1917,7 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
             return _route_model(method, route_path, event, user, s3, ddb)
 
         if method == "GET" and route_path == "/products":
-            return _handle_get_products(event, ddb)
+            return _handle_get_products(event, s3, ddb)
 
         if method == "GET" and route_path.startswith("/products/"):
             sku_param = route_path[len("/products/") :]
