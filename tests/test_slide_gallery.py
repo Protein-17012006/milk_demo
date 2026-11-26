@@ -101,6 +101,16 @@ def test_trn_rows_follow_the_verdicts():
     ]
 
 
+def test_trn_rows_read_done_review_audits_as_people_labels():
+    boxes = [
+        {"box_id": 1, "track_id": "s-t0", "sku_id": "cheese145", "conf": 1.0, "box": [10, 0, 8, 8]},
+        {"box_id": 2, "track_id": "s-t1", "sku_id": None, "conf": 0.0, "box": [20, 0, 8, 8], "needs_flavour": True},
+    ]
+    verdicts = [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "hot160"}]
+    rows = trn_rows([audit("REV-CAM-S01-A-seg-0090", "done", boxes, verdicts)])
+    assert rows == [("C2", [10, 0, 8, 8], "cheese145"), ("C2", [20, 0, 8, 8], "hot160")]
+
+
 def frame(folder, day, cid):
     (folder / day).mkdir(parents=True, exist_ok=True)
     img = RNG.integers(30, 220, size=(120, 200, 3)).astype(np.uint8)

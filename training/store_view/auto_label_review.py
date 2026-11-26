@@ -13,12 +13,15 @@ is wrong). Cans waiting on another segment's frame and cans already masked get n
 
 from __future__ import annotations
 
+import argparse
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from training.store_view.auto_label import Decision
 
 STORE_ID = "DEMO-S01"
+REGION_NAME = "ap-southeast-1"
 ICT = timezone(timedelta(hours=7))
 
 
@@ -122,3 +125,113 @@ def review_file(audits: list[dict]) -> dict:
         missed = [[m["x"], m["y"]] for m in json.loads(a.get("missed_json") or "[]")]
         out[a["segment_id"]] = {"tracks": tracks, "missed": missed}
     return out
+
+
+def _manifest(frames_dir: Path) -> dict[str, dict]:
+    path = frames_dir / "manifest.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return {r["capture_id"]: r for r in rows}
+
+
+def push(
+    proposals_dir: Path,
+    queue_json: Path,
+    frames_dir: Path,
+    truth: Path,
+    segments: Path,
+    trn: Path | None,
+    camera: str,
+    analytics_bucket: str,
+    table_name: str,
+    model_version: str,
+    s3,
+    ddb,
+) -> list[str]:
+    """One pending review frame per segment of queue.json: the decisions are those the queue command computes (people's
+    decisions reused); the frame is copied from the hub bucket to the analytics bucket like a sampled frame. An audit
+    that already exists, pending or done, is left alone. Returns the audit ids created now."""
+    from botocore.exceptions import ClientError
+
+    from training.store_view.auto_label_reuse import REUSE_MIN_SIM, queue
+    from training.store_view.auto_label_run import human_precedents, load_proposals
+    from training.store_view.dataset import read_scoring_frames
+
+    props = {p["segment"]: p for p in load_proposals(proposals_dir)}
+    segs = json.loads(Path(segments).read_text(encoding="utf-8"))
+    decided = queue(list(props.values()), human_precedents(truth, segs, frames_dir, trn), REUSE_MIN_SIM)
+    rows, scoring = _manifest(frames_dir), read_scoring_frames(frames_dir)
+    table = ddb.Table(table_name)
+    created = []
+    for seg, track_ids in json.loads(Path(queue_json).read_text(encoding="utf-8")).items():
+        frame = pick_frame(props[seg], track_ids)
+        if frame in scoring:
+            raise ValueError(f"{seg}: {frame} is a scoring frame (AUD) and can never be a review frame")
+        row = rows[frame]
+        key = f"audits/frames/{camera}/{row['capture_timestamp'][:10]}/{row['image_key'].rsplit('/', 1)[-1]}"
+        s3.copy_object(Bucket=analytics_bucket, Key=key, CopySource={"Bucket": row["bucket"], "Key": row["image_key"]})
+        item = review_item(props[seg], decided.decisions[seg], track_ids, camera, row, key, model_version)
+        try:
+            table.put_item(Item=item, ConditionExpression="attribute_not_exists(audit_id)")
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                continue
+            raise
+        created.append(item["audit_id"])
+    return created
+
+
+def export(table_name: str, ddb) -> dict:
+    """The review file from every review frame of the audits table (only done ones give decisions)."""
+    from boto3.dynamodb.conditions import Attr
+
+    table = ddb.Table(table_name)
+    kw = {"FilterExpression": Attr("audit_id").begins_with("REV-")}
+    resp = table.scan(**kw)
+    items = list(resp["Items"])
+    while "LastEvaluatedKey" in resp:
+        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"], **kw)
+        items += resp["Items"]
+    return review_file(items)
+
+
+def main(argv: list[str] | None = None) -> None:
+    import boto3
+
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("push")
+    for name in ("--proposals", "--frames", "--truth", "--segments"):
+        p.add_argument(name, type=Path, required=True)
+    p.add_argument("--queue", type=Path, help="default: <proposals>/queue.json")
+    p.add_argument("--trn", type=Path)
+    for name in ("--camera", "--analytics-bucket", "--table", "--model-version"):
+        p.add_argument(name, required=True)
+    e = sub.add_parser("export")
+    e.add_argument("--table", required=True)
+    e.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args(argv)
+    ddb = boto3.resource("dynamodb", region_name=REGION_NAME)
+    if args.command == "export":
+        decisions = export(args.table, ddb)
+        args.out.write_text(json.dumps(decisions, indent=1), encoding="utf-8")
+        print(f"{len(decisions)} done review frames -> {args.out}")
+        return
+    created = push(
+        args.proposals,
+        args.queue or args.proposals / "queue.json",
+        args.frames,
+        args.truth,
+        args.segments,
+        args.trn,
+        args.camera,
+        args.analytics_bucket,
+        args.table,
+        args.model_version,
+        boto3.client("s3", region_name=REGION_NAME),
+        ddb,
+    )
+    print(json.dumps({"created": created}))
+
+
+if __name__ == "__main__":
+    main()

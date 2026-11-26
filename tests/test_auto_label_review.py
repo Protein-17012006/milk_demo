@@ -3,8 +3,14 @@
 
 import json
 
+import boto3
+import cv2
+import numpy as np
+from moto import mock_aws
+
 from training.store_view.auto_label import Decision, Track
-from training.store_view.auto_label_review import audit_id, pick_frame, review_boxes, review_file, review_item
+from training.store_view.auto_label_review import audit_id, pick_frame, push, review_boxes, review_file, review_item
+from training.store_view.auto_label_run import _track_json
 from training.store_view.proposers import Proposal
 
 FRAMES = ["F1", "F2", "F3"]
@@ -122,3 +128,80 @@ def test_review_file_keeps_a_segment_no_longer_in_the_queue():
     # it reads only the audits: a segment the queue would now resolve still gives the decision a person made
     got = review_file([done("REV-CAM-S01-A-old", [{"box_id": 2, "verdict": "not_product"}])])
     assert got == {"old": {"tracks": {"s-t1": {"verdict": "not_product"}}, "missed": []}}
+
+
+@mock_aws
+def test_push_writes_one_pending_review_audit_per_queued_segment_and_never_twice(tmp_path):
+    region = "ap-southeast-1"
+    s3 = boto3.client("s3", region_name=region)
+    ddb = boto3.resource("dynamodb", region_name=region)
+    for bucket in ("hub-data", "analytics"):
+        s3.create_bucket(Bucket=bucket, CreateBucketConfiguration={"LocationConstraint": region})
+    table = ddb.create_table(
+        TableName="audits",
+        KeySchema=[{"AttributeName": "store_id", "KeyType": "HASH"}, {"AttributeName": "audit_id", "KeyType": "RANGE"}],
+        AttributeDefinitions=[
+            {"AttributeName": "store_id", "AttributeType": "S"},
+            {"AttributeName": "audit_id", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    frames = tmp_path / "frames"
+    (frames / "2026-11-24").mkdir(parents=True)
+    rows = []
+    for cid in FRAMES:
+        cv2.imwrite(str(frames / "2026-11-24" / f"{cid}.jpg"), np.zeros((8, 8, 3), np.uint8))
+        key = f"frames/CAM-S01-A/2026-11-24/{cid}.jpg"
+        s3.put_object(Bucket="hub-data", Key=key, Body=b"jpg")
+        rows.append(
+            {
+                "capture_id": cid,
+                "capture_timestamp": "2026-11-24T10:00:00+07:00",
+                "bucket": "hub-data",
+                "image_key": key,
+                "audit_ids": [],
+            }
+        )
+    (frames / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    props = tmp_path / "props"
+    props.mkdir()
+    p = proposal()
+    body = {
+        **{k: p[k] for k in ("segment", "keyframe", "split", "frames")},
+        "tracks": [_track_json(t) for t in p["tracks"]],
+        "decisions": {k: [d.status, d.sku, d.reason] for k, d in DECISIONS.items()},
+    }
+    (props / "seg-s.json").write_text(json.dumps(body))  # load_proposals reads seg-*.json
+    (props / "queue.json").write_text(json.dumps({"s": ["s-t1"]}))
+    (tmp_path / "truth.json").write_text("{}")
+    (tmp_path / "segments.json").write_text("[]")
+
+    def run():
+        return push(
+            props,
+            props / "queue.json",
+            frames,
+            tmp_path / "truth.json",
+            tmp_path / "segments.json",
+            None,
+            "CAM-S01-A",
+            "analytics",
+            "audits",
+            "auto-label test",
+            s3,
+            ddb,
+        )
+
+    assert run() == ["REV-CAM-S01-A-s"]
+    item = table.get_item(Key={"store_id": "DEMO-S01", "audit_id": "REV-CAM-S01-A-s"})["Item"]
+    assert item["status"] == "pending" and item["capture_id"] == "F2"
+    s3.head_object(Bucket="analytics", Key=item["image_key"])
+    assert run() == []
+    table.update_item(
+        Key={"store_id": "DEMO-S01", "audit_id": "REV-CAM-S01-A-s"},
+        UpdateExpression="SET #s = :d",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={":d": "done"},
+    )
+    assert run() == []
+    assert table.get_item(Key={"store_id": "DEMO-S01", "audit_id": "REV-CAM-S01-A-s"})["Item"]["status"] == "done"

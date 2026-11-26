@@ -8,7 +8,7 @@ least 20 crops of it; otherwise the read is unsure. Only people's labels enter: 
 frames (TRN) labelled on the Model page, never automatic labels, never a scoring frame (AUD), and, for a gallery used
 to measure, never a held-out frame.
 
-    python -m training.store_view.slide_gallery export-trn --out trn_done.json            (laptop: reads the audits)
+    python -m training.store_view.slide_gallery export-trn --out trn_done.json            (laptop: TRN- and REV- audits)
     python -m training.store_view.slide_gallery build --truth T --segments S --frames F --trn trn_done.json ^
         [--exclude-holdout] --out slide_gallery_CAM-S01-A_<YYYYMMDD>.npz
 """
@@ -124,11 +124,12 @@ def read(gallery: Gallery, feature: np.ndarray, k: int = K) -> GalleryVote:
 
 
 def trn_rows(audits: list[dict]) -> list[tuple[str, list[int], str]]:
-    """(capture_id, box x y w h, label) of each judged box of the done training audits: correct -> the model's label,
-    wrong_sku -> the true one, not_product -> "none"; out of scope and anything not judged are left out."""
+    """(capture_id, box x y w h, label) of each judged box of the done training (TRN-) and review (REV-) audits, both
+    people's labels: correct -> the box's label, wrong_sku -> the true one, not_product -> "none"; out of scope and
+    anything not judged are left out. Scoring audits (AUD-) never enter."""
     out = []
     for a in audits:
-        if not str(a.get("audit_id", "")).startswith("TRN-") or a.get("status") != "done":
+        if not str(a.get("audit_id", "")).startswith(("TRN-", "REV-")) or a.get("status") != "done":
             continue
         boxes = {b["box_id"]: b for b in json.loads(a.get("ai_boxes_json") or "[]")}
         for v in json.loads(a.get("verdicts_json") or "[]"):
@@ -159,7 +160,7 @@ def build(
     min_sim: float = 0.85,
 ) -> Gallery:
     """The gallery from the hand-drawn truth (each box cut from up to per_keyframe frames of its segment whose box area
-    still looks like the keyframe's) and from the done TRN audits. Scoring frames never enter; with exclude_holdout,
+    still looks like the keyframe's) and from the done TRN and REV audits. Scoring frames never enter; with exclude_holdout,
     held-out keyframes and held-out TRN frames do not either."""
     import cv2
 
@@ -220,7 +221,10 @@ def _export_trn(out: Path) -> int:
     from boto3.dynamodb.conditions import Attr
 
     table = boto3.resource("dynamodb", region_name=REGION_NAME).Table(AUDITS_TABLE)
-    kw = {"FilterExpression": Attr("status").eq("done") & Attr("audit_id").begins_with("TRN-")}
+    kw = {
+        "FilterExpression": Attr("status").eq("done")
+        & (Attr("audit_id").begins_with("TRN-") | Attr("audit_id").begins_with("REV-"))
+    }
     items, resp = [], table.scan(**kw)
     items += resp["Items"]
     while "LastEvaluatedKey" in resp:
@@ -245,7 +249,7 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--out", type=Path, required=True)
     args = ap.parse_args(argv)
     if args.command == "export-trn":
-        print(f"{_export_trn(args.out)} done TRN audits -> {args.out}")
+        print(f"{_export_trn(args.out)} done TRN and REV audits -> {args.out}")
         return
     g = build(
         json.loads(args.truth.read_text(encoding="utf-8")),
