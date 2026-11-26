@@ -101,7 +101,9 @@ def write_segment(
         if image is None:
             counts["skipped_unreadable"] += 1
             continue
-        lines, masks = frame_labels(cid, tracks, decisions, classes, missed, mask_radius, (image.shape[1], image.shape[0]))
+        lines, masks = frame_labels(
+            cid, tracks, decisions, classes, missed, mask_radius, (image.shape[1], image.shape[0])
+        )
         for x, y, w, h in masks:
             image[max(y, 0) : max(y + h, 0), max(x, 0) : max(x + w, 0)] = GREY
         (out / "images").mkdir(parents=True, exist_ok=True)

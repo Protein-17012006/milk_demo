@@ -184,7 +184,9 @@ def build(
         if seg is None or key not in paths or (exclude_holdout and seg.get("split") == "holdout"):
             continue
         key_grey = cv2.imread(str(paths[key]), cv2.IMREAD_GRAYSCALE)
-        usable = [(i, r) for i, r in enumerate(rows) if r.get("kind") != "ignore" and r.get("sku") not in (None, "unknown")]
+        usable = [
+            (i, r) for i, r in enumerate(rows) if r.get("kind") != "ignore" and r.get("sku") not in (None, "unknown")
+        ]
         for cid in spread([c for c in seg["members"] if c not in scoring and c in paths], per_keyframe):
             image = cv2.imread(str(paths[cid]))
             grey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)

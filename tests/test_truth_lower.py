@@ -2,7 +2,10 @@
 
 from training.store_view.truth_lower import add_lower, candidates
 
-ROWS = [{"box": [100, 200, 70, 160], "sku": "cheese145", "kind": "face"}, {"box": [300, 100, 60, 30], "sku": "unknown", "kind": "ignore"}]
+ROWS = [
+    {"box": [100, 200, 70, 160], "sku": "cheese145", "kind": "face"},
+    {"box": [300, 100, 60, 30], "sku": "unknown", "kind": "ignore"},
+]
 
 
 def test_candidates_are_the_boxes_no_truth_row_holds():

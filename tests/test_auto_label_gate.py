@@ -20,14 +20,20 @@ def one(tracks, decisions, rows):
 
 
 def test_an_accepted_can_on_a_lower_tier_truth_row_counts_as_real():
-    s = one([can("t0", (100, 500, 70, 160))], {"t0": Decision("accept", "cheese145", "agree")},
-            [{"box": [95, 495, 80, 170], "sku": "unknown", "kind": "lower"}])
+    s = one(
+        [can("t0", (100, 500, 70, 160))],
+        {"t0": Decision("accept", "cheese145", "agree")},
+        [{"box": [95, 495, 80, 170], "sku": "unknown", "kind": "lower"}],
+    )
     assert s["real"] == 1.0 and s["flavour"] is None
 
 
 def test_an_accepted_box_where_no_truth_row_is_is_not_real():
-    s = one([can("t0", (900, 900, 50, 50))], {"t0": Decision("accept", "cheese145", "agree")},
-            [{"box": [95, 495, 80, 170], "sku": "cheese145", "kind": "face"}])
+    s = one(
+        [can("t0", (900, 900, 50, 50))],
+        {"t0": Decision("accept", "cheese145", "agree")},
+        [{"box": [95, 495, 80, 170], "sku": "cheese145", "kind": "face"}],
+    )
     assert s["real"] == 0.0 and s["coverage"] == 0.0
 
 
@@ -108,8 +114,14 @@ def tracked(seg, key, colour):
     t = Track(f"{seg}-t0", CAN)
     t.seen[key] = {"B": Proposal("B", CAN, 0.8, None)}
     t.colour = colour
-    return {"segment": seg, "keyframe": key, "split": "holdout", "frames": [key], "tracks": [t],
-            "decisions": {t.id: Decision("review", None, "disagree")}}
+    return {
+        "segment": seg,
+        "keyframe": key,
+        "split": "holdout",
+        "frames": [key],
+        "tracks": [t],
+        "decisions": {t.id: Decision("review", None, "disagree")},
+    }
 
 
 YELLOW = np.eye(144)[0]

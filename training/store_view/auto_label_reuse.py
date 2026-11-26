@@ -85,8 +85,11 @@ def truth_precedents(
         for i, row in enumerate(truth.get(key, [])):
             crop = crop_of(image, row["box"])
             if crop is not None:
-                out.append(Precedent(key, tuple(float(v) for v in row["box"]), colour(crop), _truth_label(row),
-                                     f"truth:{key}#{i}"))
+                out.append(
+                    Precedent(
+                        key, tuple(float(v) for v in row["box"]), colour(crop), _truth_label(row), f"truth:{key}#{i}"
+                    )
+                )
     return out
 
 
@@ -101,8 +104,15 @@ def trn_precedents(rows: list[tuple[str, list[int], str]], load: Callable[[str],
             continue
         crop = crop_of(cache[cid], box)
         if crop is not None:
-            out.append(Precedent(cid, tuple(float(v) for v in box), colour(crop),
-                                 NOT_PRODUCT if label == "none" else label, f"trn:{cid}@{box[0]},{box[1]}"))
+            out.append(
+                Precedent(
+                    cid,
+                    tuple(float(v) for v in box),
+                    colour(crop),
+                    NOT_PRODUCT if label == "none" else label,
+                    f"trn:{cid}@{box[0]},{box[1]}",
+                )
+            )
     return out
 
 

@@ -94,6 +94,7 @@ def test_mean_colour_is_a_unit_vector_and_none_for_nothing():
     assert float(m @ patch(YELLOW)) > float(m @ patch(GREEN))
     assert mean_colour([]) is None
 
+
 # tests/test_auto_label_run.py
 def test_run_segment_gives_each_can_the_colour_of_its_boxes():
     tracks, _, _ = run_segment("seg-1", ["C1", "C2"], lambda c: scene(), FakeSources(), gallery())
@@ -101,11 +102,14 @@ def test_run_segment_gives_each_can_the_colour_of_its_boxes():
     assert float(by_box[CAN1].colour @ patch(YELLOW)) > 0.99
     assert float(by_box[CAN2].colour @ patch(GREEN)) > 0.99
 
+
 def test_a_track_round_trips_with_and_without_colour():
-    t = Track("s-t0", (1.0, 2.0, 3.0, 4.0)); t.colour = patch(YELLOW)
+    t = Track("s-t0", (1.0, 2.0, 3.0, 4.0))
+    t.colour = patch(YELLOW)
     back = _track_from(json.loads(json.dumps(_track_json(t))))
     assert np.allclose(back.colour, t.colour, atol=1e-4)
-    old = _track_json(t); del old["colour"]
+    old = _track_json(t)
+    del old["colour"]
     assert _track_from(old).colour is None
 ```
 
@@ -313,14 +317,20 @@ def test_truth_rows_become_precedents_with_their_crop_colour_and_unknown_as_out_
     assert [p.label for p in ps] == ["cheese145", "out_of_scope"]
     assert float(ps[0].colour @ patch(YELLOW)) > 0.99 and ps[0].source == "truth:K#0"
 
+
 def test_trn_none_is_not_product():
     ps = trn_precedents([("C1", [10, 10, 20, 40], "none")], lambda c: scene())
     assert ps[0].label == "not_product" and ps[0].source == "trn:C1@10,10"
 
+
 def test_review_decisions_become_precedents_keyed_by_the_segment_first_frame():
     review = {"s1": {"tracks": {"s1-t0": {"verdict": "sku", "sku": "hot160"}, "s1-t1": {"verdict": "out_of_scope"}}}}
     ps = review_precedents([s1], review)
-    assert {(p.source, p.label, p.key) for p in ps} == {("review:s1-t0", "hot160", "C1"), ("review:s1-t1", "out_of_scope", "C1")}
+    assert {(p.source, p.label, p.key) for p in ps} == {
+        ("review:s1-t0", "hot160", "C1"),
+        ("review:s1-t1", "out_of_scope", "C1"),
+    }
+
 
 def test_unreadable_images_give_no_precedent():
     assert truth_precedents({"K": rows}, ["K"], lambda c: None) == []

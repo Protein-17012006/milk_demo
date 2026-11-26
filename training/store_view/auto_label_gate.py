@@ -43,8 +43,16 @@ def score(
     keyframe_of: dict[str, str],
     new_frames: set[str] | None = None,
 ) -> dict:
-    n = {"accepted": 0, "real": 0, "flavour_rows": 0, "flavour_right": 0, "rows": 0, "covered": 0, "segments": 0,
-         "review_segments": 0}
+    n = {
+        "accepted": 0,
+        "real": 0,
+        "flavour_rows": 0,
+        "flavour_right": 0,
+        "rows": 0,
+        "covered": 0,
+        "segments": 0,
+        "review_segments": 0,
+    }
     for sid, (tracks, decisions) in segments.items():
         if any(d.status == "too_short" for d in decisions.values()):
             continue
@@ -67,8 +75,13 @@ def score(
             x, y, w, h = t.box_in(key) or t.box
             cx, cy = x + w / 2, y + h / 2
             hit = next(
-                (i for i, r in enumerate(rows) if not taken[i] and r["box"][0] <= cx <= r["box"][0] + r["box"][2]
-                 and r["box"][1] <= cy <= r["box"][1] + r["box"][3]),
+                (
+                    i
+                    for i, r in enumerate(rows)
+                    if not taken[i]
+                    and r["box"][0] <= cx <= r["box"][0] + r["box"][2]
+                    and r["box"][1] <= cy <= r["box"][1] + r["box"][3]
+                ),
                 None,
             )
             if hit is not None:

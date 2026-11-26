@@ -95,7 +95,9 @@ class Sources:
             self._slide = SlidePipeline()
         self._yoloe_weights = yoloe_weights
         x0, y0, x1, y1 = region
-        self._prompts = [(img[y0:y1, x0:x1].copy(), boxes) for img, boxes in zip(prompt_images, prompt_boxes, strict=True)]
+        self._prompts = [
+            (img[y0:y1, x0:x1].copy(), boxes) for img, boxes in zip(prompt_images, prompt_boxes, strict=True)
+        ]
         self._region = region
 
     def _yoloe(self, image: np.ndarray) -> list[Proposal]:

@@ -1,24 +1,24 @@
 """The auto-labeller's commands (auto-label design 5.1, 5.4b). Runs on the counting machine in .venv-label.
 
-    propose          each day segment of a split: both sources on up to --per-segment of its frames (never a scoring
-                     frame), gallery reads, colours, cans, decisions -> <out>/<segment>.json
-    queue            the proposals of a split after reusing people's decisions (train-side truth, TRN verdicts, the
-                     review file): <proposals>/queue.json lists the segments that need a new review frame and the cans
-                     a person decides there
-    labels           the training segments' proposals, people's decisions reused -> grey-masked frames and YOLO labels
-    gate1            the held-out proposals against the hand-drawn truth, people simulated by the truth (design 5.7)
-    reuse-pairs      how alike the colours of the train-side truth's same-place cans are: the reuse threshold
-    draft-keyframes  YOLOE alone on some frames, to draw a new keyframe faster (any product group); with
-                     --check-labels, the share of already labelled boxes the draft covers
+propose          each day segment of a split: both sources on up to --per-segment of its frames (never a scoring
+                 frame), gallery reads, colours, cans, decisions -> <out>/<segment>.json
+queue            the proposals of a split after reusing people's decisions (train-side truth, TRN verdicts, the
+                 review file): <proposals>/queue.json lists the segments that need a new review frame and the cans
+                 a person decides there
+labels           the training segments' proposals, people's decisions reused -> grey-masked frames and YOLO labels
+gate1            the held-out proposals against the hand-drawn truth, people simulated by the truth (design 5.7)
+reuse-pairs      how alike the colours of the train-side truth's same-place cans are: the reuse threshold
+draft-keyframes  YOLOE alone on some frames, to draw a new keyframe faster (any product group); with
+                 --check-labels, the share of already labelled boxes the draft covers
 
-    python -m training.store_view.auto_label_run propose --config cameras\\CAM-S01-A.json --group slide ^
-        --segments S --frames F --prompts-from truth.json --gallery G.npz --slide-weights W --yoloe Y ^
-        --split holdout --out DIR
-    python -m training.store_view.auto_label_run queue --proposals DIR --truth truth.json --segments S --frames F ^
-        [--trn trn_done.json] [--review review.json]
-    python -m training.store_view.auto_label_run gate1 --proposals DIR --truth truth.json --segments S --frames F ^
-        [--trn trn_done.json]
-    python -m training.store_view.auto_label_run reuse-pairs --truth truth.json --segments S --frames F
+python -m training.store_view.auto_label_run propose --config cameras\\CAM-S01-A.json --group slide ^
+    --segments S --frames F --prompts-from truth.json --gallery G.npz --slide-weights W --yoloe Y ^
+    --split holdout --out DIR
+python -m training.store_view.auto_label_run queue --proposals DIR --truth truth.json --segments S --frames F ^
+    [--trn trn_done.json] [--review review.json]
+python -m training.store_view.auto_label_run gate1 --proposals DIR --truth truth.json --segments S --frames F ^
+    [--trn trn_done.json]
+python -m training.store_view.auto_label_run reuse-pairs --truth truth.json --segments S --frames F
 """
 
 from __future__ import annotations
@@ -62,7 +62,12 @@ def load_group(path: Path, name: str) -> dict:
     """One product group of a camera's config: region (x0, y0, x1, y1), classes, prompts {source, keyframes}."""
     cfg = json.loads(Path(path).read_text(encoding="utf-8"))
     g = cfg["groups"][name]
-    return {"camera": cfg["camera"], "region": tuple(g["region"]), "classes": list(g["classes"]), "prompts": g["prompts"]}
+    return {
+        "camera": cfg["camera"],
+        "region": tuple(g["region"]),
+        "classes": list(g["classes"]),
+        "prompts": g["prompts"],
+    }
 
 
 def run_segment(
@@ -111,7 +116,9 @@ def _track_json(t: Track) -> dict:
 
 def _track_from(d: dict) -> Track:
     t = Track(d["id"], tuple(d["box"]))
-    t.seen = {c: {s: Proposal(s, tuple(b), conf, sku) for s, (b, conf, sku) in slot.items()} for c, slot in d["seen"].items()}
+    t.seen = {
+        c: {s: Proposal(s, tuple(b), conf, sku) for s, (b, conf, sku) in slot.items()} for c, slot in d["seen"].items()
+    }
     t.votes = {c: GalleryVote(*v) for c, v in d["votes"].items()}
     t.colour = None if d.get("colour") is None else np.array(d["colour"], dtype=float)
     return t
@@ -153,7 +160,9 @@ def propose(
         if seg.get("kind") != "day" or seg.get("split") != split:
             continue
         frame_ids = spread([c for c in seg["members"] if c not in scoring and c in paths], per_segment)
-        tracks, decisions, used = run_segment(seg["id"], frame_ids, lambda c: cv2.imread(str(paths[c])), sources, gallery)
+        tracks, decisions, used = run_segment(
+            seg["id"], frame_ids, lambda c: cv2.imread(str(paths[c])), sources, gallery
+        )
         (out / f"{seg['id']}.json").write_text(
             json.dumps(
                 {
@@ -178,7 +187,9 @@ def _loader(frames_dir: Path) -> Callable[[str], np.ndarray | None]:
     return lambda cid: cv2.imread(str(paths[cid])) if cid in paths else None
 
 
-def human_precedents(truth_path: Path, segments: list[dict], frames_dir: Path, trn_path: Path | None) -> list[Precedent]:
+def human_precedents(
+    truth_path: Path, segments: list[dict], frames_dir: Path, trn_path: Path | None
+) -> list[Precedent]:
     """People's decisions a can may reuse (design 5.4b): the truth of train-side keyframes and the done TRN verdicts.
     Never a scoring frame (AUD), never a held-out keyframe or TRN frame."""
     from training.store_view.dataset import read_scoring_frames
@@ -240,7 +251,9 @@ def _detector_boxes(model, image, group: dict, conf: float = 0.1) -> list[Propos
     wx0, wy0, wx1, wy1 = window_around(group["region"], (image.shape[1], image.shape[0]))
     r = model.predict(image[wy0:wy1, wx0:wx1], imgsz=wx1 - wx0, conf=conf, verbose=False)[0]
     out = []
-    for (bx0, by0, bx1, by1), c, k in zip(r.boxes.xyxy.tolist(), r.boxes.conf.tolist(), r.boxes.cls.tolist(), strict=True):
+    for (bx0, by0, bx1, by1), c, k in zip(
+        r.boxes.xyxy.tolist(), r.boxes.conf.tolist(), r.boxes.cls.tolist(), strict=True
+    ):
         p = Proposal("B", (bx0 + wx0, by0 + wy0, bx1 - bx0, by1 - by0), float(c), None)
         if model.names[int(k)] in group["classes"] and in_region(p.box, group["region"]):
             out.append(p)
@@ -291,7 +304,16 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", required=True)
     p = sub.add_parser("propose")
-    for name in ("--config", "--segments", "--frames", "--prompts-from", "--gallery", "--slide-weights", "--yoloe", "--out"):
+    for name in (
+        "--config",
+        "--segments",
+        "--frames",
+        "--prompts-from",
+        "--gallery",
+        "--slide-weights",
+        "--yoloe",
+        "--out",
+    ):
         p.add_argument(name, type=Path, required=True)
     p.add_argument("--group", default="slide")
     p.add_argument("--split", choices=["train", "holdout"], required=True)
@@ -334,8 +356,10 @@ def main(argv: list[str] | None = None) -> None:
         same = sorted(sim for sim, equal in pairs if equal)
         different = sorted(sim for sim, equal in pairs if not equal)
         if same:
-            print(f"same label: {len(same)} pairs, percentiles 1/5/50 = "
-                  + " / ".join(f"{np.percentile(same, q):.4f}" for q in (1, 5, 50)))
+            print(
+                f"same label: {len(same)} pairs, percentiles 1/5/50 = "
+                + " / ".join(f"{np.percentile(same, q):.4f}" for q in (1, 5, 50))
+            )
         print(f"different label: {len(different)} pairs" + (f", most alike {different[-1]:.4f}" if different else ""))
         print(f"suggested REUSE_MIN_SIM {suggest_min_sim(pairs):.4f}")
         return
@@ -343,8 +367,13 @@ def main(argv: list[str] | None = None) -> None:
         props = load_proposals(args.proposals)
         truth = json.loads(args.truth.read_text(encoding="utf-8"))
         summary = simulate(props, truth, _precedents(args, props, {}), REUSE_MIN_SIM)
-        print("  ".join(f"{k} {summary[k]:.3f}" if summary[k] is not None else f"{k} -" for k in
-                        ("real", "flavour", "coverage", "review_share", "reuse_right")), json.dumps(summary["counts"]))
+        print(
+            "  ".join(
+                f"{k} {summary[k]:.3f}" if summary[k] is not None else f"{k} -"
+                for k in ("real", "flavour", "coverage", "review_share", "reuse_right")
+            ),
+            json.dumps(summary["counts"]),
+        )
         fails = failures(summary)
         print("gate 1 passed" if not fails else "gate 1 FAILED: " + "; ".join(fails))
         return
@@ -354,8 +383,17 @@ def main(argv: list[str] | None = None) -> None:
         r = queue(props, _precedents(args, props, review), REUSE_MIN_SIM)
         (args.proposals / "queue.json").write_text(json.dumps(r.new_frames, indent=1), encoding="utf-8")
         reasons = Counter(d.reason.split(":")[0] for ds in r.decisions.values() for d in ds.values())
-        print(json.dumps({"segments": len(props), "new_frames": len(r.new_frames), "reused": len(r.links),
-                          "waiting": reasons["waits"], "conflict": reasons["reuse_conflict"]}))
+        print(
+            json.dumps(
+                {
+                    "segments": len(props),
+                    "new_frames": len(r.new_frames),
+                    "reused": len(r.links),
+                    "waiting": reasons["waits"],
+                    "conflict": reasons["reuse_conflict"],
+                }
+            )
+        )
         return
     if args.command == "labels":
         from training.store_view.dataset import read_scoring_frames
@@ -368,9 +406,17 @@ def main(argv: list[str] | None = None) -> None:
         r = queue(props, _precedents(args, props, review), REUSE_MIN_SIM)
         scoring, paths, total = read_scoring_frames(args.frames), _paths(args.frames), Counter()
         for p in props:
-            total += write_segment(segs[p["segment"]], p["frames"], paths, p["tracks"], r.decisions[p["segment"]],
-                                   group["classes"], review.get(p["segment"], {}).get("missed", []), args.out,
-                                   never=scoring)
+            total += write_segment(
+                segs[p["segment"]],
+                p["frames"],
+                paths,
+                p["tracks"],
+                r.decisions[p["segment"]],
+                group["classes"],
+                review.get(p["segment"], {}).get("missed", []),
+                args.out,
+                never=scoring,
+            )
         print(json.dumps(dict(total)))
         return
 

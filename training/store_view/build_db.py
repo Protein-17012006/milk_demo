@@ -161,9 +161,7 @@ def main(argv: list[str] | None = None) -> None:
     pos_crops, _ = _crops(
         crop_jobs(segments, args.labels, "val", args.share, args.per_segment, scoring), frames, embedder.crop_box
     )
-    neg_jobs = _mistakes(
-        segments, args.labels, frames, "val", args.yolo, args.tile, recognize, 20, args.share, scoring
-    )
+    neg_jobs = _mistakes(segments, args.labels, frames, "val", args.yolo, args.tile, recognize, 20, args.share, scoring)
     neg_crops, _ = _crops(neg_jobs, frames, embedder.crop_box)
     pos = rec.lookup(emb.embed(pos_crops)) if pos_crops else []
     neg = rec.lookup(emb.embed(neg_crops)) if neg_crops else []

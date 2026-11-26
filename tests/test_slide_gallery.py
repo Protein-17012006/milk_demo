@@ -55,7 +55,9 @@ def test_read_is_unsure_below_60_percent_weight():
     q = unit(axis(0) + axis(1))
     a = np.stack([unit(axis(0) + axis(1) + 0.001 * axis(2 + i)) for i in range(5)])
     b = np.stack([unit(axis(0) + axis(1) + 0.001 * axis(20 + i)) for i in range(5)])
-    g = gallery([(a, "cheese145"), (b, "original145"), (near(axis(60), 25), "cheese145"), (near(axis(90), 25), "original145")])
+    g = gallery(
+        [(a, "cheese145"), (b, "original145"), (near(axis(60), 25), "cheese145"), (near(axis(90), 25), "original145")]
+    )
     assert read(g, q).sku is None
 
 
@@ -92,7 +94,11 @@ def test_trn_rows_follow_the_verdicts():
             audit("AUD-CAM-S01-A-20261124-12", "done", boxes, verdicts),
         ]
     )
-    assert rows == [("C2", [10, 0, 8, 8], "original145"), ("C2", [20, 0, 8, 8], "hot160"), ("C2", [30, 0, 8, 8], "none")]
+    assert rows == [
+        ("C2", [10, 0, 8, 8], "original145"),
+        ("C2", [20, 0, 8, 8], "hot160"),
+        ("C2", [30, 0, 8, 8], "none"),
+    ]
 
 
 def frame(folder, day, cid):
@@ -158,7 +164,6 @@ def test_build_names_each_can_once(tmp_path):
     segments = [{"id": "s", "kind": "day", "split": "train", "keyframe": "K", "members": ["K", "M1", "M2"]}]
     g = build(truth, segments, frames, [], exclude_holdout=True)
     assert len(g.labels) == 3 and g.counts() == {"cheese145": 1}
-
 
 
 def test_mean_colour_is_a_unit_vector_and_none_for_nothing():

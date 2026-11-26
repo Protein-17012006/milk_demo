@@ -110,9 +110,7 @@ def assign(segments: list[dict], share: float = 0.1, never: set[str] = frozenset
     transient segments get nothing, nor does any frame in `never` (the scoring frames)."""
     usable = [s for s in segments if s["split"] == "train" and s["kind"] in ("day", "negative")]
     val = val_segments([s["id"] for s in usable], share)
-    return {
-        cid: ("val" if s["id"] in val else "train") for s in usable for cid in s["members"] if cid not in never
-    }
+    return {cid: ("val" if s["id"] in val else "train") for s in usable for cid in s["members"] if cid not in never}
 
 
 def frame_samples(

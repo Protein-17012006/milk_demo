@@ -31,7 +31,11 @@ def test_a_frame_where_the_can_is_hidden_masks_it_instead_of_labelling():
 
 
 def test_review_and_out_of_scope_are_masked_never_labelled():
-    a, b, c = can("s-t0", ["C1"]), can("s-t1", ["C1"], box=(1200, 300, 70, 160)), can("s-t2", ["C1"], box=(1300, 1, 9, 9))
+    a, b, c = (
+        can("s-t0", ["C1"]),
+        can("s-t1", ["C1"], box=(1200, 300, 70, 160)),
+        can("s-t2", ["C1"], box=(1300, 1, 9, 9)),
+    )
     decisions = {
         "s-t0": Decision("review", None, "disagree"),
         "s-t1": Decision("masked", None, "out_of_scope"),
@@ -88,5 +92,7 @@ def test_write_segment_skips_scoring_and_holdout_frames(tmp_path):
     assert (tmp_path / "out" / "labels" / "C2.txt").read_text().startswith("0 ")
     img = cv2.imread(str(tmp_path / "out" / "images" / "C2.jpg"))
     assert abs(int(img[380, 1235, 0]) - 127) <= 3 and abs(int(img[380, 1035, 0]) - 200) <= 3  # masked vs labelled
-    held = write_segment({"id": "h", "split": "holdout"}, ["C2"], paths, tracks, decisions, CLASSES, [], tmp_path / "o2")
+    held = write_segment(
+        {"id": "h", "split": "holdout"}, ["C2"], paths, tracks, decisions, CLASSES, [], tmp_path / "o2"
+    )
     assert held["skipped_holdout"] == 1 and not (tmp_path / "o2").exists()
