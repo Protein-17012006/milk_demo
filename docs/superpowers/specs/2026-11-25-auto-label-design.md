@@ -255,6 +255,12 @@ Các ngưỡng 30%, 60% và 80% được chọn trên các đoạn phía train c
   - 2 lần: nắp Sour Cream lúc 07:25 thấy rõ, lúc 09:35 và 11:05 bị gói kẹo che một nửa nên đáp án ghi `unknown`; vẫn là lon đó.
 - Cách chấm `reuse_right` cho trường hợp đáp án tự mâu thuẫn chờ hoang quyết.
 
+**Hàng chờ thật ngày 26/11** (`store_eval\autolabel_train\queue.json`, kế hoạch Task 7):
+- Đầu vào là 22 đoạn ban ngày phía train, dùng kho ảnh eval.
+- Máy tự quyết: 123 lon chấp nhận, 103 lon bỏ. 125 lon cần xem.
+- Trong 125 lon cần xem: 52 lon nhận lại quyết định, 46 lon chờ cùng lon của đoạn trước, 15 lon xung đột trong cùng ngày.
+- **Còn 12 frame review, với 27 lon người phải chọn.** Đây là cỡ hàng chờ cho kế hoạch 2b.
+
 **Để người làm tự quyết:**
 - ngưỡng τ, chọn trên các cặp keyframe phía train;
 - có giới hạn khoảng thời gian dùng lại hay không;
