@@ -74,7 +74,8 @@ cùng một hộp và 2 nằm ngoài mọi hộp. Detector gần như không kho
 
 **Giới hạn của phép đo:**
 - Tập giữ riêng 25/11 đã được nhìn ba lần: cổng tối 25/11, lần chẩn đoán, và lần này.
-- Chỉ có 48 frame không có TH, đều là ban ngày. Chưa đo ban đêm, nơi model cũ từng báo cái chai trắng là TH.
+- Chỉ có 48 frame không có TH, đều chụp ngày 23/11 lúc 20:39–20:55, ngay sau khi tủ được cất. Chưa đo đêm khuya và
+  các đêm khác, nơi model cũ từng báo cái chai trắng là TH.
 - Chưa tính bước gộp với Slide (`pipeline.merge`).
 - Một camera, một tiệm.
 
@@ -198,8 +199,8 @@ lên 85% trên một frame), và được kiểm lại ở cổng của giai đo
 |---|---|---|
 | Chạy lại bằng code thật (`evaluate run`) | 594 frame giữ riêng hiện có | Qua cổng. Số phải gần mục 1b; lệch quá 2 điểm thì dừng và tìm nguyên nhân |
 | Ngày chưa ai nhìn | Frame 26/11 | Qua cổng. Đây là số báo cho hoang |
-| Ban đêm | Frame lúc tủ đã cất của các đêm 23–26/11, trừ frame đã dùng để train | ≤ 1 box sữa trên 100 frame |
-| Vinamilk không đổi | Các frame dùng trong test hồi quy hiện có | Kết quả giống hệt giữa `database` và `detector` |
+| Ban đêm | Frame lúc tủ đã cất của đêm 25/11 và 26/11. Các đêm 22–24/11 đã dùng để train nên không tính | ≤ 1 box sữa trên 100 frame |
+| Vinamilk không đổi | 200 ảnh val tổng hợp có hộp Vinamilk | Giữa `database` và `detector`: nhãn và box giống hệt, điểm lệch không quá 0,002 (ảnh được embed theo lô khác nhau ở half precision) |
 | Slide không đổi | 594 frame giữ riêng | Box Slide giống hệt bản đang chạy |
 
 Mọi phép đo trên chạy với đúng các biến sẽ bật live ở mục 5.7, kể cả database v1.
