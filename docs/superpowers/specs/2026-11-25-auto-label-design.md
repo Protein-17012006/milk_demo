@@ -253,7 +253,10 @@ Các ngưỡng 30%, 60% và 80% được chọn trên các đoạn phía train c
   - 8 lần: một keyframe vẽ dòng `ignore`, keyframe kia không vẽ gì;
   - 2 lần: lon Hot tầng dưới có mặt từ 06:40 ngày 25/11 (đã xem ảnh) nhưng đáp án 06:40 thiếu dòng của nó; luật mới chỉ che xám lon này;
   - 2 lần: nắp Sour Cream lúc 07:25 thấy rõ, lúc 09:35 và 11:05 bị gói kẹo che một nửa nên đáp án ghi `unknown`; vẫn là lon đó.
-- **Cách chấm `reuse_right` mới**, hoang chọn ngày 26/11, xem 5.7. Kèm theo, đáp án keyframe 25/11 06:40 được thêm dòng lon Hot tầng dưới (`[975, 561, 67, 77]`, `lower`, đã xem ảnh). Bản sao lưu là `truth.json.bak-20261126` trên cả hai máy.
+- **Cách chấm `reuse_right` mới**, hoang chọn ngày 26/11, xem 5.7. Kèm theo, đáp án các keyframe 25/11 lúc 06:40, 09:35 và 11:05 được thêm dòng lon Hot tầng dưới (`[975, 561, 67, 77]`, `lower`). Đã xem ảnh: lon có mặt ở cả ba thời điểm; đây là dòng bị sót khi bổ sung tầng dưới tối 25/11. Bản sao lưu là `truth.json.bak-20261126` trên cả hai máy.
+- **Cổng 1 sau đó: ĐẠT** (`store_eval\gate1_reuse_20261126.txt`):
+  - real 1,000; flavour 1,000; coverage 0,986; review_share 0,333; reuse_right 1,000 (66/66);
+  - báo riêng: 2 nắp bị che một nửa nhận lại vị khi đáp án ghi `unknown`; 8 chỗ "out of scope" đối với "không phải sản phẩm".
 
 **Hàng chờ thật ngày 26/11** (`store_eval\autolabel_train\queue.json`, kế hoạch Task 7):
 - Đầu vào là 22 đoạn ban ngày phía train, dùng kho ảnh eval.
