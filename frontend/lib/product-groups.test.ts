@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { SkuProduct } from "./products-ui";
-import { groupKeyOf, groupLabelOf, groupProducts, groupSelection } from "./product-groups.ts";
+import { groupKeyOf, groupLabelOf, groupProducts } from "./product-groups.ts";
 
 type Over = Partial<SkuProduct> & { id: string };
 
@@ -26,7 +26,7 @@ function sku(over: Over): SkuProduct {
     storesAvailable: 0,
     storesTotal: 1,
     storeRegion: "DEMO-S01",
-    status: "Validated",
+    status: "Not flagged",
     detailFetchedAt: null,
     brand: null,
     subcategory: null,
@@ -153,13 +153,4 @@ test("groups sort by total stock and by confidence, ties by label", () => {
     "Vinamilk · Plant Milk", "Slide · Potato Crisps", "TH true MILK · Fresh Milk",
     "Vinamilk · Flavored Milk", "Vinamilk · Fresh Milk",
   ]);
-});
-
-test("group selection is all, some or none of its variants", () => {
-  const [g] = groupProducts(slide4, "Name (A → Z)");
-  const ids = slide4.map((p) => p.id);
-  assert.equal(groupSelection(g, new Set(ids)), "all");
-  assert.equal(groupSelection(g, new Set([ids[0]])), "some");
-  assert.equal(groupSelection(g, new Set()), "none");
-  assert.equal(groupSelection(g, new Set(["TH 1"])), "none");
 });

@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { createApiClient, type ApiStore } from "@/lib/api";
+import { parseImportFile } from "@/lib/import-parse";
 import { ShelfPlanSection } from "./ShelfPlanSection";
 
 const DATE_FORMATS = [
@@ -114,32 +115,53 @@ export function SettingsView() {
     }
   };
 
-  const handleImportStoreFile = async (
-    e: React.ChangeEvent<HTMLInputElement>
+  // Both catalogs are imported the same way: read the file into rows, send them, say how many went in.
+  const importFile = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+    send: (items: Record<string, unknown>[]) => Promise<void>,
+    done: (count: number) => string
   ) => {
-    const file = e.target.files?.[0];
+    const input = e.target;
+    const file = input.files?.[0];
     if (!file) return;
-    if (!isApproved || !hasGroup("team_admin")) {
-      showToast("Only team_admin can import Store List.");
-      return;
-    }
     try {
-      const text = await file.text();
-      const parsed = JSON.parse(text);
-      const items = Array.isArray(parsed) ? parsed : parsed.items || [];
-      const api = createApiClient(getIdToken);
-      await api.importStoreList(items);
-      const updated = await api.getStores();
-      setStores(updated.items);
-      showToast(`Imported ${items.length} stores into AWS store_list`);
+      if (!isApproved || !hasGroup("team_admin")) {
+        showToast("Your account cannot import files.");
+        return;
+      }
+      const items = parseImportFile(file.name, await file.text());
+      if (items.length === 0) {
+        showToast("The file has no rows.");
+        return;
+      }
+      await send(items);
+      showToast(done(items.length));
     } catch (err) {
-      showToast(
-        err instanceof Error
-          ? err.message
-          : "Upload a valid Store List JSON array"
-      );
+      showToast(err instanceof Error ? err.message : "The file could not be imported.");
+    } finally {
+      input.value = ""; // the same file can be chosen again after a fix
     }
   };
+
+  const handleImportStoreFile = (e: React.ChangeEvent<HTMLInputElement>) =>
+    importFile(
+      e,
+      async (items) => {
+        const api = createApiClient(getIdToken);
+        await api.importStoreList(items);
+        setStores((await api.getStores()).items);
+      },
+      (n) => `Imported ${n} ${n === 1 ? "store" : "stores"}.`
+    );
+
+  const handleImportSkuFile = (e: React.ChangeEvent<HTMLInputElement>) =>
+    importFile(
+      e,
+      async (items) => {
+        await createApiClient(getIdToken).importSkuMaster(items);
+      },
+      (n) => `Imported ${n} ${n === 1 ? "product" : "products"} into the SKU master.`
+    );
 
   return (
     <div className="min-h-full w-full bg-[#F7F8FA]">
@@ -375,16 +397,36 @@ export function SettingsView() {
               </div>
 
               {hasGroup("team_admin") && (
-                <label className="inline-flex h-[34px] cursor-pointer items-center gap-1.5 rounded-[8px] border border-[#E5E7EB] bg-white px-3 text-[12.5px] font-medium text-[#111827] hover:bg-[#F9FAFB]">
-                  <Upload className="h-3.5 w-3.5 text-[#EE730A]" />
-                  <span>Import Store List</span>
-                  <input
-                    type="file"
-                    accept=".json"
-                    onChange={handleImportStoreFile}
-                    className="hidden"
-                  />
-                </label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <label
+                    title="A .json or .csv file of stores"
+                    className="inline-flex h-[34px] cursor-pointer items-center gap-1.5 rounded-[8px] border border-[#E5E7EB] bg-white px-3 text-[12.5px] font-medium text-[#111827] hover:bg-[#F9FAFB]"
+                  >
+                    <Upload className="h-3.5 w-3.5 text-[#EE730A]" />
+                    <span>Import Store List</span>
+                    <input
+                      type="file"
+                      accept=".json,.csv"
+                      data-import="store-list"
+                      onChange={(e) => void handleImportStoreFile(e)}
+                      className="hidden"
+                    />
+                  </label>
+                  <label
+                    title="A .json or .csv file of products: SKU names, barcodes, pack sizes, categories"
+                    className="inline-flex h-[34px] cursor-pointer items-center gap-1.5 rounded-[8px] border border-[#E5E7EB] bg-white px-3 text-[12.5px] font-medium text-[#111827] hover:bg-[#F9FAFB]"
+                  >
+                    <Upload className="h-3.5 w-3.5 text-[#EE730A]" />
+                    <span>Import SKU Master</span>
+                    <input
+                      type="file"
+                      accept=".json,.csv"
+                      data-import="sku-master"
+                      onChange={(e) => void handleImportSkuFile(e)}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
               )}
             </div>
 

@@ -78,7 +78,7 @@ const row = () =>
     thumbnail: "/images/products/slide-sour-cream-onion-150g.png",
     onShelfStock: 6,
     confidence: 0.95,
-    status: "Validated",
+    status: "Not flagged",
     detailFetchedAt: null,
     cvOutput: {
       reading_id: "RD-S01-20261126-154523-001",

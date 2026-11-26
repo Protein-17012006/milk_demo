@@ -94,10 +94,3 @@ export function groupProducts(products: SkuProduct[], sortBy: SortOption): Produ
   }
   return groups.sort(compareGroups(sortBy));
 }
-
-/** How much of a group's variants are in the selection, for the tri-state group checkbox. */
-export function groupSelection(group: ProductGroup, selected: Set<string>): "all" | "some" | "none" {
-  const picked = group.variants.filter((v) => selected.has(v.id)).length;
-  if (picked === 0) return "none";
-  return picked === group.variants.length ? "all" : "some";
-}

@@ -199,7 +199,7 @@ function QueueItem({
             {REASON[det.flag_reason] ?? det.flag_reason}
           </span>
           <span className="rounded-full bg-[#F3F4F6] px-2 py-0.5 text-[11px] font-medium text-[#374151]">
-            {STATUS[det.status] ? `${STATUS[det.status]} (${det.status})` : det.status}
+            {STATUS[det.status] ?? det.status}
           </span>
         </div>
         <p className="mt-1 truncate text-[13px] font-medium text-[#111827]">

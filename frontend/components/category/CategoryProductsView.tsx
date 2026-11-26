@@ -7,7 +7,6 @@ import {
   Check,
   ChevronDown,
   Search,
-  Upload,
   X,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
@@ -23,8 +22,11 @@ import { productThumbnail } from "@/lib/product-thumbnail";
 import {
   ALL_STORES_LABEL,
   MILK_FLAG_THRESHOLD,
-  SORT_OPTIONS,
+  NO_BARCODE,
   STATUS_FILTER_OPTIONS,
+  categoryColumns,
+  showStoreFilter,
+  sortOptions,
   type CategoryFilterOption,
   type PrimaryCategory,
   type SkuProduct,
@@ -37,7 +39,7 @@ import { ProductRow } from "./ProductRow";
 import { ProductGroupRow } from "./ProductGroupRow";
 import { ReviewBanner, ReviewQueueDialog } from "./ReviewQueue";
 import { cardFromQueueItem, queueKeyForReading } from "@/lib/review-queue";
-import { groupProducts, groupSelection, type ProductGroup } from "@/lib/product-groups";
+import { groupProducts } from "@/lib/product-groups";
 import { displayBanner } from "@/lib/shelf-ui";
 
 interface ToolbarDropdownProps<T extends string> {
@@ -123,7 +125,7 @@ function ToolbarDropdown<T extends string>({
 }
 
 function statusOf(isFlagged: boolean, confidence: number): SkuProduct["status"] {
-  if (!isFlagged) return "Validated";
+  if (!isFlagged) return "Not flagged";
   return confidence < MILK_FLAG_THRESHOLD ? "Low Confidence" : "Needs Review";
 }
 
@@ -158,7 +160,7 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
     packType: p.pack_type || "Carton",
     packSize: p.pack_size || "—",
     skuCode: p.model_alias || p.sku_id,
-    barcode: p.barcode || "Pending SKU Master",
+    barcode: p.barcode || NO_BARCODE,
     brandManufacturer: p.manufacturer || p.brand || "Unassigned",
     categoryPath: [p.category || "Milk", p.subcategory]
       .filter(Boolean)
@@ -206,6 +208,8 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
 
 export function CategoryProductsView() {
   const { isApproved, hasGroup, getIdToken } = useAuth();
+  // The review queue, corrections and the model's own numbers are the team's tools; a viewer sees stock only.
+  const canReview = hasGroup("field_team", "team_admin");
 
   // Rows exist only once the live API answers; signed out, the table stays empty (no sample rows).
   const [products, setProducts] = useState<SkuProduct[]>([]);
@@ -223,17 +227,12 @@ export function CategoryProductsView() {
     "On-shelf stock (high → low)"
   );
 
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
-  // Product-line groups start collapsed; keys are stable, so the 15 s refresh keeps them as they are.
-  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(() => new Set());
+  // Product-line groups start open; keys are stable, so the 15 s refresh keeps the closed ones closed.
+  const [collapsedKeys, setCollapsedKeys] = useState<Set<string>>(() => new Set());
 
   const [viewingProduct, setViewingProduct] = useState<SkuProduct | null>(null);
   const [reviewQueueOpen, setReviewQueueOpen] = useState(false);
-  const [importModalOpen, setImportModalOpen] = useState(false);
-  const [openRowMenuId, setOpenRowMenuId] = useState<string | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
-
-  const rowMenuRef = useRef<HTMLDivElement>(null);
 
   // background = the periodic refresh: update the numbers but keep the user's filter and selection.
   const loadLiveData = React.useCallback(async (opts?: { background?: boolean }) => {
@@ -254,23 +253,22 @@ export function CategoryProductsView() {
       const [prodRes, storeRes, queueRes] = await Promise.all([
         api.getProducts(),
         api.getStores(),
-        api.getReviewQueue(),
+        canReview ? api.getReviewQueue() : Promise.resolve(null),
       ]);
       const mapped = prodRes.items.map(mapApiProductToSkuProduct);
       setProducts(mapped);
       setLiveStores(storeRes.items);
-      setLiveQueue(queueRes.items);
+      setLiveQueue(queueRes ? queueRes.items : null);
       setDisplays(prodRes.displays ?? []);
       setUnrecognizedCount(prodRes.unrecognized_units);
       if (!background) {
         setStoreFilter(`${ALL_STORES_LABEL} (${storeRes.total})`);
-        setSelectedIds(new Set());
       }
       setLiveMode(true);
     } catch {
       // keep preview state on error
     }
-  }, [isApproved, getIdToken]);
+  }, [isApproved, getIdToken, canReview]);
 
   useEffect(() => {
     void loadLiveData();
@@ -301,19 +299,6 @@ export function CategoryProductsView() {
     const present = new Set(products.map((p) => p.primaryCategory));
     return ["All", ...order.filter((c) => present.has(c))];
   }, [products]);
-
-  useEffect(() => {
-    function handleOutside(e: MouseEvent) {
-      if (
-        rowMenuRef.current &&
-        !rowMenuRef.current.contains(e.target as Node)
-      ) {
-        setOpenRowMenuId(null);
-      }
-    }
-    if (openRowMenuId) document.addEventListener("mousedown", handleOutside);
-    return () => document.removeEventListener("mousedown", handleOutside);
-  }, [openRowMenuId]);
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
@@ -379,15 +364,15 @@ export function CategoryProductsView() {
     () => groupProducts(filteredProducts, sortBy),
     [filteredProducts, sortBy]
   );
-  const isExpanded = (key: string) => searchText !== "" || expandedKeys.has(key);
-  const allGroupsExpanded = groups.length > 0 && groups.every((g) => expandedKeys.has(g.key));
+  const isExpanded = (key: string) => searchText !== "" || !collapsedKeys.has(key);
+  const allGroupsExpanded = groups.length > 0 && groups.every((g) => !collapsedKeys.has(g.key));
 
   const toggleAllGroups = () => {
-    setExpandedKeys(allGroupsExpanded ? new Set() : new Set(groups.map((g) => g.key)));
+    setCollapsedKeys(allGroupsExpanded ? new Set(groups.map((g) => g.key)) : new Set());
   };
 
   const toggleGroup = (key: string) => {
-    setExpandedKeys((prev) => {
+    setCollapsedKeys((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -395,43 +380,12 @@ export function CategoryProductsView() {
     });
   };
 
-  // Selects or clears the group's visible variants (a search narrows what the group holds).
-  const toggleGroupSelection = (group: ProductGroup) => {
-    const clear = groupSelection(group, selectedIds) === "all";
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      for (const v of group.variants) {
-        if (clear) next.delete(v.id);
-        else next.add(v.id);
-      }
-      return next;
-    });
-  };
+  const storeCount = liveStores?.length ?? 0;
+  const columns = categoryColumns(canReview, storeCount);
+  // the product column (240) and the padding (32), plus every fixed column on show
+  const tableMinWidth =
+    240 + 32 + 126 + 82 + 140 + 64 + (columns.skuCode ? 152 : 0) + (columns.confidence ? 140 : 0) + (columns.stores ? 128 : 0);
 
-  const allVisibleSelected =
-    filteredProducts.length > 0 &&
-    filteredProducts.every((p) => selectedIds.has(p.id));
-
-  const toggleSelectAll = () => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (allVisibleSelected) {
-        filteredProducts.forEach((p) => next.delete(p.id));
-      } else {
-        filteredProducts.forEach((p) => next.add(p.id));
-      }
-      return next;
-    });
-  };
-
-  const toggleSelectRow = (id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
 
   // Fetches GET /products/{sku} into the open card; returns the reading id it now shows (null on failure).
   const loadProductDetail = async (item: SkuProduct): Promise<string | null> => {
@@ -567,7 +521,7 @@ export function CategoryProductsView() {
     }
     const reviewed = (item: SkuProduct): SkuProduct => ({
       ...item,
-      status: "Validated",
+      status: "Not flagged",
       audit: {
         ...item.audit,
         expectedLabel: payload.expectedLabel,
@@ -645,17 +599,8 @@ export function CategoryProductsView() {
         {/* Toolbar */}
         <section
           aria-label="Product toolbar"
-          className="mt-[16px] flex flex-wrap items-center justify-between gap-2.5"
+          className="mt-[16px] flex flex-wrap items-center justify-end gap-2.5"
         >
-          <button
-            type="button"
-            onClick={() => setImportModalOpen(true)}
-            className="flex h-[36px] items-center gap-[8px] rounded-[8px] bg-[#EE730A] pl-[14px] pr-[16px] text-[13px] font-semibold text-white hover:bg-[#D96504] transition-colors cursor-pointer"
-          >
-            <Upload className="h-[15px] w-[15px]" strokeWidth={2.1} />
-            <span>Import SKU Master</span>
-          </button>
-
           <div className="flex flex-wrap items-center gap-[8px]">
             {/* Search input */}
             <div className="flex h-[36px] w-full items-center gap-[8px] rounded-[8px] border border-[#E5E7EB] bg-white px-[12px] focus-within:border-[#EE730A]/60 sm:w-[270px]">
@@ -667,7 +612,7 @@ export function CategoryProductsView() {
                 type="text"
                 value={localSearch}
                 onChange={(e) => setLocalSearch(e.target.value)}
-                placeholder="Search name, SKU code or barcode"
+                placeholder={canReview ? "Search name, SKU code or barcode" : "Search by name"}
                 className="min-w-0 flex-1 bg-transparent text-[12px] font-normal text-[#111827] placeholder:text-[#9CA3AF] outline-none"
               />
               {localSearch && (
@@ -682,28 +627,32 @@ export function CategoryProductsView() {
               )}
             </div>
 
-            <ToolbarDropdown
-              label="Store:"
-              value={storeFilter}
-              options={storeDropdownOptions}
-              onChange={setStoreFilter}
-            />
+            {showStoreFilter(storeCount) && (
+              <ToolbarDropdown
+                label="Store:"
+                value={storeFilter}
+                options={storeDropdownOptions}
+                onChange={setStoreFilter}
+              />
+            )}
             <ToolbarDropdown
               label="Category:"
               value={categoryFilter}
               options={categoryDropdownOptions}
               onChange={setCategoryFilter}
             />
-            <ToolbarDropdown
-              label="Status:"
-              value={statusFilter}
-              options={STATUS_FILTER_OPTIONS}
-              onChange={setStatusFilter}
-            />
+            {canReview && (
+              <ToolbarDropdown
+                label="Status:"
+                value={statusFilter}
+                options={STATUS_FILTER_OPTIONS}
+                onChange={setStatusFilter}
+              />
+            )}
             <ToolbarDropdown
               label="Sort:"
               value={sortBy}
-              options={SORT_OPTIONS}
+              options={sortOptions(canReview)}
               onChange={setSortBy}
             />
           </div>
@@ -720,8 +669,8 @@ export function CategoryProductsView() {
           </p>
         )}
 
-        {/* Review queue: doubtful readings waiting for a person (live only) */}
-        {liveQueue !== null && (
+        {/* Review queue: doubtful readings waiting for a person (the team only) */}
+        {canReview && liveQueue !== null && (
           <ReviewBanner
             items={liveQueue}
             unrecognizedUnits={unrecognizedCount}
@@ -731,27 +680,9 @@ export function CategoryProductsView() {
 
         {/* SKU Table (Horizontal scroll wrapper for narrow viewports) */}
         <section aria-label="SKU product list" className="mt-[16px] overflow-x-auto pb-2">
-          <div className="min-w-[1080px]">
+          <div style={{ minWidth: tableMinWidth }}>
             {/* Table Header */}
             <div className="flex h-[32px] items-center px-[16px] text-[11px] font-semibold tracking-[0.036em] text-[#6B7280] uppercase">
-              <div className="w-[32px] shrink-0 flex items-center">
-                <button
-                  type="button"
-                  role="checkbox"
-                  aria-checked={allVisibleSelected}
-                  aria-label="Select all products"
-                  onClick={toggleSelectAll}
-                  className={`flex h-[16px] w-[16px] items-center justify-center rounded-[4px] transition-colors cursor-pointer ${
-                    allVisibleSelected
-                      ? "bg-[#515151] text-white"
-                      : "border-[1.5px] border-[#D1D5DB] bg-white hover:border-[#9CA3AF]"
-                  }`}
-                >
-                  {allVisibleSelected && (
-                    <Check className="h-[11px] w-[11px]" strokeWidth={3} />
-                  )}
-                </button>
-              </div>
               <div className="flex flex-[2.4] min-w-[240px] items-center gap-[10px] pr-[12px]">
                 <span>PRODUCT</span>
                 {groups.length > 0 && (
@@ -766,7 +697,7 @@ export function CategoryProductsView() {
               </div>
               <div className="w-[126px] shrink-0 pr-[12px]">CATEGORY</div>
               <div className="w-[82px] shrink-0 pr-[12px]">PACK</div>
-              <div className="w-[152px] shrink-0 pr-[12px]">SKU CODE</div>
+              {columns.skuCode && <div className="w-[152px] shrink-0 pr-[12px]">SKU CODE</div>}
               <div className="w-[140px] shrink-0 pr-[12px]">
                 <button
                   type="button"
@@ -781,19 +712,19 @@ export function CategoryProductsView() {
                   )}
                 </button>
               </div>
-              <div className="w-[140px] shrink-0 pr-[12px]">
-                <button
-                  type="button"
-                  onClick={() => setSortBy("Confidence (high → low)")}
-                  className="uppercase hover:text-[#111827] transition-colors cursor-pointer"
-                >
-                  CONFIDENCE
-                </button>
-              </div>
-              <div className="w-[128px] shrink-0 pr-[12px]">
-                AVAIL IN STORES
-              </div>
-              <div className="w-[90px] shrink-0 text-right">ACTIONS</div>
+              {columns.confidence && (
+                <div className="w-[140px] shrink-0 pr-[12px]">
+                  <button
+                    type="button"
+                    onClick={() => setSortBy("Confidence (high → low)")}
+                    className="uppercase hover:text-[#111827] transition-colors cursor-pointer"
+                  >
+                    CONFIDENCE
+                  </button>
+                </div>
+              )}
+              {columns.stores && <div className="w-[128px] shrink-0 pr-[12px]">AVAIL IN STORES</div>}
+              <div className="w-[64px] shrink-0 text-right">ACTIONS</div>
             </div>
 
             {/* Table Rows */}
@@ -810,9 +741,8 @@ export function CategoryProductsView() {
                     <ProductGroupRow
                       group={group}
                       expanded={isExpanded(group.key)}
-                      selection={groupSelection(group, selectedIds)}
+                      columns={columns}
                       onToggleExpand={() => toggleGroup(group.key)}
-                      onToggleSelect={() => toggleGroupSelection(group)}
                     />
                     {isExpanded(group.key) &&
                       group.variants.map((item) => (
@@ -820,19 +750,8 @@ export function CategoryProductsView() {
                           key={item.id}
                           item={item}
                           nested
-                          selected={selectedIds.has(item.id)}
-                          menuOpen={openRowMenuId === item.id}
-                          menuRef={rowMenuRef}
-                          onToggleSelect={() => toggleSelectRow(item.id)}
+                          columns={columns}
                           onOpenDetails={() => void handleOpenProductDetails(item)}
-                          onToggleMenu={() =>
-                            setOpenRowMenuId((prev) => (prev === item.id ? null : item.id))
-                          }
-                          onCopyCode={() => {
-                            navigator.clipboard?.writeText(item.skuCode);
-                            showToast(`Copied ${item.skuCode}`);
-                          }}
-                          onExportRow={() => undefined}
                         />
                       ))}
                   </React.Fragment>
@@ -847,6 +766,7 @@ export function CategoryProductsView() {
       <ProductDetailsModal
         key={viewingProduct ? `${viewingProduct.id}|${viewingProduct.reviewQueueKey ?? ""}` : "closed"}
         product={viewingProduct}
+        canReview={canReview}
         onClose={closeCard}
         onSaveAudit={handleSaveAudit}
         onRefreshDetail={() =>
@@ -859,117 +779,13 @@ export function CategoryProductsView() {
       />
 
       {/* Review queue: readings the model was unsure about (opened from the banner, live only) */}
-      {reviewQueueOpen && liveQueue && (
+      {canReview && reviewQueueOpen && liveQueue && (
         <ReviewQueueDialog
           items={liveQueue}
           onClose={() => setReviewQueueOpen(false)}
           onConfirm={(det) => void confirmQueueItem(det)}
           onCorrect={openQueueCorrection}
         />
-      )}
-
-      {/* Import SKU Master Modal */}
-      {importModalOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4 backdrop-blur-[1px]"
-          onClick={() => setImportModalOpen(false)}
-        >
-          <div
-            className="w-full max-w-[480px] rounded-[14px] border border-[#E5E7EB] bg-white p-5 shadow-[0_10px_28px_rgba(0,0,0,0.14)]"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between">
-              <h3 className="text-[16px] font-semibold text-[#111827]">
-                Import SKU Master
-              </h3>
-              <button
-                type="button"
-                onClick={() => setImportModalOpen(false)}
-                aria-label="Close import modal"
-                className="flex h-8 w-8 items-center justify-center rounded-lg text-[#6B7280] hover:bg-[#F3F4F6] cursor-pointer"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <p className="mt-1 text-[12.5px] text-[#6B7280]">
-              Upload a CSV or Excel master catalog containing SKU codes,
-              barcodes, pack sizes, and categories.
-            </p>
-            <label className="mt-4 flex cursor-pointer flex-col items-center justify-center rounded-[12px] border border-dashed border-[#D1D5DB] bg-[#F9FAFB] px-6 py-8 text-center hover:border-[#EE730A]/60 transition-colors">
-              <Upload className="h-6 w-6 text-[#EE730A]" strokeWidth={1.8} />
-              <span className="mt-2 text-[13px] font-medium text-[#111827]">
-                Click to choose CSV file
-              </span>
-              <span className="mt-1 text-[11.5px] text-[#6B7280]">
-                Supports .csv, .xlsx up to 10MB
-              </span>
-              <input
-                type="file"
-                accept=".json,.csv"
-                className="hidden"
-                onChange={async (e) => {
-                  const file = e.target.files?.[0];
-                  if (!file) return;
-                  if (!liveMode) {
-                    setImportModalOpen(false);
-                    showToast("Sign in with a team_admin account to import the SKU Master.");
-                    return;
-                  }
-                  if (!hasGroup("team_admin")) {
-                    setImportModalOpen(false);
-                    showToast("Only team_admin can import SKU Master.");
-                    return;
-                  }
-                  try {
-                    const text = await file.text();
-                    let items: Record<string, unknown>[] = [];
-                    if (file.name.toLowerCase().endsWith(".json")) {
-                      const parsed = JSON.parse(text);
-                      items = Array.isArray(parsed)
-                        ? parsed
-                        : parsed.items || [];
-                    } else {
-                      const lines = text.trim().split(/\r?\n/);
-                      const headers = lines[0]
-                        .replace(/^\uFEFF/, "")
-                        .split(",")
-                        .map((h) => h.trim().replace(/^"|"$/g, ""));
-                      items = lines.slice(1).map((line) => {
-                        const vals = line
-                          .split(",")
-                          .map((v) => v.trim().replace(/^"|"$/g, ""));
-                        const obj: Record<string, unknown> = {};
-                        headers.forEach((h, idx) => {
-                          if (vals[idx] !== "") obj[h] = vals[idx];
-                        });
-                        return obj;
-                      });
-                    }
-                    const api = createApiClient(getIdToken);
-                    await api.importSkuMaster(items);
-                    setImportModalOpen(false);
-                    showToast(`Imported ${items.length} SKUs into AWS sku_master`);
-                    void loadLiveData();
-                  } catch (err) {
-                    setImportModalOpen(false);
-                    showToast(
-                      err instanceof Error ? err.message : "SKU import failed"
-                    );
-                  }
-                }}
-              />
-            </label>
-            <div className="mt-4 flex justify-end">
-              <button
-                type="button"
-                onClick={() => setImportModalOpen(false)}
-                className="rounded-[8px] bg-[#F3F4F6] px-4 py-1.5 text-[13px] font-medium text-[#111827] hover:bg-[#E5E7EB] cursor-pointer"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
       )}
 
       {/* Subtle Toast Notification */}

@@ -5,7 +5,9 @@ import type { ApiReliability } from "./api";
 
 export type PrimaryCategory = "Milk" | "Snacks" | "Noodles";
 export type CategoryFilterOption = "All" | PrimaryCategory;
-export type ProductStatus = "Validated" | "Needs Review" | "Low Confidence";
+/** "Not flagged": the model was sure enough (not under the flag threshold, a SKU matched). It does not mean a
+ * person checked the reading; the card's Audit Status says that (auditStatusText). */
+export type ProductStatus = "Not flagged" | "Needs Review" | "Low Confidence";
 export type StatusFilterOption = "All" | ProductStatus;
 export type SortOption =
   | "On-shelf stock (high → low)"
@@ -15,7 +17,7 @@ export type SortOption =
 
 export const STATUS_FILTER_OPTIONS: StatusFilterOption[] = [
   "All",
-  "Validated",
+  "Not flagged",
   "Needs Review",
   "Low Confidence",
 ];
@@ -26,6 +28,31 @@ export const SORT_OPTIONS: SortOption[] = [
   "Confidence (high → low)",
   "Name (A → Z)",
 ];
+
+/** The Sort choices of an account: confidence is a number for the team (canReview), not for a viewer. */
+export function sortOptions(canReview: boolean): SortOption[] {
+  return canReview ? SORT_OPTIONS : SORT_OPTIONS.filter((option) => option !== "Confidence (high → low)");
+}
+
+/** Shown where the SKU master has no barcode for a product yet. */
+export const NO_BARCODE = "No barcode yet";
+
+/** The Category columns that depend on who looks and on how many stores there are. */
+export interface CategoryColumns {
+  skuCode: boolean;
+  confidence: boolean;
+  stores: boolean;
+}
+
+/** canReview: the account is in field_team or team_admin. A viewer keeps the one Reliability label under the name. */
+export function categoryColumns(canReview: boolean, storeCount: number): CategoryColumns {
+  return { skuCode: canReview, confidence: canReview, stores: storeCount > 1 };
+}
+
+/** A Store filter with a single store filters nothing. */
+export function showStoreFilter(storeCount: number): boolean {
+  return storeCount > 1;
+}
 
 export const MISMATCH_TYPE_OPTIONS = [
   "None",
@@ -127,6 +154,6 @@ export function lastSeenNote(units: number, boxes: number, timestamp: string | n
 /** The card's Audit Status: "Validated" only once a person reviewed the reading; an unflagged reading nobody
  * looked at is "Not reviewed". */
 export function auditStatusText(status: ProductStatus, reviewedAt: string | null): string {
-  if (status !== "Validated") return status;
+  if (status !== "Not flagged") return status;
   return reviewedAt ? "Validated" : "Not reviewed";
 }

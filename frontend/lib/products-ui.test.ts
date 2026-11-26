@@ -2,7 +2,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { auditStatusText, lastSeenNote, shownConfidence } from "./products-ui.ts";
+import {
+  STATUS_FILTER_OPTIONS,
+  auditStatusText,
+  categoryColumns,
+  lastSeenNote,
+  shownConfidence,
+  showStoreFilter,
+  sortOptions,
+} from "./products-ui.ts";
 
 test("a row without units shows no confidence: the score is of an older reading", () => {
   assert.equal(shownConfidence(0, 0.9), null);
@@ -26,8 +34,20 @@ test("a card with units, or one that never had a box, needs no such note", () =>
 });
 
 test("only a reading a person reviewed is called validated", () => {
-  assert.equal(auditStatusText("Validated", null), "Not reviewed");
-  assert.equal(auditStatusText("Validated", "2026-11-26T10:00:00+07:00"), "Validated");
+  assert.equal(auditStatusText("Not flagged", null), "Not reviewed");
+  assert.equal(auditStatusText("Not flagged", "2026-11-26T10:00:00+07:00"), "Validated");
   assert.equal(auditStatusText("Low Confidence", null), "Low Confidence");
   assert.equal(auditStatusText("Needs Review", null), "Needs Review");
+});
+
+test("what each account sees on Category", () => {
+  assert.deepEqual(categoryColumns(false, 1), { skuCode: false, confidence: false, stores: false });
+  assert.deepEqual(categoryColumns(true, 1), { skuCode: true, confidence: true, stores: false });
+  assert.deepEqual(categoryColumns(false, 3), { skuCode: false, confidence: false, stores: true });
+  assert.equal(showStoreFilter(0), false);
+  assert.equal(showStoreFilter(1), false);
+  assert.equal(showStoreFilter(2), true);
+  assert.deepEqual(sortOptions(false), ["On-shelf stock (high → low)", "On-shelf stock (low → high)", "Name (A → Z)"]);
+  assert.equal(sortOptions(true).includes("Confidence (high → low)"), true);
+  assert.deepEqual(STATUS_FILTER_OPTIONS, ["All", "Not flagged", "Needs Review", "Low Confidence"]);
 });

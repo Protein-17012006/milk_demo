@@ -13,6 +13,8 @@ import { FrameViewer } from "./FrameViewer";
 
 interface ProductDetailsModalProps {
   product: SkuProduct | null;
+  /** The account may save corrections (field_team, team_admin); others see the reading without the form. */
+  canReview: boolean;
   onClose: () => void;
   onSaveAudit?: (
     productId: string,
@@ -24,6 +26,7 @@ interface ProductDetailsModalProps {
 
 export function ProductDetailsModal({
   product,
+  canReview,
   onClose,
   onSaveAudit,
   onRefreshDetail,
@@ -322,57 +325,59 @@ export function ProductDetailsModal({
             </dl>
           </div>
 
-          {/* Section 3: Human Audit & Correction (Datagent corrections / human_audit) */}
-          <div className="rounded-[12px] border border-[#E5E7EB] bg-[#F9FAFB]/70 p-4">
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="text-[13px] font-semibold text-[#111827]">
-                Human Audit &amp; Correction
-              </h3>
-              <span className="text-[11.5px] text-[#6B7280]">
-                Audit Accuracy:{" "}
-                <strong className="font-semibold text-[#111827]">
-                  {audit.accuracy ?? "Pending human_audit"}
-                </strong>
-              </span>
+          {/* Section 3: Human Audit & Correction (the team only) */}
+          {canReview && (
+            <div className="rounded-[12px] border border-[#E5E7EB] bg-[#F9FAFB]/70 p-4">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-[13px] font-semibold text-[#111827]">
+                  Human Audit &amp; Correction
+                </h3>
+                <span className="text-[11.5px] text-[#6B7280]">
+                  Audit Accuracy:{" "}
+                  <strong className="font-semibold text-[#111827]">
+                    {audit.accuracy ?? "Pending human_audit"}
+                  </strong>
+                </span>
+              </div>
+              <dl className="mt-3 space-y-2.5 text-[13px]">
+                <div className="grid grid-cols-1 items-center gap-1 sm:grid-cols-[200px_1fr]">
+                  <dt className="text-[#6B7280]">Expected Label</dt>
+                  <dd>
+                    <input
+                      type="text"
+                      aria-label="Expected Label"
+                      value={expectedLabel}
+                      onChange={(e) => setExpectedLabel(e.target.value)}
+                      className="h-[34px] w-full rounded-[7px] border border-[#D1D5DB] bg-white px-2.5 text-[12.5px] text-[#111827] outline-none focus:border-[#EE730A]"
+                    />
+                  </dd>
+                </div>
+                <div className="grid grid-cols-1 items-center gap-1 sm:grid-cols-[200px_1fr]">
+                  <dt className="text-[#6B7280]">Mismatch Type</dt>
+                  <dd>
+                    <select
+                      aria-label="Mismatch Type"
+                      value={mismatchType}
+                      onChange={(e) => setMismatchType(e.target.value)}
+                      className="h-[34px] w-full rounded-[7px] border border-[#D1D5DB] bg-white px-2.5 text-[12.5px] text-[#111827] outline-none focus:border-[#EE730A]"
+                    >
+                      {MISMATCH_TYPE_OPTIONS.map((opt) => (
+                        <option key={opt} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                    </select>
+                  </dd>
+                </div>
+                <div className="grid grid-cols-1 gap-1 sm:grid-cols-[200px_1fr]">
+                  <dt className="text-[#6B7280]">Reviewed At</dt>
+                  <dd className="font-normal text-[#111827]">
+                    {audit.reviewedAt ?? "Not yet reviewed"}
+                  </dd>
+                </div>
+              </dl>
             </div>
-            <dl className="mt-3 space-y-2.5 text-[13px]">
-              <div className="grid grid-cols-1 items-center gap-1 sm:grid-cols-[200px_1fr]">
-                <dt className="text-[#6B7280]">Expected Label</dt>
-                <dd>
-                  <input
-                    type="text"
-                    aria-label="Expected Label"
-                    value={expectedLabel}
-                    onChange={(e) => setExpectedLabel(e.target.value)}
-                    className="h-[34px] w-full rounded-[7px] border border-[#D1D5DB] bg-white px-2.5 text-[12.5px] text-[#111827] outline-none focus:border-[#EE730A]"
-                  />
-                </dd>
-              </div>
-              <div className="grid grid-cols-1 items-center gap-1 sm:grid-cols-[200px_1fr]">
-                <dt className="text-[#6B7280]">Mismatch Type</dt>
-                <dd>
-                  <select
-                    aria-label="Mismatch Type"
-                    value={mismatchType}
-                    onChange={(e) => setMismatchType(e.target.value)}
-                    className="h-[34px] w-full rounded-[7px] border border-[#D1D5DB] bg-white px-2.5 text-[12.5px] text-[#111827] outline-none focus:border-[#EE730A]"
-                  >
-                    {MISMATCH_TYPE_OPTIONS.map((opt) => (
-                      <option key={opt} value={opt}>
-                        {opt}
-                      </option>
-                    ))}
-                  </select>
-                </dd>
-              </div>
-              <div className="grid grid-cols-1 gap-1 sm:grid-cols-[200px_1fr]">
-                <dt className="text-[#6B7280]">Reviewed At</dt>
-                <dd className="font-normal text-[#111827]">
-                  {audit.reviewedAt ?? "Not yet reviewed"}
-                </dd>
-              </div>
-            </dl>
-          </div>
+          )}
 
           {/* Section 4: Capture & S3 Traceability */}
           <div className="rounded-[12px] border border-[#E5E7EB] bg-[#F9FAFB]/70 p-4">
@@ -441,10 +446,7 @@ export function ProductDetailsModal({
         </div>
 
         {/* Footer */}
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 pt-1">
-          <p className="text-[12px] text-[#6B7280]">
-            Mapped 1:1 to Datagent 16-column CV Output &amp; corrections schema.
-          </p>
+        <div className="mt-4 flex flex-wrap items-center justify-end gap-3 pt-1">
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -453,13 +455,15 @@ export function ProductDetailsModal({
             >
               Close
             </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              className="rounded-[8px] bg-[#EE730A] px-4 py-2 text-[13px] font-semibold text-white hover:bg-[#D96504] transition-colors cursor-pointer"
-            >
-              {savedNotice ? "Saved ✓" : "Save Correction"}
-            </button>
+            {canReview && (
+              <button
+                type="button"
+                onClick={handleSave}
+                className="rounded-[8px] bg-[#EE730A] px-4 py-2 text-[13px] font-semibold text-white hover:bg-[#D96504] transition-colors cursor-pointer"
+              >
+                {savedNotice ? "Saved ✓" : "Save Correction"}
+              </button>
+            )}
           </div>
         </div>
       </div>
