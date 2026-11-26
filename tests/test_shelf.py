@@ -14,6 +14,7 @@ from shelf import (  # noqa: E402
     bucket_of,
     build_check,
     change_pct,
+    expected_at,
     gap_between,
     is_open,
     merge,
@@ -339,3 +340,55 @@ def test_open_buckets_counts_five_minute_checks_inside_the_hours():
     assert open_buckets(None, None, "20261123-0000", "20261123-2355") == 0
     assert open_buckets("08:00", "20:30", "20261123-0000", "20261124-2355") == 300  # two days
     assert open_buckets("08:00", "20:30", "20261124-0000", "20261123-2355") == 0  # last before first
+
+
+# --- 2026-11-26: a SKU counts as expected only once the system knows of it ---
+
+TH = "TH true MILK 180ml"
+
+
+def seen(bucket: str, counts: dict | None = None, sure: tuple = (), measurable: bool = True) -> dict:
+    return {"bucket": bucket, "counts": counts or {}, "confident_skus": list(sure), "measurable": measurable}
+
+
+def test_a_sku_is_not_expected_before_its_first_sure_count():
+    since: dict[str, str] = {}
+    assert expected_at(seen("20261126-1525"), [TH], since, {}) == []
+    assert expected_at(seen("20261126-1530", {TH: 7}, (TH,)), [TH], since, {}) == [TH]
+    assert since == {TH: "20261126-1530"}
+
+
+def test_a_started_sku_stays_expected_when_the_shelf_is_empty():
+    since = {TH: "20261126-1530"}
+    assert expected_at(seen("20261126-1545"), [TH], since, {}) == [TH]
+    assert since == {TH: "20261126-1530"}
+
+
+def test_a_sku_is_expected_from_the_check_where_it_joined_the_plan():
+    since: dict[str, str] = {}
+    joined = {TH: "20261126-1530"}
+    assert expected_at(seen("20261126-1525"), [TH], since, joined) == []
+    assert expected_at(seen("20261126-1530"), [TH], since, joined) == [TH]
+    assert since == {TH: "20261126-1530"}
+
+
+def test_a_first_count_before_joining_the_plan_starts_the_sku_earlier():
+    since: dict[str, str] = {}
+    assert expected_at(seen("20261122-2150", {TH: 2}, (TH,)), [TH], since, {TH: "20261124-0900"}) == [TH]
+    assert since == {TH: "20261122-2150"}
+
+
+def test_an_unsure_reading_does_not_start_a_sku():
+    since: dict[str, str] = {}
+    assert expected_at(seen("20261123-1315", {TH: 1}), [TH], since, {}) == []
+    assert since == {}
+
+
+def test_a_check_without_the_display_does_not_start_a_sku_by_its_counts():
+    since: dict[str, str] = {}
+    assert expected_at(seen("20261126-1530", {TH: 7}, (TH,), measurable=False), [TH], since, {}) == []
+
+
+def test_only_plan_skus_are_expected_and_in_name_order():
+    since = {"B": "20261122-0600", "A": "20261122-0600", "C": "20261122-0600"}
+    assert expected_at(seen("20261126-1530"), ["B", "A"], since, {}) == ["A", "B"]

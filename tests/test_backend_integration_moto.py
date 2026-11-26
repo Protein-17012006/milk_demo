@@ -319,11 +319,11 @@ def _units(api) -> dict[str, int]:
 def test_a_sku_missing_from_the_next_capture_drops_to_zero(monkeypatch: pytest.MonkeyPatch):
     # 22/11 night: false Vinamilk readings stayed "on shelf" because later captures never mentioned them
     api, ingest = _backend(monkeypatch)
-    _ingest(ingest, "CAM-S01-A", "140700", [("TMP-MLK-TH-02", 3), ("TMP-MLK-TH-01", 1)])
-    _ingest(ingest, "CAM-S01-A", "140710", [("TMP-MLK-TH-02", 3)])
+    _ingest(ingest, "CAM-S01-A", "140700", [("cheese145", 3), ("hot160", 1)])
+    _ingest(ingest, "CAM-S01-A", "140710", [("cheese145", 3)])
 
     units = _units(api)
-    assert (units[TH_SWEET], units[TH_LOW]) == (0, 3)
+    assert (units[HOT], units[CHEESE]) == (0, 3)
     kpi = json.loads(api.lambda_handler(_auth_event("GET", "/v1/kpi"))["body"])
     assert kpi["total_on_shelf_units"] == 3
 
@@ -334,8 +334,7 @@ def test_seeded_skus_reach_the_website_with_their_own_photo(monkeypatch: pytest.
     resp = api.lambda_handler(_auth_event("GET", "/v1/products"))
     images = {p["sku_id"]: p["image_url"] for p in json.loads(resp["body"])["items"]}
 
-    assert images[TH_SWEET] == "/images/products/th-true-milk-fresh-milk-sweetened-180ml.png"
-    assert images[TH_LOW] == "/images/products/th-true-milk-fresh-milk-low-sugar-180ml.png"
+    assert images[TH_MERGED] == "/images/products/th-true-milk-fresh-milk-180ml.png"
     assert images["Slide Cheese 145g"] == "/images/products/slide-cheese-145g.png"
 
 
@@ -1001,12 +1000,61 @@ def test_a_saved_plan_is_recomputed_on_the_next_tick(monkeypatch: pytest.MonkeyP
     _shelf_plan()
     _cheese_then_empty(ingest)
     _tick(ingest)
-    _shelf_plan(expected=(CHEESE, HOT), shelf_recompute_requested_at="2026-11-21T14:22:30+07:00")
+    _shelf_plan(
+        expected=(CHEESE, HOT),
+        shelf_plan_updated_at="2026-11-21T14:10:00+07:00",
+        shelf_recompute_requested_at="2026-11-21T14:22:30+07:00",
+    )
     _tick(ingest)
     store = _table("test-store-list").get_item(Key={"store_id": "DEMO-S01"})["Item"]
     assert "shelf_recompute_requested_at" not in store
+    hot = _shelf("hour#20261121-14")["skus"][HOT]  # never counted: expected from the save of 14:10 on
+    assert (hot["checks"], hot["available"]) == (2, 0)
+    assert _shelf("hour#20261121-14")["skus"][CHEESE]["checks"] == 4  # counted at 14:00, before the save
+    assert _event_keys() == [f"20261121-1410#{CHEESE}#OOS"]
+
+
+@mock_aws
+def test_a_sku_new_to_the_plan_is_not_out_of_stock_before_its_first_count(monkeypatch: pytest.MonkeyPatch):
+    """26/11: TH joined the plan the day the model learnt to count it; the days before must not read as empty."""
+    _, ingest = _backend(monkeypatch)
+    for hhmmss, counts in [
+        ("140010", [("cheese145", 5)]),
+        ("140510", [("cheese145", 5)]),
+        ("141010", [("cheese145", 5), ("hot160", 3)]),
+        ("141510", [("cheese145", 5), ("hot160", 3)]),
+    ]:
+        _ingest(ingest, "CAM-S01-A", hhmmss, counts)
+    _shelf_plan(
+        expected=(CHEESE, HOT),
+        shelf_plan_updated_at="2026-11-21T14:20:00+07:00",
+        shelf_recompute_requested_at="2026-11-21T14:22:30+07:00",
+    )
+    _tick(ingest)
     hot = _shelf("hour#20261121-14")["skus"][HOT]
-    assert (hot["checks"], hot["available"]) == (4, 0)
+    assert (hot["checks"], hot["available"]) == (2, 2)
+    assert _event_keys() == []  # no "restocked after out of stock" for the first sight of it
+    assert _shelf("state")["since"] == {CHEESE: "20261121-1400", HOT: "20261121-1410"}
+
+
+@mock_aws
+def test_a_sku_keeps_its_join_time_when_the_plan_says_one(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE, HOT), expected_since={HOT: "2026-11-21T14:05:00+07:00"})
+    _cheese_then_empty(ingest)
+    _tick(ingest)
+    hot = _shelf("hour#20261121-14")["skus"][HOT]
+    assert (hot["checks"], hot["available"]) == (3, 0)
+
+
+@mock_aws
+def test_the_tick_after_a_tick_remembers_what_started(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan()
+    _cheese_then_empty(ingest)
+    _tick(ingest, now="2026-11-21T14:12:00+07:00")  # 14:00 and 14:05 counted cheese
+    _tick(ingest)  # 14:10 and 14:15 are empty: still expected, so out of stock
+    assert _shelf("hour#20261121-14")["skus"][CHEESE]["checks"] == 4
     assert _event_keys() == [f"20261121-1410#{CHEESE}#OOS"]
 
 
@@ -1066,6 +1114,34 @@ def test_saving_a_plan_asks_for_a_recompute(monkeypatch: pytest.MonkeyPatch):
 
 
 @mock_aws
+def test_saving_a_plan_keeps_when_each_sku_joined(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    hours = {"open_time": "06:00", "close_time": "22:00"}
+
+    def save(iso: str, skus: list[str]) -> dict:
+        _at(api, monkeypatch, iso)
+        assert _call(api, "PUT", PLAN_PATH, groups="team_admin", body={**hours, "expected_skus": skus})[0] == 200
+        return _table("test-store-list").get_item(Key={"store_id": "DEMO-S01"})["Item"]
+
+    assert save("2026-11-21T15:00:00+07:00", [CHEESE])["expected_since"] == {CHEESE: "2026-11-21T15:00:00+07:00"}
+    both = save("2026-11-22T09:00:00+07:00", [CHEESE, HOT])["expected_since"]
+    assert both == {CHEESE: "2026-11-21T15:00:00+07:00", HOT: "2026-11-22T09:00:00+07:00"}
+    assert save("2026-11-23T09:00:00+07:00", [HOT])["expected_since"] == {HOT: "2026-11-22T09:00:00+07:00"}
+    assert "expected_since" not in save("2026-11-24T09:00:00+07:00", [])
+
+
+@mock_aws
+def test_a_plan_saved_before_join_times_gives_its_skus_the_last_save(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE,), shelf_plan_updated_at="2026-11-20T08:00:00+07:00")
+    _at(api, monkeypatch, "2026-11-22T09:00:00+07:00")
+    body = {"open_time": "06:00", "close_time": "22:00", "expected_skus": [CHEESE, HOT]}
+    assert _call(api, "PUT", PLAN_PATH, groups="team_admin", body=body)[0] == 200
+    store = _table("test-store-list").get_item(Key={"store_id": "DEMO-S01"})["Item"]
+    assert store["expected_since"] == {CHEESE: "2026-11-20T08:00:00+07:00", HOT: "2026-11-22T09:00:00+07:00"}
+
+
+@mock_aws
 def test_shelf_plan_of_an_unknown_store_is_not_found(monkeypatch: pytest.MonkeyPatch):
     api, _ = _backend(monkeypatch)
     status, body = _call(api, "GET", "/v1/stores/NOPE/shelf-plan")
@@ -1108,12 +1184,69 @@ def test_kpi_osa_and_restock_rate_against_the_previous_period(monkeypatch: pytes
     kpi = _kpi(api, days="14")
     assert (kpi["osa"]["value"], kpi["osa"]["previous"], kpi["osa"]["blocked_reason"]) == (0.64, 0.6, None)
     r = kpi["restock_rate"]
+    # each period has one day with checks, so its units are that day's rate
     assert (r["units_per_day"], r["previous_units_per_day"], r["change_pct"], r["blocked_reason"]) == (
-        14.4,
-        10.7,
+        201.0,
+        150.0,
         34.0,
         None,
     )
+
+
+@mock_aws
+def test_restock_rate_is_per_day_that_has_checks(monkeypatch: pytest.MonkeyPatch):
+    """26/11: 47 units over the 5 days the camera ran read 3.4 a day on 14 days and 0.5 a day on 90."""
+    api, _ = _backend(monkeypatch)
+    _at(api, monkeypatch, NOW)
+    _shelf_plan()
+    _put_shelf("day#20261127", **_rollup_item(100, 64, 20))
+    _put_shelf("day#20261126", **_rollup_item(100, 64, 10))
+    _put_shelf("day#20261125", **_rollup_item(0, 0, 0))  # a day without a counted check is not a day of data
+    for days in ("14", "90"):
+        r = _kpi(api, days=days)["restock_rate"]
+        assert (r["units_per_day"], r["measured_days"]) == (15.0, 2)
+
+
+@mock_aws
+def test_kpi_on_shelf_units_follow_the_category_and_store_filters(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _at(api, monkeypatch, "2026-11-21T14:22:00+07:00")
+    _ingest(ingest, "CAM-S01-A", "140010", [("cheese145", 3), ("TMP-MLK-TH-00", 2)])
+    assert _kpi(api)["total_on_shelf_units"] == 5
+    assert _kpi(api, category="Milk")["total_on_shelf_units"] == 2
+    assert _kpi(api, category="Snacks")["total_on_shelf_units"] == 3
+    assert _kpi(api, store_id="DEMO-S01", category="Snacks")["total_on_shelf_units"] == 3
+
+
+@mock_aws
+def test_kpi_says_whether_the_cameras_see_the_display(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _at(api, monkeypatch, "2026-11-21T14:22:00+07:00")
+    _ingest(ingest, "CAM-S01-A", "140010", [("cheese145", 3)], display_visible=True)
+    _ingest(ingest, "CAM-S01-A", "140510", [], display_visible=False)
+    (display,) = _kpi(api)["displays"]
+    assert (display["camera_id"], display["visible"]) == ("CAM-S01-A", False)
+    assert display["last_visible_at"] == "2026-11-21T14:00:10+07:00"
+
+
+TH_OLD = "TH true MILK Sữa Tươi Tiệt Trùng Có Đường 180ml"
+TH_MERGED = "TH true MILK Sữa Tươi Tiệt Trùng 180ml (Có đường + Ít đường)"
+
+
+@mock_aws
+def test_products_leave_out_a_sku_counted_under_another_row(monkeypatch: pytest.MonkeyPatch):
+    """The two TH 180ml are counted in one merged row since 26/11; their own rows can never show a unit again."""
+    api, _ = _backend(monkeypatch)
+    ids = {p["sku_id"] for p in _call(api, "GET", "/v1/products", groups="datagent")[1]["items"]}
+    assert TH_MERGED in ids and TH_OLD not in ids
+
+
+@mock_aws
+def test_a_merged_sku_still_shows_while_it_has_units(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140010", [("TMP-MLK-TH-01", 2)])  # an older worker still naming it
+    ids = {p["sku_id"] for p in _call(api, "GET", "/v1/products", groups="datagent")[1]["items"]}
+    assert TH_OLD in ids
 
 
 @mock_aws
@@ -1389,7 +1522,7 @@ def test_a_recompute_replays_measured_checks_and_gaps_from_stored_checks(monkeyp
             fields["measurable"] = measurable
         if measurable is False:
             fields["unmeasured_reason"] = "display_not_visible"
-        _put_shelf(f"check#20261121-{minute}", **fields, confident_skus=[])
+        _put_shelf(f"check#20261121-{minute}", **fields, confident_skus=[CHEESE] if units else [])
     ingest.lambda_handler({"action": "shelf_recompute", "store_id": "DEMO-S01", "now": "2026-11-21T15:12:00+07:00"})
     assert _event_keys() == [f"20261121-1500#{CHEESE}#OOS"]
     event = _table("test-shelf-events").get_item(
@@ -1762,7 +1895,7 @@ def test_a_recompute_takes_the_photos_from_the_checks_it_writes(monkeypatch: pyt
     _framed_cheese_then_empty(ingest)
     for minute, units in [("1400", 5), ("1405", 5), ("1410", 0), ("1415", 0)]:
         fields = {"bucket": f"20261121-{minute}", "counts": {CHEESE: units}, "captures": 1, "cameras": ["CAM-S01-A"]}
-        _put_shelf(f"check#20261121-{minute}", **fields, confident_skus=[])
+        _put_shelf(f"check#20261121-{minute}", **fields, confident_skus=[CHEESE] if units else [])
     ingest.lambda_handler({"action": "shelf_recompute", "store_id": "DEMO-S01", "now": "2026-11-21T14:22:00+07:00"})
     event = _oos_event()
     s3 = boto3.client("s3", region_name="ap-southeast-1")
@@ -1783,7 +1916,7 @@ def test_a_recompute_copies_nothing_for_events_older_than_the_hub_frames(monkeyp
         s3.put_object(Bucket="test-hub-bucket", Key=frame, Body=b"jpeg")
         fields = {"bucket": f"20261121-{minute}", "counts": {CHEESE: units}, "captures": 1, "cameras": ["CAM-S01-A"]}
         framed = {"image_key": frame, "source_bucket": "test-hub-bucket"}
-        _put_shelf(f"check#20261121-{minute}", **fields, **framed, confident_skus=[])
+        _put_shelf(f"check#20261121-{minute}", **fields, **framed, confident_skus=[CHEESE] if units else [])
     s3_calls = _s3_calls(monkeypatch, ingest)
     ingest.lambda_handler({"action": "shelf_recompute", "store_id": "DEMO-S01", "now": "2026-11-29T14:22:00+07:00"})
     event = _oos_event()  # 8 days old: still written, without photos
@@ -1925,7 +2058,7 @@ def test_after_a_long_gap_the_before_photo_is_the_check_before_the_gap(monkeypat
         s3.put_object(Bucket="test-hub-bucket", Key=key, Body=body.encode())
         return {"image_key": key, "source_bucket": "test-hub-bucket"}
 
-    base = {"captures": 1, "cameras": ["CAM-S01-A"], "confident_skus": []}
+    base = {"captures": 1, "cameras": ["CAM-S01-A"], "confident_skus": [CHEESE]}
     for bucket, units in [("1400", 5), ("1405", 5)]:
         _put_shelf(
             f"check#20261121-{bucket}",
