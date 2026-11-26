@@ -75,10 +75,12 @@ def test_holdout_window_marks_segments():
     assert [s["split"] for s in split(rows, sigs)] == ["holdout"]
 
 
-def test_26_11_is_held_out_until_the_th_decision():
-    # design 2026-11-26 (5.6): 26/11 is the day nobody has looked at; the window is removed after hoang decides
-    assert holdout("2026-11-25T23:59:59+07:00") and holdout("2026-11-26T10:00:00+07:00")
-    assert not holdout("2026-11-27T00:00:00+07:00") and not holdout("2026-11-27T09:00:00+07:00")
+def test_frames_from_26_11_are_for_training_again():
+    # hoang 25/11 (option A): 25/11 stays the gate, days from 26/11 teach the arrangements first seen on 25/11.
+    # 26/11 was held out for one afternoon as the fresh check of the TH reading (design 2026-11-26, 5.6); hoang
+    # decided to go live that day, so it teaches again
+    assert holdout("2026-11-25T23:59:59+07:00")
+    assert not holdout("2026-11-26T00:00:00+07:00") and not holdout("2026-11-27T09:00:00+07:00")
 
 
 def test_a_segment_never_spans_a_holdout_boundary():

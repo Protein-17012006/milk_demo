@@ -26,12 +26,11 @@ SIG_W, SIG_H = 64, 48
 # away (standing packs at dusk), and the whole of 25/11. The 25/11 window had no end until the first gate (25/11
 # night) failed on arrangements seen only that day; hoang chose to close it, so days from 26/11 can teach them while
 # 25/11 stays the gate. End None = no end.
-# 26/11 is held out for now (design 2026-11-26, 5.6): the day nobody has looked at checks the TH reading before it
-# goes live. That third window is removed once hoang has decided, and 26/11 teaches again.
+# 26/11 was held out for one afternoon (design 2026-11-26, 5.6) as the fresh check of the TH reading; it went live
+# that day, so 26/11 teaches again.
 HOLDOUT = (
     ("2026-11-23T18:00:00+07:00", "2026-11-23T21:00:00+07:00"),
     ("2026-11-25T00:00:00+07:00", "2026-11-26T00:00:00+07:00"),
-    ("2026-11-26T00:00:00+07:00", "2026-11-27T00:00:00+07:00"),
 )
 
 
