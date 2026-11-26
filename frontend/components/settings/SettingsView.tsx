@@ -4,15 +4,14 @@ import React, { useEffect, useState } from "react";
 import Image from "next/image";
 import {
   Building2,
-  Clock,
   Loader2,
   Lock,
-  ShieldCheck,
   Upload,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { createApiClient, type ApiStore } from "@/lib/api";
 import { parseImportFile } from "@/lib/import-parse";
+import { imageTimeText } from "@/lib/model-status";
 import { ShelfPlanSection } from "./ShelfPlanSection";
 
 // Stores come only from the live API; signed out, the list stays empty rather than claiming a status.
@@ -22,10 +21,11 @@ export function SettingsView() {
   const { user, isApproved, hasGroup, getIdToken } = useAuth();
 
   const [stores, setStores] = useState<ApiStore[]>(FALLBACK_STORES);
-  const [flagThreshold, setFlagThreshold] = useState<number>(0.7);
   const [timezoneLabel, setTimezoneLabel] = useState<string>(
     "Asia/Ho_Chi_Minh (UTC+7)"
   );
+  // when the store list came back: "latest image at 15:45" is worked out against this, not while drawing
+  const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const [loading, setLoading] = useState(false);
   const [liveSynced, setLiveSynced] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -49,7 +49,7 @@ export function SettingsView() {
       .then((res) => {
         if (cancelled) return;
         setStores(res.stores.length > 0 ? res.stores : FALLBACK_STORES);
-        setFlagThreshold(res.flag_threshold.value);
+        setLoadedAt(new Date());
         setTimezoneLabel(res.timezone.value);
         setLiveSynced(true);
       })
@@ -191,51 +191,18 @@ export function SettingsView() {
             </div>
           </section>
 
-          {/* Sections 3 & 4: Timezone & Flag Threshold (Read-only system policy) */}
-          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-            <section className="rounded-[14px] border border-[#EFF0F6] bg-white p-5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Clock className="h-4 w-4 text-[#EE730A]" />
-                  <h2 className="text-[14px] font-semibold text-[#111827]">
-                    Timezone
-                  </h2>
-                </div>
-                <span className="text-[11px] font-medium text-[#6B7280]">
-                  Read-only
-                </span>
-              </div>
-              <p className="mt-3 rounded-[8px] border border-[#EFF0F6] bg-[#F9FAFB] px-3 py-2 text-[13.5px] font-medium text-[#111827]">
-                {timezoneLabel}
-              </p>
-              <p className="mt-2 text-[11.5px] text-[#6B7280]">
-                Every time on this site and in the CSV files is in UTC+7.
-              </p>
-            </section>
+          {/* The shelf plan per store (opening hours and expected SKUs) comes first: it is what an administrator
+              opens Settings for, and the Dashboard's shelf numbers follow it */}
+          {isApproved && liveSynced && (
+            <ShelfPlanSection
+              stores={stores}
+              getIdToken={getIdToken}
+              isAdmin={hasGroup("team_admin")}
+              showToast={showToast}
+            />
+          )}
 
-            <section className="rounded-[14px] border border-[#EFF0F6] bg-white p-5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <ShieldCheck className="h-4 w-4 text-[#EE730A]" />
-                  <h2 className="text-[14px] font-semibold text-[#111827]">
-                    Low-Confidence Flag Threshold
-                  </h2>
-                </div>
-                <span className="text-[11px] font-medium text-[#6B7280]">
-                  Read-only
-                </span>
-              </div>
-              <p className="mt-3 rounded-[8px] border border-[#EFF0F6] bg-[#F9FAFB] px-3 py-2 font-mono text-[14px] font-semibold text-[#111827]">
-                {flagThreshold.toFixed(2)}
-              </p>
-              <p className="mt-2 text-[11.5px] text-[#6B7280]">
-                A reading with confidence under {flagThreshold.toFixed(2)}, or one that matched no SKU, is flagged
-                for review.
-              </p>
-            </section>
-          </div>
-
-          {/* Section 5: Store Directory (store_list + team_admin import) */}
+          {/* The stores (store list; an administrator imports the catalogs here) */}
           <section className="rounded-[14px] border border-[#EFF0F6] bg-white p-6">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#EFF0F6] pb-4">
               <div className="flex items-center gap-2.5">
@@ -307,8 +274,8 @@ export function SettingsView() {
                     <p className="mt-0.5 text-[12px] text-[#6B7280]">
                       {st.district || "Ho Chi Minh City"} &middot; Camera:{" "}
                       <code>{st.camera_id || "CAM-S01-A"}</code>
-                      {st.last_capture_timestamp && (
-                        <> &middot; Last capture: {st.last_capture_timestamp}</>
+                      {st.last_capture_timestamp && loadedAt && (
+                        <> &middot; Latest image at {imageTimeText(st.last_capture_timestamp, loadedAt)}</>
                       )}
                     </p>
                   </div>
@@ -327,15 +294,10 @@ export function SettingsView() {
             </div>
           </section>
 
-          {/* Section 6: Shelf plan per store (opening hours + expected SKUs) for the Dashboard's shelf numbers */}
-          {isApproved && liveSynced && (
-            <ShelfPlanSection
-              stores={stores}
-              getIdToken={getIdToken}
-              isAdmin={hasGroup("team_admin")}
-              showToast={showToast}
-            />
-          )}
+
+          <p data-timezone-note className="px-1 text-[12px] text-[#6B7280]">
+            Every time on this site and in the CSV files is in UTC+7 ({timezoneLabel}).
+          </p>
         </div>
       </div>
 
