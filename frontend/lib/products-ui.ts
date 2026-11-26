@@ -34,6 +34,7 @@ export const MISMATCH_TYPE_OPTIONS = [
   "Unrecognized SKU",
   "Partial Occlusion",
   "Count Mismatch",
+  "Not on the shelf (false reading)",
 ];
 
 /** is_flagged = TRUE below this confidence (Data Dictionary); the API also returns it as flag_threshold. */
@@ -105,6 +106,9 @@ export interface SkuProduct {
   audit: SkuAudit;
   /** Reliability badge from the last 14 days of labelled frames; absent from older backends. */
   reliability?: ApiReliability;
+  /** Set when the card was opened from the review queue: it shows that flagged reading, not the latest one, and
+   * saving a correction checks the queue item off. */
+  reviewQueueKey?: string;
 }
 
 /** The confidence a row may show: a row without units has only the score of an older reading, so none. */

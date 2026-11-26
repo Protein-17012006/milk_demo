@@ -201,6 +201,17 @@ export function ProductDetailsModal({
               </p>
             </div>
           </div>
+          {product.reviewQueueKey && (
+            <p
+              data-from-queue
+              role="status"
+              className="rounded-[10px] border border-[#FED7AA] bg-[#FFF7ED] px-3.5 py-2 text-[12.5px] leading-[1.45] text-[#7C2D12]"
+            >
+              From the review queue: this is the doubtful reading of {cvOutput.capture_timestamp.slice(11, 16)} on{" "}
+              {cvOutput.capture_timestamp.slice(8, 10)}/{cvOutput.capture_timestamp.slice(5, 7)}, not the
+              product&apos;s latest one. Saving a correction checks it off.
+            </p>
+          )}
           {lastSeen && (
             <p
               data-last-seen
@@ -304,7 +315,8 @@ export function ProductDetailsModal({
               <div className="grid grid-cols-1 gap-1 sm:grid-cols-[200px_1fr]">
                 <dt className="text-[#6B7280]">Processing Time</dt>
                 <dd className="font-normal text-[#111827]">
-                  {cvOutput.processing_time_ms} ms
+                  {/* a reading opened from the review queue does not carry its processing time */}
+                  {cvOutput.processing_time_ms > 0 ? `${cvOutput.processing_time_ms} ms` : "—"}
                 </dd>
               </div>
             </dl>

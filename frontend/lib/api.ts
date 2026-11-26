@@ -598,6 +598,7 @@ export function createApiClient(getIdToken: TokenGetter) {
       corrected_sku_id?: string;
       corrected_count?: number;
       correction_type?: string;
+      discrepancy_category?: string; // the field the backend stores; correction_type alone was dropped
       action?: "correct" | "confirm";
       notes?: string;
     }) =>

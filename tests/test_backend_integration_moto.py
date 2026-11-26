@@ -1229,6 +1229,47 @@ def test_kpi_says_whether_the_cameras_see_the_display(monkeypatch: pytest.Monkey
     assert display["last_visible_at"] == "2026-11-21T14:00:10+07:00"
 
 
+@mock_aws
+def test_a_correction_with_the_items_key_checks_it_off_and_keeps_the_mismatch_type(monkeypatch: pytest.MonkeyPatch):
+    """The website's Correct button (26/11): one save answers the flagged reading and its queue item."""
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140010", [("hot160", 1)], flagged=("hot160",))
+    (item,) = _table("test-review-queue").scan()["Items"]
+    assert item["status"] == "Chờ duyệt"
+    body = {
+        "store_id": "DEMO-S01",
+        "queue_key": item["queue_key"],
+        "reading_id": item["reading_id"],
+        "capture_id": item["capture_id"],
+        "sku_id": HOT,
+        "corrected_sku_id": CHEESE,
+        "discrepancy_category": "Not on the shelf (false reading)",
+        "action": "correct",
+    }
+    status, out = _call(api, "POST", "/v1/corrections", groups="team_admin", body=body)
+    assert (status, out["status"]) == (201, "Đã sửa")
+    (item,) = _table("test-review-queue").scan()["Items"]
+    assert (item["status"], item["reviewed_by"], item["correction_id"]) == (
+        "Đã sửa",
+        "tester@datagent.io",
+        out["correction_id"],
+    )
+    (saved,) = _table("test-corrections").scan()["Items"]
+    assert (saved["reading_id"], saved["corrected_sku_id"]) == (body["reading_id"], CHEESE)
+    assert saved["discrepancy_category"] == "Not on the shelf (false reading)"
+
+
+@mock_aws
+def test_a_correction_without_a_key_leaves_the_queue_item_waiting(monkeypatch: pytest.MonkeyPatch):
+    """Why the card's Save Correction did not clear the queue before 26/11: it sent no key."""
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140010", [("hot160", 1)], flagged=("hot160",))
+    body = {"store_id": "DEMO-S01", "sku_id": HOT, "corrected_sku_id": CHEESE, "action": "correct"}
+    assert _call(api, "POST", "/v1/corrections", groups="team_admin", body=body)[0] == 201
+    (item,) = _table("test-review-queue").scan()["Items"]
+    assert item["status"] == "Chờ duyệt"
+
+
 TH_OLD = "TH true MILK Sữa Tươi Tiệt Trùng Có Đường 180ml"
 TH_MERGED = "TH true MILK Sữa Tươi Tiệt Trùng 180ml (Có đường + Ít đường)"
 
