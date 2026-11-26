@@ -19,6 +19,9 @@ Settings:
                         merged TH class is kept without asking the database and scored by the detector alone; on a
                         store camera the database rejects real cartons of an arrangement it has not stored
                         (design 2026-11-26). Every other class still goes through the database
+    MILK_LONG_TH_OVERLAP  0 (default): off. 0.5: after the one-box-per-unit step, among boxes of the merged TH class,
+                        drop a box that shares this much of the smaller box with a surer one: in a pack the detector
+                        also draws a box across two neighbouring cartons, too little IoU with either to be merged
     MILK_DEVICE        "cuda" or "cpu"; give "cuda", not "cuda:0": the pipeline turns on
                         half precision only for the exact string "cuda"
 """
@@ -27,7 +30,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -69,6 +72,41 @@ def _th_confirm() -> str:
     if value not in TH_CONFIRMS:
         raise ValueError(f"MILK_LONG_TH_CONFIRM must be one of {TH_CONFIRMS}, not {value!r}")
     return value
+
+
+def _th_overlap() -> float:
+    """MILK_LONG_TH_OVERLAP from the environment: 0.0 (off, also when unset or empty) to 1.0. Anything else stops the
+    worker, like a misspelt MILK_LONG_TH_CONFIRM."""
+    raw = (os.environ.get("MILK_LONG_TH_OVERLAP") or "").strip()
+    try:
+        value = float(raw) if raw else 0.0
+    except ValueError:
+        value = float("nan")
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"MILK_LONG_TH_OVERLAP must be a number from 0 to 1, not {raw!r}")
+    return value
+
+
+def drop_shared(det: np.ndarray, is_th: Sequence[bool], limit: float) -> np.ndarray:
+    """The detector's rows (x0, y0, x1, y1, confidence, ...) without the merged-TH boxes that repeat a surer one: going
+    from the surest TH box down, a TH box goes when what it shares with a kept TH box is `limit` or more of the smaller
+    of the two. Rows of other classes always stay and never remove anything. Row order is kept; limit 0 is off."""
+    if limit <= 0:
+        return det
+    kept: list[int] = []
+    for i in sorted((i for i, th in enumerate(is_th) if th), key=lambda i: -float(det[i, 4])):
+        x0, y0, x1, y1 = det[i, :4]
+        area = (x1 - x0) * (y1 - y0)
+        for k in kept:
+            kx0, ky0, kx1, ky1 = det[k, :4]
+            inter = max(0.0, min(x1, kx1) - max(x0, kx0)) * max(0.0, min(y1, ky1) - max(y0, ky0))
+            smaller = min(area, (kx1 - kx0) * (ky1 - ky0))
+            if smaller > 0 and inter / smaller >= limit:
+                break
+        else:
+            kept.append(i)
+    stay = [i for i, th in enumerate(is_th) if not th or i in kept]
+    return det[stay]
 
 
 def needs_lookup(cls_name: str, variants: bool, th_confirm: str) -> bool:
@@ -148,6 +186,7 @@ class LongPipeline:
         self._imgsz = int(os.environ.get("MILK_LONG_IMGSZ", "1280"))
         self._tile, self._variants = _settings()
         self._th_confirm = _th_confirm()
+        self._th_overlap = _th_overlap()
         self._product = product_names()
         self.device = str(self._rec.embedder.device)
         self._warm_up()
@@ -176,6 +215,7 @@ class LongPipeline:
         if not len(det):
             return []
         names = self._yolo.names
+        det = drop_shared(det, [names[int(row[5])] == TH_BRAND for row in det], self._th_overlap)
         ask = [i for i, row in enumerate(det) if needs_lookup(names[int(row[5])], self._variants, self._th_confirm)]
         lookups: list[dict] = [{"brand": "unknown"} for _ in det]  # the answer decide() ignores for a box not asked
         shares: list[Mapping[str, float]] = [{} for _ in det]

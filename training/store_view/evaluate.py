@@ -30,7 +30,14 @@ GATE = {
 }
 VINAMILK_DROP = 0.02  # most a Vinamilk class may lose in mAP50 on the synthetic val images
 # The milk pipeline's settings: cleared before each pipeline is loaded, so the second one never inherits the first's.
-LONG_KEYS = ("MILK_LONG_DIR", "MILK_LONG_YOLO", "MILK_LONG_TILE", "MILK_LONG_VARIANTS", "MILK_LONG_TH_CONFIRM")
+LONG_KEYS = (
+    "MILK_LONG_DIR",
+    "MILK_LONG_YOLO",
+    "MILK_LONG_TILE",
+    "MILK_LONG_VARIANTS",
+    "MILK_LONG_TH_CONFIRM",
+    "MILK_LONG_TH_OVERLAP",
+)
 
 
 def match(model: list[tuple[list[int], float]], truth: list[list[int]]) -> tuple[int, int, int]:

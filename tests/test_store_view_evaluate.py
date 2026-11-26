@@ -110,3 +110,9 @@ def test_night_counts_milk_boxes_on_frames_without_the_display():
 
 def test_night_without_frames_is_not_measured():
     assert night([{"kind": "day", "milk": 1}]) == {"frames": 0, "milk_boxes": 0, "per_100": None}
+
+
+def test_the_overlap_setting_is_cleared_between_pipelines(monkeypatch):
+    monkeypatch.setenv("MILK_LONG_TH_OVERLAP", "0.5")
+    apply_env({}, {})
+    assert "MILK_LONG_TH_OVERLAP" not in os.environ
