@@ -123,6 +123,29 @@ def review_precedents(proposals: list[dict], review: dict) -> list[Precedent]:
     return out
 
 
+def pair_stats(precedents: Sequence[Precedent]) -> list[tuple[float, bool]]:
+    """Every two decisions on different captures at the same place: (how alike their colours are, same label?)."""
+    out = []
+    for i, a in enumerate(precedents):
+        for b in precedents[i + 1 :]:
+            if a.key != b.key and same_place(a.box, b.box):
+                out.append((float(np.dot(a.colour, b.colour)), a.label == b.label))
+    return out
+
+
+def suggest_min_sim(pairs: list[tuple[float, bool]]) -> float:
+    """The reuse threshold: the 5th percentile of the same-label pairs, raised just above the most alike pair with
+    different labels; with no same-label pair, 1.0 (reuse nothing)."""
+    same = [sim for sim, equal in pairs if equal]
+    if not same:
+        return 1.0
+    threshold = float(np.percentile(same, 5))
+    different = [sim for sim, equal in pairs if not equal]
+    if different and threshold <= max(different):
+        threshold = max(different) + 0.005
+    return threshold
+
+
 @dataclass
 class QueueResult:
     decisions: dict[str, dict[str, Decision]] = field(default_factory=dict)

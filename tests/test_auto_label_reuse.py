@@ -3,15 +3,18 @@
 import copy
 
 import numpy as np
+import pytest
 
 from training.store_view.auto_label import Decision, Track
 from training.store_view.auto_label_reuse import (
     Precedent,
     decision_for,
     label_of,
+    pair_stats,
     queue,
     reuse,
     review_precedents,
+    suggest_min_sim,
     trn_precedents,
     truth_precedents,
 )
@@ -187,3 +190,24 @@ def test_review_decisions_become_precedents_keyed_by_the_segment_first_frame():
 def test_unreadable_images_give_no_precedent():
     assert truth_precedents({"K": ROWS}, ["K"], lambda c: None) == []
     assert trn_precedents([("C1", [10, 10, 20, 40], "none")], lambda c: None) == []
+
+
+def test_suggest_min_sim_is_the_5th_percentile_of_same_label_pairs():
+    pairs = [(0.90 + i / 1000, True) for i in range(100)]
+    assert abs(suggest_min_sim(pairs) - 0.905) < 0.002
+
+
+def test_suggest_min_sim_rises_above_the_closest_different_label_pair():
+    assert suggest_min_sim([(0.95, True)] * 20 + [(0.97, False)]) == pytest.approx(0.975)
+
+
+def test_suggest_min_sim_without_same_label_pairs_reuses_nothing():
+    assert suggest_min_sim([(0.97, False)]) == 1.0
+
+
+def test_pair_stats_pairs_only_different_keys_at_the_same_place():
+    far = (600.0, 100.0, 70.0, 160.0)
+    ps = [precedent("cheese145", key="K1"), precedent("cheese145", key="K1", box=far),
+          precedent("cheese145", key="K2"), precedent("original145", colour=GREEN, key="K3")]
+    pairs = pair_stats(ps)
+    assert sorted(pairs) == [(0.0, False), (0.0, False), (1.0, True)]
