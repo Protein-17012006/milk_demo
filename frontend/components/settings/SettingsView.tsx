@@ -49,9 +49,14 @@ export function SettingsView() {
       .then((res) => {
         if (cancelled) return;
         setStores(res.stores.length > 0 ? res.stores : FALLBACK_STORES);
-        setLoadedAt(new Date());
         setTimezoneLabel(res.timezone.value);
         setLiveSynced(true);
+        // the settings answer lists the stores without their latest image: the store list has it
+        return api.getStores().then((list) => {
+          if (cancelled) return;
+          setStores(list.items);
+          setLoadedAt(new Date());
+        });
       })
       .catch(() => {
         // fallback cleanly
@@ -296,7 +301,7 @@ export function SettingsView() {
 
 
           <p data-timezone-note className="px-1 text-[12px] text-[#6B7280]">
-            Every time on this site and in the CSV files is in UTC+7 ({timezoneLabel}).
+            Every time on this site and in the CSV files is in {timezoneLabel}.
           </p>
         </div>
       </div>
