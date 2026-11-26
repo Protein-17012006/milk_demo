@@ -19,7 +19,9 @@ import numpy as np
 from training.store_view.auto_label import Decision, Track, _overlap
 from training.store_view.slide_gallery import colour, crop_of
 
-REUSE_MIN_SIM = 0.95  # placeholder until measured on the train-side truth (plan 2026-11-26 Task 6)
+# Measured 26/11 with reuse-pairs on the train-side truth of CAM-S01-A: 134 same-place same-label pairs (5th percentile
+# 0.6905, median 0.8743) and 76 same-place pairs with different labels, the most alike 0.7498; suggest_min_sim 0.7548.
+REUSE_MIN_SIM = 0.755
 NOT_PRODUCT, OUT_OF_SCOPE = "not_product", "out_of_scope"
 
 
