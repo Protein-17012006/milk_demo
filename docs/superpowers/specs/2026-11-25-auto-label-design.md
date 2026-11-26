@@ -1,6 +1,8 @@
 # Tự động gắn nhãn cho camera tiệm: "thầy – trò" có kiểm chéo — thiết kế
 
-Ngày 25/11/2026. Trạng thái: chờ hoang duyệt.
+Ngày 25/11/2026. Trạng thái:
+- hoang duyệt ngày 25/11; phần 1 đã xây.
+- Ngày 26/11 thêm mục 5.4b (dùng lại quyết định của người) và sửa cổng 1. Phần sửa này chờ hoang duyệt.
 
 Liên quan:
 - `2026-11-25-slide-fusion-gallery-design.md`: kho ảnh màu và luật đọc vị dùng chung.
@@ -138,7 +140,7 @@ frames của một đoạn ban ngày (đã loại AUD, giữ riêng, frame có n
   cụm theo vị trí qua cả đoạn = "lon của đoạn"
         ↓ + kho ảnh màu đọc vị từng box
   luật quyết định (5.4): chấp nhận / đưa người xem / bỏ
-        ↓
+        ↓ lon cần xem cùng chỗ + cùng màu với lon người đã quyết → nhận lại quyết định (5.4b)
   hàng chờ Review trên trang Model (≤ 1 frame mỗi đoạn)
         ↓ quyết định của người áp cho cả cụm, cả đoạn; nhãn người vào kho ảnh
   file nhãn YOLO cho các frame của đoạn (vùng chưa rõ bị che xám)
@@ -199,9 +201,55 @@ Luật viết thành hàm thuần, có test.
 
 Các ngưỡng 30%, 60% và 80% được chọn trên các đoạn phía train có đáp án. Người làm được chỉnh, nhưng kết quả phải qua cổng 1 (5.7).
 
+### 5.4b Dùng lại quyết định của người (thêm ngày 26/11, hoang chọn cách C)
+
+**Vì sao:**
+- Cổng 1 chạy lần đầu (25/11) đẩy 32/36 đoạn giữ riêng sang người xem, vượt xa giới hạn 40%. Tổng cộng có 271 lon cần người chọn vị.
+- Phần lớn các đoạn tối 23/11 là **cùng một cách xếp** lặp lại, nên người sẽ phải trả lời cùng những câu hỏi ở mỗi đoạn:
+  - 3 lon mà A và kho ảnh bất đồng;
+  - 4–5 nắp mà A sót.
+- Không nới luật 5.4. Nhận vị khi chỉ có kho ảnh (85% đúng) là nhãn vị dựa trên một nguồn, đúng điều mục 2 cấm.
+
+**Luật:**
+- Một lon cần xem ở đoạn S được **nhận lại quyết định** của một lon P mà người đã quyết, khi thoả cả ba điều kiện:
+  1. cùng camera;
+  2. **cùng chỗ:** box trung vị của hai lon có IoU ≥ 0,5;
+  3. **cùng màu:** đặc trưng màu trung bình của hai cụm (cùng đặc trưng 144 chiều của kho ảnh) gần nhau dưới ngưỡng τ.
+- **Chỉ trùng chỗ thì chưa đủ.** Ví dụ có thật trong đáp án, tại box (943, 247): lúc 18:14 ngày 23/11 là lon Sour Cream màu xanh, đến 18:57 đã là lon Cheese màu vàng. Mô phỏng chỉ xét vị trí sẽ gán sai lon này.
+- Quyết định nhận lại có thể là một vị, Not our SKU hoặc Out of scope. Out of scope vẫn che xám như trước.
+- **Nguồn quyết định của người:**
+  - quyết định trên frame review;
+  - dòng `truth.json` phía train;
+  - verdict TRN.
+- **Không bao giờ dùng làm nguồn:** frame AUD, và đáp án giữ riêng (trừ khi mô phỏng người trong cổng 1).
+- **Khi nhiều lon P cùng khớp:** lấy lon được quyết gần nhất về thời gian. Nếu các lon khớp đó mang quyết định khác nhau thì không nhận lại, mà đưa người xem.
+- **Người sửa một quyết định** thì mọi lon đã nhận lại quyết định đó đổi theo, vì nhãn được tính lại mỗi lần chạy `labels`.
+
+**Hàng chờ:**
+- Xét các đoạn theo thứ tự thời gian. Một lon cần xem mà khớp với lon đang chờ người ở đoạn trước thì **chờ cùng**, không mở thêm frame.
+- Một đoạn chỉ có frame review khi có ít nhất một lon không khớp với lon nào đã quyết hoặc đang chờ.
+- Trên frame review, lon đã nhận lại quyết định hiện như lon đã chấp nhận: có vị và người vẫn sửa được. Lon cần xem vẫn không có vị gợi ý.
+
+**Mô phỏng ngày 26/11** trên 36 đoạn giữ riêng. Màu được thay bằng vị đa số mà kho ảnh đọc, vì chưa chạy đặc trưng màu thật:
+
+| Điều kiện khớp | Frame review | Lon người chọn vị |
+|---|---|---|
+| Không dùng lại (hiện nay) | 32 | 271 |
+| Cùng chỗ + kho ảnh đọc cùng vị | 15 (42%) | 45 |
+| Chỉ cùng chỗ (không an toàn, xem ví dụ trên) | 12 (33%) | 34 |
+
+**Trên đáp án:** giữa các keyframe liên tiếp trong cùng ngày, 156/157 cặp lon cùng chỗ có cùng vị; cặp còn lại là lon bị đổi nói trên.
+
+**Rủi ro còn lại:** hai lon khác vị nhưng trông giống hệt nhau đổi chỗ cho nhau, ví dụ nắp Original và nắp Hot trên camera này. Chỉ số "dùng lại đúng" ở cổng 1 (5.7) đo rủi ro này.
+
+**Để người làm tự quyết:**
+- ngưỡng τ, chọn trên các cặp keyframe phía train;
+- có giới hạn khoảng thời gian dùng lại hay không;
+- cách tính đặc trưng màu trung bình của cụm.
+
 ### 5.5 Hàng chờ Review trên trang Model
 
-- **Loại frame mới "Review frame":** `purpose` là `review`, id dạng `REV-<camera>-<segment id>`. Chỉ đoạn có ít nhất một cụm cần người xem mới có frame review, và mỗi đoạn tối đa một frame.
+- **Loại frame mới "Review frame":** `purpose` là `review`, id dạng `REV-<camera>-<segment id>`. Chỉ đoạn còn ít nhất một cụm cần người xem, sau khi đã dùng lại quyết định (5.4b), mới có frame review. Mỗi đoạn tối đa một frame.
 - **Box hiện trên frame:** mọi lon của đoạn.
   - Lon đã chấp nhận hiện vị, người vẫn sửa được.
   - **Lon cần xem không hiện vị gợi ý.** Người phải chọn vị, hoặc chọn Not our SKU hay Out of scope. Nút "Right" không dùng cho box này.
@@ -253,8 +301,16 @@ Các ngưỡng 30%, 60% và 80% được chọn trên các đoạn phía train c
 |---|---|
 | Box được chấp nhận không qua người là lon thật | ≥ 99% |
 | Box được chấp nhận không qua người đúng vị | ≥ 98% |
-| Lon trong đáp án được phủ (chấp nhận hoặc đưa vào review) | ≥ 95% |
-| Đoạn cần review | ≤ 40% |
+| Lon trong đáp án được phủ (chấp nhận, đưa vào review hoặc nhận lại quyết định) | ≥ 95% |
+| Đoạn cần một frame review **mới**, sau khi đã dùng lại quyết định (5.4b) | ≤ 40% |
+| Quyết định dùng lại đúng (5.4b) | ≥ 99% |
+
+**Cách đo khi dùng lại quyết định (thêm ngày 26/11):**
+- **Mô phỏng người:**
+  - đoạn có keyframe trong đáp án: người quyết đúng như đáp án;
+  - đoạn không có keyframe trong đáp án: không mô phỏng quyết định, chỉ đếm xem đoạn đó có cần frame review mới hay không.
+- **"Dùng lại đúng"** chấm trên các cặp lon được nối bởi luật 5.4b mà cả hai đoạn đều có keyframe trong đáp án. Đúng nghĩa là hai dòng đáp án ở hai đầu có cùng vị, hoặc cùng là nắp không rõ vị (`unknown` hoặc `ignore`).
+- Các cặp keyframe phía train cũng được chấm để chọn τ. Đó chỉ là đo phép so khớp, không đưa đáp án vào kho ảnh hay làm box mẫu.
 
 Nếu độ đúng không đạt thì dời ngưỡng về phía "đưa người xem", không hạ ngưỡng của cổng.
 
