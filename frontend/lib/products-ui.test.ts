@@ -6,6 +6,7 @@ import {
   STATUS_FILTER_OPTIONS,
   auditStatusText,
   categoryColumns,
+  emptyProductsText,
   lastSeenNote,
   shownConfidence,
   showStoreFilter,
@@ -50,4 +51,15 @@ test("what each account sees on Category", () => {
   assert.deepEqual(sortOptions(false), ["On-shelf stock (high → low)", "On-shelf stock (low → high)", "Name (A → Z)"]);
   assert.equal(sortOptions(true).includes("Confidence (high → low)"), true);
   assert.deepEqual(STATUS_FILTER_OPTIONS, ["All", "Not flagged", "Needs Review", "Low Confidence"]);
+});
+
+test("an empty product list says why it is empty", () => {
+  const waiting = "Products appear once your account is approved.";
+  assert.equal(emptyProductsText({ approved: false, loaded: false, failed: false }), waiting);
+  assert.equal(emptyProductsText({ approved: true, loaded: false, failed: false }), "Loading products…"); // not "once approved"
+  assert.equal(
+    emptyProductsText({ approved: true, loaded: false, failed: true }),
+    "Products could not be loaded. Reload the page to try again."
+  );
+  assert.equal(emptyProductsText({ approved: true, loaded: true, failed: false }), "No products match the search and the filters.");
 });

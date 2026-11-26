@@ -157,3 +157,12 @@ export function auditStatusText(status: ProductStatus, reviewedAt: string | null
   if (status !== "Not flagged") return status;
   return reviewedAt ? "Validated" : "Not reviewed";
 }
+
+/** What the product list says while it has no rows. approved: the account may read products; loaded: the first read
+ * came back; failed: that read did not come back. An approved account is never told to wait for approval. */
+export function emptyProductsText(a: { approved: boolean; loaded: boolean; failed: boolean }): string {
+  if (!a.approved) return "Products appear once your account is approved.";
+  if (a.failed) return "Products could not be loaded. Reload the page to try again.";
+  if (!a.loaded) return "Loading products…";
+  return "No products match the search and the filters.";
+}

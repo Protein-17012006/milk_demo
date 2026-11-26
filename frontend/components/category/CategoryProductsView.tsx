@@ -25,6 +25,7 @@ import {
   NO_BARCODE,
   STATUS_FILTER_OPTIONS,
   categoryColumns,
+  emptyProductsText,
   showStoreFilter,
   sortOptions,
   type CategoryFilterOption,
@@ -214,6 +215,7 @@ export function CategoryProductsView() {
   // Rows exist only once the live API answers; signed out, the table stays empty (no sample rows).
   const [products, setProducts] = useState<SkuProduct[]>([]);
   const [liveMode, setLiveMode] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [unrecognizedCount, setUnrecognizedCount] = useState<number | null>(null);
   const [liveStores, setLiveStores] = useState<ApiStore[] | null>(null);
   const [liveQueue, setLiveQueue] = useState<ApiReviewQueueItem[] | null>(null);
@@ -265,8 +267,10 @@ export function CategoryProductsView() {
         setStoreFilter(`${ALL_STORES_LABEL} (${storeRes.total})`);
       }
       setLiveMode(true);
+      setLoadFailed(false);
     } catch {
-      // keep preview state on error
+      // a failed background refresh keeps the rows on show; a failed first read says so
+      if (!background) setLoadFailed(true);
     }
   }, [isApproved, getIdToken, canReview]);
 
@@ -380,6 +384,7 @@ export function CategoryProductsView() {
     });
   };
 
+  const emptyText = emptyProductsText({ approved: isApproved, loaded: liveMode, failed: loadFailed });
   const storeCount = liveStores?.length ?? 0;
   const columns = categoryColumns(canReview, storeCount);
   // the product column (240) and the padding (32), plus every fixed column on show
@@ -582,7 +587,7 @@ export function CategoryProductsView() {
             <p className="mt-[4px] text-[12px] font-normal text-[#6B7280]">
               {liveMode
                 ? `${products.length} ${products.length === 1 ? "product" : "products"} · times are in UTC+7`
-                : "Products appear once your account is approved."}
+                : emptyText}
             </p>
           </div>
 
@@ -731,9 +736,7 @@ export function CategoryProductsView() {
             <div className="mt-[8px] flex flex-col gap-[8px]">
               {filteredProducts.length === 0 ? (
                 <div className="flex h-[140px] items-center justify-center rounded-[10px] border border-[#EFF0F6] bg-white text-[13px] text-[#6B7280]">
-                  {liveMode
-                    ? "No products match the search and the filters."
-                    : "Products appear once your account is approved."}
+                  {emptyText}
                 </div>
               ) : (
                 groups.map((group) => (

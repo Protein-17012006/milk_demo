@@ -117,7 +117,8 @@ export function ReportsDashboard() {
 
   return (
     <div className="mx-auto w-full px-4 pt-6 pb-8 sm:px-6 lg:px-7">
-      <header className="flex items-center justify-between border-b border-black/10 pb-[18px]">
+      {/* On a phone the button sits under the title, at the right, so its panel opens inside the screen. */}
+      <header className="flex flex-col gap-[6px] border-b border-black/10 pb-[18px] sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-[22px] font-normal leading-tight text-black">Dashboard</h1>
           {kpi && (
@@ -127,12 +128,14 @@ export function ReportsDashboard() {
           )}
         </div>
         {isApproved && (
-          <ExportCsvButton
-            kind="capture-log"
-            label="Download capture log"
-            request={api.exportCsvLink}
-            className="inline-flex items-center gap-[6px] whitespace-nowrap rounded-[8px] px-2.5 py-1.5 text-[13px] font-semibold text-[#4D4D4D] hover:bg-black/[0.04] hover:text-black transition-colors cursor-pointer"
-          />
+          <div className="self-end sm:self-auto">
+            <ExportCsvButton
+              kind="capture-log"
+              label="Download capture log"
+              request={api.exportCsvLink}
+              className="inline-flex items-center gap-[6px] whitespace-nowrap rounded-[8px] px-2.5 py-1.5 text-[13px] font-semibold text-[#4D4D4D] hover:bg-black/[0.04] hover:text-black transition-colors cursor-pointer"
+            />
+          </div>
         )}
       </header>
 

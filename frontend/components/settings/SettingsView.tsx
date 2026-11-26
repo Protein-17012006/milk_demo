@@ -285,9 +285,9 @@ export function SettingsView() {
             </div>
 
             <div className="mt-4 divide-y divide-[#EFF0F6]">
-              {stores.length === 0 && (
+              {stores.length === 0 && !loading && (
                 <p className="py-3 text-[12.5px] text-[#6B7280]">
-                  The stores appear once your account is approved.
+                  {isApproved ? "No stores to show." : "The stores appear once your account is approved."}
                 </p>
               )}
               {stores.map((st) => (
