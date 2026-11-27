@@ -26,7 +26,7 @@ from .pipeline import Pipeline, load_pipeline
 
 log = logging.getLogger(__name__)
 
-STATUS_FILE = "candidate-status.json"
+STATUS_FILE = release.CANDIDATE_STATUS_FILE
 MAX_HELD = 12  # frames of one window kept in memory for the candidate
 LATE_LIMIT = 3  # windows in a row the candidate could not finish before it is stopped
 LOAD_TIMES_KEPT = 5

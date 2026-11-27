@@ -113,3 +113,35 @@ def test_unknown_kind_is_refused(tmp_path):
     write_release(tmp_path, "x1", kind="magic", env={})
     with pytest.raises(ValueError, match="magic"):
         release.load_release(tmp_path, "x1")
+
+
+def test_a_release_keeps_the_moment_it_was_made(tmp_path):
+    write_release(tmp_path, "v2", env={})
+    assert release.load_release(tmp_path, "v2").created_at is None
+    body = json.loads((tmp_path / "v2" / "release.json").read_text(encoding="utf-8"))
+    body["created_at"] = "2026-11-27T15:00:00+07:00"
+    (tmp_path / "v2" / "release.json").write_text(json.dumps(body), encoding="utf-8")
+    assert release.load_release(tmp_path, "v2").created_at == "2026-11-27T15:00:00+07:00"
+
+
+def test_the_worker_says_what_it_started_with(tmp_path):
+    assert release.read_worker_status(tmp_path) is None
+    release.write_worker_status(tmp_path, live="v1", candidate="v2")
+    status = release.read_worker_status(tmp_path)
+    assert (status["live"], status["candidate"]) == ("v1", "v2")
+    assert status["started_at"].endswith("+00:00")
+    release.write_worker_status(tmp_path, live="v2", candidate=None)
+    assert release.read_worker_status(tmp_path)["candidate"] is None
+
+
+def test_a_start_record_that_cannot_be_read_counts_as_none(tmp_path):
+    (tmp_path / release.WORKER_STATUS_FILE).write_text("{", encoding="utf-8")
+    assert release.read_worker_status(tmp_path) is None
+
+
+def test_release_folders_are_those_with_a_release_file(tmp_path):
+    write_release(tmp_path, "v2", env={})
+    write_release(tmp_path, "v1", env={})
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "live.json").write_text("{}", encoding="utf-8")
+    assert release.release_ids(tmp_path) == ["v1", "v2"]

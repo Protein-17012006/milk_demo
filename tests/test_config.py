@@ -152,3 +152,11 @@ def test_load_without_releases_dir_is_unchanged(monkeypatch):
     monkeypatch.setenv("MILK_PIPELINE", "null")
     monkeypatch.setenv("MILK_MODEL_VERSION", "by-hand")
     assert config.load().model_version == "by-hand"
+
+
+def test_read_env_file_gives_the_pairs_and_leaves_the_environment_alone(tmp_path, monkeypatch):
+    env = tmp_path / "worker.env"
+    env.write_text("# comment\nMILK_TEST_A=1\nMILK_TEST_B = 'two'\nnot a setting\n", encoding="utf-8")
+    monkeypatch.delenv("MILK_TEST_A", raising=False)
+    assert config.read_env_file(str(env)) == {"MILK_TEST_A": "1", "MILK_TEST_B": "two"}
+    assert "MILK_TEST_A" not in os.environ

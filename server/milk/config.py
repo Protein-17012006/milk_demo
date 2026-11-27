@@ -14,15 +14,23 @@ def _env(name: str, default: str | None = None) -> str | None:
     return value if value not in (None, "") else default
 
 
-def load_env_file(path: str) -> None:
-    """Reads KEY=VALUE lines into the environment; variables already set take precedence."""
+def read_env_file(path: str) -> dict[str, str]:
+    """The KEY=VALUE lines of a settings file; comments and lines without "=" are passed over."""
+    pairs: dict[str, str] = {}
     with open(path, encoding="utf-8") as handle:
         for raw in handle:
             line = raw.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+            pairs[key.strip()] = value.strip().strip('"').strip("'")
+    return pairs
+
+
+def load_env_file(path: str) -> None:
+    """Reads KEY=VALUE lines into the environment; variables already set take precedence."""
+    for key, value in read_env_file(path).items():
+        os.environ.setdefault(key, value)
 
 
 def _roi(raw: str | None, name: str = "MILK_ROI") -> tuple[float, float, float, float] | None:

@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import config
+from . import config, release
 from .candidate import load_candidate
 from .cvoutput import CaptureIdAllocator, Detection, build_capture, counts_of, persist_record
 from .display import DisplayCheck
@@ -159,6 +159,8 @@ def main(argv: list[str] | None = None) -> None:
         if releases_dir
         else None
     )
+    if releases_dir:  # the models are loaded: say so, for the job runner that asked for this start
+        release.write_worker_status(Path(releases_dir), s.model_version, candidate.version if candidate else None)
     hub = HubClient(s.hub_url, s.internal_token)
     smoother = CountSmoother(s.smooth_window)
     ids = CaptureIdAllocator()

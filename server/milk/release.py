@@ -16,10 +16,13 @@ import json
 import os
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 POINTER_FILE = "live.json"
 RELEASE_FILE = "release.json"
+WORKER_STATUS_FILE = "worker-status.json"  # what the worker loaded at its last start, for the job runner
+CANDIDATE_STATUS_FILE = "candidate-status.json"  # what the worker says about the candidate it runs
 MODEL_KEYS = {"MILK_PIPELINE", "MILK_MODEL_VERSION"}
 MODEL_PREFIXES = ("MILK_LONG_", "MILK_SLIDE_")
 
@@ -40,6 +43,7 @@ class Release:
     kind: str
     env: dict[str, str]
     criteria: dict
+    created_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,7 +87,16 @@ def load_release(root: Path, release_id: str) -> Release:
         kind=kind,
         env={k: str(v) for k, v in env.items()},
         criteria={**DEFAULT_CRITERIA[kind], **(data.get("criteria") or {})},
+        created_at=data.get("created_at") or None,
     )
+
+
+def release_ids(root: Path) -> list[str]:
+    """The releases on disk: every folder under `root` that holds a release.json, by name."""
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    return sorted(p.name for p in root.iterdir() if (p / RELEASE_FILE).is_file())
 
 
 def read_pointer(root: Path) -> Pointer:
@@ -100,6 +113,24 @@ def write_pointer(root: Path, pointer: Pointer) -> None:
     tmp = path.with_name(POINTER_FILE + ".tmp")
     tmp.write_text(json.dumps(asdict(pointer)), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def write_worker_status(root: Path, live: str, candidate: str | None) -> None:
+    """The worker's start record: which release it has loaded, which candidate beside it, and when (UTC). It is
+    written once the models are loaded, so the job runner can tell that a switch it asked for has happened."""
+    record = {"live": live, "candidate": candidate, "started_at": datetime.now(UTC).isoformat(timespec="seconds")}
+    path = Path(root) / WORKER_STATUS_FILE
+    tmp = path.with_name(WORKER_STATUS_FILE + ".tmp")
+    tmp.write_text(json.dumps(record), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_worker_status(root: Path) -> dict | None:
+    """The worker's start record, or None when there is none or it cannot be read."""
+    try:
+        return _read_json(Path(root) / WORKER_STATUS_FILE)
+    except ValueError:
+        return None
 
 
 def model_env(base: Mapping[str, str], release: Release) -> dict[str, str]:
