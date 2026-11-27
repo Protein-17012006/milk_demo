@@ -293,3 +293,22 @@ def test_the_pipeline_drops_th_duplicates_before_the_database():
 def test_the_pipeline_keeps_every_box_with_the_rule_off():
     pipe, _ = _pipeline_with_fakes(ACROSS, "detector")
     assert len(pipe.detect(FRAME)) == 3
+
+
+def test_th_settings_read_the_mapping_not_the_process(monkeypatch):
+    monkeypatch.setenv("MILK_LONG_TH_CONFIRM", "database")
+    monkeypatch.setenv("MILK_LONG_TH_OVERLAP", "0")
+    env = {"MILK_LONG_TH_CONFIRM": "detector", "MILK_LONG_TH_OVERLAP": "0.5", "MILK_LONG_TILE": "1280"}
+    assert _th_confirm(env) == "detector"
+    assert _th_overlap(env) == 0.5
+    assert _settings(env) == (1280, False)
+
+
+def test_adapters_read_the_process_environment_in_one_place_only():
+    # A candidate release is loaded beside the live one: an adapter that still read os.environ somewhere would
+    # quietly give the candidate the live release's setting.
+    import milk
+
+    for name in ("long_adapter.py", "slide_adapter.py"):
+        source = (Path(milk.__file__).parent / name).read_text(encoding="utf-8")
+        assert source.count("os.environ") == 1, name

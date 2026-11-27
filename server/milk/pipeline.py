@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Protocol
 
 import numpy as np
@@ -83,24 +84,26 @@ class CombinedPipeline:
         return out
 
 
-def _one(kind: str, models_dir: str) -> Pipeline:
+def _one(kind: str, models_dir: str, env: Mapping[str, str] | None = None) -> Pipeline:
     if kind == "null":
         return NullPipeline()
     if kind == "long":
         from .long_adapter import LongPipeline  # imported lazily: needs torch and the model files
 
-        return LongPipeline(models_dir)
+        return LongPipeline(models_dir, env)
     if kind == "slide":
         from .slide_adapter import SlidePipeline  # imported lazily: needs torch and the weights
 
-        return SlidePipeline(models_dir)
+        return SlidePipeline(models_dir, env)
     raise ValueError(f"unknown MILK_PIPELINE part {kind!r}; expected 'null', 'long' or 'slide'")
 
 
-def load_pipeline(kind: str, models_dir: str) -> Pipeline:
+def load_pipeline(kind: str, models_dir: str, env: Mapping[str, str] | None = None) -> Pipeline:
+    """The pipeline named by `kind` ("long", "slide", "long+slide", "null"). `env` holds the model settings of one
+    release; None means the process environment, which is where the live release's settings are."""
     parts = [k.strip() for k in kind.split("+") if k.strip()]
     if len(parts) == 1:
-        return _one(parts[0], models_dir)
+        return _one(parts[0], models_dir, env)
     if not parts:
         raise ValueError("MILK_PIPELINE is empty")
-    return CombinedPipeline([_one(k, models_dir) for k in parts])
+    return CombinedPipeline([_one(k, models_dir, env) for k in parts])

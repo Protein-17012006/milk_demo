@@ -94,3 +94,38 @@ def test_skus_json_ids_are_unique():
     skus = json.loads((Path(__file__).resolve().parents[1] / "server" / "milk" / "skus.json").read_text("utf-8"))
     ids = [s["id"] for s in skus]
     assert len(ids) == len(set(ids))
+
+
+def test_load_pipeline_passes_the_mapping(monkeypatch):
+    from milk import pipeline
+
+    seen = {}
+
+    def one(kind, models_dir, env=None):
+        seen[kind] = env
+        return NullPipeline()
+
+    monkeypatch.setattr(pipeline, "_one", one)
+    pipeline.load_pipeline("long+slide", "", env={"MILK_LONG_TILE": "1280"})
+    assert seen == {"long": {"MILK_LONG_TILE": "1280"}, "slide": {"MILK_LONG_TILE": "1280"}}
+    pipeline.load_pipeline("long", "")
+    assert seen["long"] is None
+
+
+def test_one_hands_the_mapping_to_each_adapter(monkeypatch):
+    from milk import long_adapter, pipeline, slide_adapter
+
+    got = {}
+
+    class Fake:
+        name = "fake"
+
+        def __init__(self, models_dir="", env=None):
+            got[type(self).__name__] = env
+
+    monkeypatch.setattr(long_adapter, "LongPipeline", type("Long", (Fake,), {}))
+    monkeypatch.setattr(slide_adapter, "SlidePipeline", type("Slide", (Fake,), {}))
+    env = {"MILK_LONG_TILE": "1280"}
+    pipeline._one("long", "", env)
+    pipeline._one("slide", "", env)
+    assert got == {"Long": env, "Slide": env}

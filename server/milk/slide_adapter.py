@@ -18,6 +18,7 @@ SKU (the product name) is the backend's alias table.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -43,16 +44,18 @@ def to_detections(classes, scores, boxes_xyxy, names: dict[int, str], product: d
 class SlidePipeline:
     name = "slide"
 
-    def __init__(self, models_dir: str = "") -> None:
+    def __init__(self, models_dir: str = "", env: Mapping[str, str] | None = None) -> None:
         from ultralytics import YOLO  # imported lazily: needs torch
 
-        weights = Path(os.environ.get("MILK_SLIDE_WEIGHTS") or DEFAULT_WEIGHTS).expanduser()
+        # a release's own settings (a candidate loaded beside the live one), or the process environment
+        env = os.environ if env is None else env
+        weights = Path(env.get("MILK_SLIDE_WEIGHTS") or DEFAULT_WEIGHTS).expanduser()
         if not weights.is_file():
             raise FileNotFoundError(f"Slide weights not found: {weights}; set MILK_SLIDE_WEIGHTS")
         self._model = YOLO(str(weights))
-        self._imgsz = int(os.environ.get("MILK_SLIDE_IMGSZ", "2560"))
-        self._conf = float(os.environ.get("MILK_SLIDE_CONF", "0.25"))
-        self.device = os.environ.get("MILK_DEVICE") or ("cuda" if _cuda() else "cpu")
+        self._imgsz = int(env.get("MILK_SLIDE_IMGSZ", "2560"))
+        self._conf = float(env.get("MILK_SLIDE_CONF", "0.25"))
+        self.device = env.get("MILK_DEVICE") or ("cuda" if _cuda() else "cpu")
         self._product = product_names()
         self._model.predict(
             np.full((720, 1280, 3), 128, np.uint8),

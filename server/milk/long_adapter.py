@@ -60,24 +60,30 @@ LABEL_OF_CLASS = {
 }
 
 
-def _settings() -> tuple[int, bool]:
-    """(MILK_LONG_TILE, MILK_LONG_VARIANTS) from the environment."""
-    return int(os.environ.get("MILK_LONG_TILE") or 0), os.environ.get("MILK_LONG_VARIANTS", "0") == "1"
+def _env(env: Mapping[str, str] | None) -> Mapping[str, str]:
+    """The settings to read: a release's own (a candidate loaded beside the live one) or the process environment."""
+    return os.environ if env is None else env
 
 
-def _th_confirm() -> str:
+def _settings(env: Mapping[str, str] | None = None) -> tuple[int, bool]:
+    """(MILK_LONG_TILE, MILK_LONG_VARIANTS) from the settings."""
+    env = _env(env)
+    return int(env.get("MILK_LONG_TILE") or 0), env.get("MILK_LONG_VARIANTS", "0") == "1"
+
+
+def _th_confirm(env: Mapping[str, str] | None = None) -> str:
     """MILK_LONG_TH_CONFIRM from the environment: "database" (also when unset or empty) or "detector". Any other
     value stops the worker: a misspelt setting must not quietly count as the default."""
-    value = (os.environ.get("MILK_LONG_TH_CONFIRM") or "").strip().lower() or "database"
+    value = (_env(env).get("MILK_LONG_TH_CONFIRM") or "").strip().lower() or "database"
     if value not in TH_CONFIRMS:
         raise ValueError(f"MILK_LONG_TH_CONFIRM must be one of {TH_CONFIRMS}, not {value!r}")
     return value
 
 
-def _th_overlap() -> float:
+def _th_overlap(env: Mapping[str, str] | None = None) -> float:
     """MILK_LONG_TH_OVERLAP from the environment: 0.0 (off, also when unset or empty) to 1.0. Anything else stops the
     worker, like a misspelt MILK_LONG_TH_CONFIRM."""
-    raw = (os.environ.get("MILK_LONG_TH_OVERLAP") or "").strip()
+    raw = (_env(env).get("MILK_LONG_TH_OVERLAP") or "").strip()
     try:
         value = float(raw) if raw else 0.0
     except ValueError:
@@ -169,8 +175,9 @@ def readings(
 class LongPipeline:
     name = "long"
 
-    def __init__(self, models_dir: str = "") -> None:
-        root = Path(os.environ.get("MILK_LONG_DIR") or Path.home() / "Desktop/Datagent/carton_recognition").expanduser()
+    def __init__(self, models_dir: str = "", env: Mapping[str, str] | None = None) -> None:
+        env = _env(env)
+        root = Path(env.get("MILK_LONG_DIR") or Path.home() / "Desktop/Datagent/carton_recognition").expanduser()
         if not (root / "cv_output.py").is_file():
             raise FileNotFoundError(f"cv_output.py not found in {root}; set MILK_LONG_DIR")
         sys.path.insert(0, str(root))
@@ -178,15 +185,15 @@ class LongPipeline:
         from recognize import Recognizer
         from ultralytics import YOLO
 
-        yolo_path = Path(os.environ.get("MILK_LONG_YOLO") or root.parent / "yolo" / "best_types.pt").expanduser()
+        yolo_path = Path(env.get("MILK_LONG_YOLO") or root.parent / "yolo" / "best_types.pt").expanduser()
         self._cvo = cv_output
-        self._rec = Recognizer(device=os.environ.get("MILK_DEVICE") or None, types=True)
+        self._rec = Recognizer(device=env.get("MILK_DEVICE") or None, types=True)
         self._yolo = YOLO(str(yolo_path))
-        self._conf = float(os.environ.get("MILK_LONG_CONF", "0.25"))
-        self._imgsz = int(os.environ.get("MILK_LONG_IMGSZ", "1280"))
-        self._tile, self._variants = _settings()
-        self._th_confirm = _th_confirm()
-        self._th_overlap = _th_overlap()
+        self._conf = float(env.get("MILK_LONG_CONF", "0.25"))
+        self._imgsz = int(env.get("MILK_LONG_IMGSZ", "1280"))
+        self._tile, self._variants = _settings(env)
+        self._th_confirm = _th_confirm(env)
+        self._th_overlap = _th_overlap(env)
         self._product = product_names()
         self.device = str(self._rec.embedder.device)
         self._warm_up()
