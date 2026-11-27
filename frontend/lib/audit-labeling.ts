@@ -39,16 +39,17 @@ export function nextVerdict(verdict: Verdict | null, needsFlavour = false): Verd
   return cycle[(cycle.indexOf(verdict) + 1) % cycle.length];
 }
 
-const QUEUE_RANK: Record<string, number> = { scoring: 0, training: 1, review: 2 };
+const QUEUE_RANK: Record<string, number> = { scoring: 0, compare: 1, training: 2, review: 3 };
 
-/** The order "Label frames" opens pending frames in: scoring, then training, then review frames, each oldest first. */
+/** The order "Label frames" opens pending frames in: scoring, then comparison, then training, then review
+ * frames, each oldest first. */
 export function labelQueueOrder(
   items: Pick<ApiAuditListItem, "audit_id" | "purpose" | "capture_timestamp">[]
 ): string[] {
   return [...items]
     .sort(
       (a, b) =>
-        (QUEUE_RANK[a.purpose] ?? 3) - (QUEUE_RANK[b.purpose] ?? 3) ||
+        (QUEUE_RANK[a.purpose] ?? 4) - (QUEUE_RANK[b.purpose] ?? 4) ||
         a.capture_timestamp.localeCompare(b.capture_timestamp)
     )
     .map((a) => a.audit_id);

@@ -40,6 +40,7 @@ import { BADGE_COLORS, badgeLabel, reliabilityText } from "@/lib/reliability-ui"
 import { runStatus, type RunStatus } from "@/lib/model-status";
 import { AuditLabeler } from "./AuditLabeler";
 import { LiveHealth } from "./LiveHealth";
+import { ModelVersions } from "./ModelVersions";
 
 const RANGES: { days: number; label: string }[] = [
   { days: 7, label: "Last 7 days" },
@@ -220,6 +221,13 @@ export function ModelQualityView() {
           )}
         </div>
       )}
+
+      <ModelVersions
+        load={api.getModelVersions}
+        send={api.requestModelVersion}
+        isAdmin={hasGroup("team_admin")}
+        names={{ ...names, ...(summary?.sku_names ?? {}) }}
+      />
 
       {error && <p className="mt-4 rounded-[8px] bg-[#FEF2F2] px-3 py-2 text-[13px] text-[#991B1B]">{error}</p>}
 

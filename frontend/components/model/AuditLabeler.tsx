@@ -256,7 +256,9 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
           {detail && (
             <>
               <span className="font-semibold">
-                {detail.purpose === "review"
+                {detail.purpose === "compare"
+                  ? "Comparison frame — a frame a candidate model version read differently; never scored"
+                  : detail.purpose === "review"
                   ? "Review frame — machine-unsure cans; your choice teaches the auto-labeller, never scored"
                   : detail.purpose === "training"
                     ? "Training frame — teaches the flavour gallery, never scored"
@@ -371,7 +373,7 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
               Keys: <b>1</b> Right · <b>2</b> Wrong SKU · <b>3</b> Not our SKU · <b>4</b> Out of scope for the highlighted
               box · <b>Enter</b> saves.
             </span>
-            {detail?.purpose === "review" && (
+            {detail?.ai_boxes.some((b) => b.needs_flavour) && (
               <> A ? box has no suggestion: click to pick its flavour, Not our SKU or Out of scope.</>
             )}
           </p>

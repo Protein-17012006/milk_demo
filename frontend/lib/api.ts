@@ -325,8 +325,67 @@ export interface ApiAuditBox {
 }
 
 // scoring frames count in the accuracy numbers; training frames only teach the flavour gallery; review frames carry
-// the cans the auto-labeller could not decide, and are never scored either
-export type AuditPurpose = "scoring" | "training" | "review";
+// the cans the auto-labeller could not decide, and are never scored either; comparison frames are frames a candidate
+// version read differently from the live one, and are never scored
+export type AuditPurpose = "scoring" | "training" | "review" | "compare";
+
+/** How a candidate's parallel run stands against the criteria written down before it started. */
+export interface ApiVerdict {
+  state: "waiting" | "better" | "worse" | "no_difference";
+  missing: string[]; // what is still needed before a decision, in words
+  p: number;
+  sku_drops: string[]; // model labels of the products the candidate is more than 5 points behind on
+}
+
+export interface ApiVersionTally {
+  frames: number; // judged scoring frames that show both versions
+  days: number;
+  cand_wins: number; // boxes only the candidate had right
+  live_wins: number;
+  per_sku: Record<string, { units: number; live_right: number; cand_right: number }>;
+}
+
+export interface ApiModelVersion {
+  version_id: string;
+  status: string; // candidate | parallel | live | replaced | discarded | stopped
+  kind?: string;
+  parent?: string;
+  created_at?: string;
+  parallel_started_at?: string;
+  stopped_reason?: string;
+  decided_by?: string;
+  decided_at?: string;
+}
+
+export type VersionAction = "put_live" | "discard" | "rollback";
+
+export interface ApiVersionRequest {
+  id: string;
+  action: VersionAction;
+  version_id?: string;
+  by: string;
+  at: string;
+}
+
+export interface ApiVersionsState {
+  live?: string;
+  previous?: string;
+  candidate?: string;
+  request?: ApiVersionRequest | null;
+  last_result?: { request_id: string; ok: boolean; message: string; at: string } | null;
+  runner_seen_at?: string;
+}
+
+export interface ApiCameraVersions {
+  camera_id: string;
+  state: ApiVersionsState;
+  versions: ApiModelVersion[]; // newest first
+  candidate: { version: string; status: string; tally: ApiVersionTally; verdict: ApiVerdict } | null;
+}
+
+export interface ApiModelVersions {
+  cameras: ApiCameraVersions[];
+}
 
 export interface ApiAuditListItem {
   audit_id: string;
@@ -715,6 +774,15 @@ export function createApiClient(getIdToken: TokenGetter) {
       if (modelVersion && modelVersion !== "all") sp.set("model_version", modelVersion);
       return requestWithAuth(`/model/summary?${sp.toString()}`, getIdToken) as Promise<ApiModelSummary>;
     },
+
+    getModelVersions: () => requestWithAuth("/model/versions", getIdToken) as Promise<ApiModelVersions>,
+
+    // team admin only; the counting machine carries the request out and answers in state.last_result
+    requestModelVersion: (body: { camera_id: string; action: VersionAction; version_id?: string }) =>
+      requestWithAuth("/model/versions/request", getIdToken, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }) as Promise<{ request: ApiVersionRequest }>,
 
     getModelHealth: (days: number) =>
       requestWithAuth(`/model/health?days=${days}`, getIdToken) as Promise<{ items: ApiModelHealthItem[] }>,

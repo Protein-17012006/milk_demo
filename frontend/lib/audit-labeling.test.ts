@@ -134,6 +134,20 @@ test("the queue opens scoring, then training, then review frames, each oldest fi
   );
 });
 
+test("comparison frames come after scoring frames and before training frames", () => {
+  const it = (audit_id: string, purpose: "scoring" | "training" | "review" | "compare") => ({
+    audit_id,
+    purpose,
+    capture_timestamp: "2026-11-28T10:00:00+07:00",
+  });
+  assert.deepEqual(labelQueueOrder([it("TRN-1", "training"), it("CMP-1", "compare"), it("REV-1", "review"), it("AUD-1", "scoring")]), [
+    "AUD-1",
+    "CMP-1",
+    "TRN-1",
+    "REV-1",
+  ]);
+});
+
 test("a review frame saves with its pre-filled Right boxes and every ? box decided", () => {
   const boxes = [
     { box_id: 1, sku_id: null },
