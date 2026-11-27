@@ -1,6 +1,6 @@
 import numpy as np
 
-from milk.counter import encode_jpeg, normalise, roi_pixels, status_payload
+from milk.counter import candidate_deadline, encode_jpeg, normalise, roi_pixels, status_payload
 from milk.cvoutput import Detection
 
 
@@ -62,3 +62,7 @@ def test_continuous_status_keeps_its_old_keys():
         "blur",
         "frames_last_minute",
     }
+
+
+def test_the_candidate_must_be_done_five_seconds_before_the_next_window():
+    assert candidate_deadline(1000.0) == 995.0

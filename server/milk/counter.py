@@ -19,10 +19,12 @@ import time
 import urllib.request
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import numpy as np
 
 from . import config
+from .candidate import load_candidate
 from .cvoutput import CaptureIdAllocator, Detection, build_capture, counts_of, persist_record
 from .display import DisplayCheck
 from .pipeline import load_pipeline
@@ -92,6 +94,15 @@ def status_payload(
     return payload
 
 
+CANDIDATE_MARGIN_S = 5.0
+
+
+def candidate_deadline(next_start: float) -> float:
+    """When the candidate must have stopped reading: a little before the next window opens, so that the live
+    release never waits for it."""
+    return next_start - CANDIDATE_MARGIN_S
+
+
 class HubClient:
     """Posts JSON to the hub's /internal endpoints with the shared token."""
 
@@ -141,6 +152,13 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     display = DisplayCheck(s.display_zone, s.display_min, s.display_refs) if s.display_zone else None
+    # A candidate release, if live.json names one: it reads each window's stored frames once the window is over
+    releases_dir = os.environ.get("MILK_RELEASES_DIR")
+    candidate = (
+        load_candidate(Path(releases_dir), dict(os.environ), s.models_dir, sampled=not sampler.continuous)
+        if releases_dir
+        else None
+    )
     hub = HubClient(s.hub_url, s.internal_token)
     smoother = CountSmoother(s.smooth_window)
     ids = CaptureIdAllocator()
@@ -190,8 +208,16 @@ def main(argv: list[str] | None = None) -> None:
         if opened:  # a new window: counts from the last one must not leak into this one
             smoother.reset()
             last_seq, last_smoothed = 0, None
+            if candidate:  # frames of the last window it never got to: dropped, and that window counts as late
+                candidate.flush(0.0)
         if reader is None:  # between windows: the stream stays closed
             post_status(None, now)
+            if candidate:  # one frame per turn, so the status above keeps going out while it reads
+                sent = candidate.flush(candidate_deadline(sampler.next_start(now)), limit=1)
+                for payload in sent:
+                    hub.post("/internal/candidate", payload)
+                if sent:
+                    continue
             time.sleep(max(0.05, min(1.0, sampler.next_start(now) - now)))
             continue
         if min_gap:
@@ -294,6 +320,10 @@ def main(argv: list[str] | None = None) -> None:
                 payload = {"record": record, "jpeg_b64": base64.b64encode(full).decode("ascii") if full else None}
                 if hub.post("/internal/persist", payload):
                     last_persist = time.time()
+                    if candidate:  # the frame as the live release saw it: before any blur, kept in memory only
+                        candidate.hold(
+                            log_line["capture_id"], log_line["capture_timestamp"], s.camera_id, crop, (x0, y0)
+                        )
         except Exception:  # noqa: BLE001 - keep counting the next frame
             log.exception("frame %s failed", frame.seq)
 
