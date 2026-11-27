@@ -1,6 +1,6 @@
 # Vòng vận hành lâu dài: gán nhãn, train và đưa model lên chạy thật — thiết kế
 
-Ngày 27/11/2026. Trạng thái: chờ hoang duyệt. Hai câu hỏi ở mục 5.9 đã được hoang trả lời ngày 27/11.
+Ngày 27/11/2026. Trạng thái: hoang duyệt ngày 27/11 (*"ok duyệt"*). Kế hoạch phần 1: `docs/superpowers/plans/2026-11-27-operations-loop-part1-backbone.md`.
 
 Đây là bản thiết kế chung cho cả vòng: mỗi phần làm gì và nối với phần khác thế nào. Năm phần ở mục 5 được lên kế hoạch và làm lần lượt, mỗi phần một kế hoạch riêng.
 
