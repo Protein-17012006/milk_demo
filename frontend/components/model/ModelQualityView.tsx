@@ -35,7 +35,7 @@ import {
   type Tone,
 } from "@/lib/model-ui";
 import type { HealthMetric } from "@/lib/health-ui";
-import { relabelQueue } from "@/lib/audit-labeling";
+import { labelQueueOrder, relabelQueue } from "@/lib/audit-labeling";
 import { BADGE_COLORS, badgeLabel, reliabilityText } from "@/lib/reliability-ui";
 import { AuditLabeler } from "./AuditLabeler";
 import { LiveHealth } from "./LiveHealth";
@@ -123,8 +123,8 @@ export function ModelQualityView() {
     );
   }
 
-  // "Relabel them": the frames labelled before rule A in this range, read on click (no extra call on page load) and
-  // opened in the labeller with their saved verdicts; saving stores them under rule A and the note's count drops
+  // "Relabel them": the frames labelled before rule B in this range, read on click (no extra call on page load) and
+  // opened in the labeller with their saved verdicts; saving stores them under rule B and the note's count drops
   const relabelOldFrames = () => {
     setFindingOldFrames(true);
     api
@@ -138,12 +138,8 @@ export function ModelQualityView() {
       .finally(() => setFindingOldFrames(false));
   };
 
-  // scoring frames first, then training frames; each group oldest first
-  const oldestFirst = [...pending].sort(
-    (a, b) =>
-      Number(a.purpose === "training") - Number(b.purpose === "training") ||
-      a.capture_timestamp.localeCompare(b.capture_timestamp)
-  );
+  // scoring frames first, then training frames, then review frames; each group oldest first
+  const queueOrder = labelQueueOrder(pending);
   const versions = summary?.model_versions ?? [];
 
   return (
@@ -178,7 +174,7 @@ export function ModelQualityView() {
             type="button"
             data-label-frames
             disabled={pending.length === 0}
-            onClick={() => setLabelling(oldestFirst.map((a) => a.audit_id))}
+            onClick={() => setLabelling(queueOrder)}
             className="inline-flex items-center gap-1.5 rounded-[8px] bg-[#EE730A] px-3 py-1.5 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
           >
             <Tag className="h-4 w-4" />
@@ -196,8 +192,8 @@ export function ModelQualityView() {
         >
           <p>
             {summary.old_rule_frames === 1
-              ? "1 frame was labelled before rule A — relabel it so the numbers follow one rule"
-              : `${summary.old_rule_frames} frames were labelled before rule A — relabel them so the numbers follow one rule`}
+              ? "1 frame was labelled before rule B — relabel it so the numbers follow one rule"
+              : `${summary.old_rule_frames} frames were labelled before rule B — relabel them so the numbers follow one rule`}
           </p>
           <button
             type="button"

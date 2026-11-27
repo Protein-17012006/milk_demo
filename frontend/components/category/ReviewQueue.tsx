@@ -69,8 +69,8 @@ export function ReviewBanner({ items, unrecognizedUnits, onOpen }: ReviewBannerP
         <p className="text-[13px] leading-[1.5] text-[#7C2D12]">
           <span className="font-semibold">{plural(s.waiting, "reading is", "readings are")} waiting for a check.</span>{" "}
           The model was unsure about {s.waiting === 1 ? "it" : "them"}
-          {reasons ? `: ${reasons}` : ""}. Look at each frame, then confirm the AI&apos;s reading or correct it in the
-          product&apos;s card (View on its row).{unmatched}
+          {reasons ? `: ${reasons}` : ""}. Look at each frame, then confirm the AI&apos;s reading or correct it; both
+          check the reading off.{unmatched}
         </p>
       </div>
       <button
@@ -88,10 +88,12 @@ interface ReviewQueueDialogProps {
   items: ApiReviewQueueItem[];
   onClose: () => void;
   onConfirm: (item: ApiReviewQueueItem) => void;
+  /** Opens the Validation Card on this flagged reading; a correction saved there checks the item off. */
+  onCorrect: (item: ApiReviewQueueItem) => void;
 }
 
 /** The review queue: readings still waiting for a person first, then the ones already checked. */
-export function ReviewQueueDialog({ items, onClose, onConfirm }: ReviewQueueDialogProps) {
+export function ReviewQueueDialog({ items, onClose, onConfirm, onCorrect }: ReviewQueueDialogProps) {
   const ordered = orderForReview(items);
   const waiting = ordered.filter((i) => isWaiting(i.status));
   const checked = ordered.filter((i) => !isWaiting(i.status));
@@ -114,8 +116,9 @@ export function ReviewQueueDialog({ items, onClose, onConfirm }: ReviewQueueDial
             </h3>
             <p className="mt-1 max-w-[78ch] text-[12.5px] leading-[1.5] text-[#6B7280]">
               Readings the model was unsure about: confidence under 0.70, or boxes that matched no SKU. Open the frame.
-              If the reading is right, confirm it; if it is wrong, correct it in the product&apos;s card (View on its
-              row). Each camera, SKU and reason keeps one item, and a new doubtful reading sets it back to waiting.
+              If the reading is right, press Confirm AI. If it is wrong, press Correct: the card opens on that reading,
+              and saving the correction checks it off. Each camera, SKU and reason keeps one item, and a new doubtful
+              reading sets it back to waiting.
             </p>
           </div>
           <button
@@ -128,7 +131,7 @@ export function ReviewQueueDialog({ items, onClose, onConfirm }: ReviewQueueDial
           </button>
         </div>
         <div className="max-h-[60vh] overflow-y-auto px-5 py-2">
-          <QueueGroup title={`Waiting for a check (${waiting.length})`} empty="Nothing is waiting." items={waiting} onConfirm={onConfirm} />
+          <QueueGroup title={`Waiting for a check (${waiting.length})`} empty="Nothing is waiting." items={waiting} onConfirm={onConfirm} onCorrect={onCorrect} />
           <QueueGroup title={`Checked (${checked.length})`} empty="Nothing has been checked yet." items={checked} />
         </div>
         <div className="flex justify-end border-t border-[#EFF0F6] px-5 py-3">
@@ -150,11 +153,13 @@ function QueueGroup({
   empty,
   items,
   onConfirm,
+  onCorrect,
 }: {
   title: string;
   empty: string;
   items: ApiReviewQueueItem[];
   onConfirm?: (item: ApiReviewQueueItem) => void;
+  onCorrect?: (item: ApiReviewQueueItem) => void;
 }) {
   return (
     <section className="py-2">
@@ -164,7 +169,7 @@ function QueueGroup({
       ) : (
         <ul className="divide-y divide-[#EFF0F6]">
           {items.map((det) => (
-            <QueueItem key={det.queue_key} det={det} onConfirm={onConfirm} />
+            <QueueItem key={det.queue_key} det={det} onConfirm={onConfirm} onCorrect={onCorrect} />
           ))}
         </ul>
       )}
@@ -172,7 +177,15 @@ function QueueGroup({
   );
 }
 
-function QueueItem({ det, onConfirm }: { det: ApiReviewQueueItem; onConfirm?: (item: ApiReviewQueueItem) => void }) {
+function QueueItem({
+  det,
+  onConfirm,
+  onCorrect,
+}: {
+  det: ApiReviewQueueItem;
+  onConfirm?: (item: ApiReviewQueueItem) => void;
+  onCorrect?: (item: ApiReviewQueueItem) => void;
+}) {
   const waiting = isWaiting(det.status);
   return (
     <li
@@ -212,14 +225,30 @@ function QueueItem({ det, onConfirm }: { det: ApiReviewQueueItem; onConfirm?: (i
           )}
         </p>
       </div>
-      {waiting && onConfirm && (
-        <button
-          type="button"
-          onClick={() => onConfirm(det)}
-          className="shrink-0 rounded-[6px] border border-[#E5E7EB] px-2.5 py-1 text-[12px] font-medium text-[#111827] hover:bg-[#F9FAFB] cursor-pointer"
-        >
-          Confirm AI
-        </button>
+      {waiting && (onConfirm || onCorrect) && (
+        <div className="flex shrink-0 items-center gap-2">
+          {onConfirm && (
+            <button
+              type="button"
+              title="The model read this right"
+              onClick={() => onConfirm(det)}
+              className="rounded-[6px] border border-[#E5E7EB] px-2.5 py-1 text-[12px] font-medium text-[#111827] hover:bg-[#F9FAFB] cursor-pointer"
+            >
+              Confirm AI
+            </button>
+          )}
+          {onCorrect && (
+            <button
+              type="button"
+              data-queue-correct
+              title="The model read this wrong: open the card on this reading and save the right answer"
+              onClick={() => onCorrect(det)}
+              className="rounded-[6px] border border-[#FDBA74] bg-[#FFF7ED] px-2.5 py-1 text-[12px] font-medium text-[#9A3412] hover:bg-[#FFEDD5] cursor-pointer"
+            >
+              Correct
+            </button>
+          )}
+        </div>
       )}
     </li>
   );

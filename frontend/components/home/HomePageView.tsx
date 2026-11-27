@@ -258,7 +258,7 @@ export function HomePageView() {
       {/* Hero Heading & Status Line */}
       <div className="flex flex-col items-center text-center">
         <h1 className="text-[30px] leading-tight tracking-[-0.015em] text-black sm:text-[40px]">
-          <span className="font-normal">Let&rsquo;s back to work </span>
+          <span className="font-normal">Let&rsquo;s get back to work </span>
           <span className="font-medium">
             {user?.email ? user.email.split("@")[0] : "Datagent"}
           </span>
@@ -477,7 +477,7 @@ export function HomePageView() {
             </button>
           </div>
 
-          <div className="max-h-[168px] overflow-y-auto pr-1">
+          <div className="max-h-[200px] overflow-y-auto pr-1">
             {DEFAULT_RECENT_PAGES.map((item) => (
               <Link
                 key={item.id}
@@ -521,7 +521,7 @@ export function HomePageView() {
             </button>
           </div>
 
-          <div className="max-h-[168px] overflow-y-auto pr-1">
+          <div className="max-h-[200px] overflow-y-auto pr-1">
             {recentProducts.map((product) => (
               <button
                 key={product.id}

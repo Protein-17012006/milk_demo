@@ -10,10 +10,11 @@ Parameters:
     Default: milk-demo
   RetentionDays:
     Type: Number
-    Default: 7
+    Default: 30
     Description: >-
-      Days to keep stored frames and results. 7 since 2026-11-22: continuous captures are kept 7 days;
-      the official hourly captures live 90 days in the website backend (decision of 2026-11-21).
+      Days to keep stored frames and results. 30 since 2026-11-25: the frames are training data for the
+      store-view milk model (docs/superpowers/specs/2026-11-25-th-store-view-design.md); 7 from 2026-11-22.
+      The official hourly captures live 90 days in the website backend (decision of 2026-11-21).
   IngestQueueArn:
     Type: String
     Default: ""

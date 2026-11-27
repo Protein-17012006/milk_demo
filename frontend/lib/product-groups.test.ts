@@ -52,7 +52,7 @@ const TH = { brand: "TH true MILK", subcategory: "Fresh Milk" };
 const VNM_FRESH = { brand: "Vinamilk", subcategory: "Fresh Milk" };
 const VNM_FLAV = { brand: "Vinamilk", subcategory: "Flavored Milk" };
 const VNM_PLANT = { brand: "Vinamilk", subcategory: "Plant Milk" };
-const SLIDE = { brand: "Slide", subcategory: "Potato Crisps", primaryCategory: "Snack" as const, packType: "Can" };
+const SLIDE = { brand: "Slide", subcategory: "Potato Crisps", primaryCategory: "Snacks" as const, packType: "Can" };
 
 const slide4 = [
   seen({ id: "Slide Original 145g", ...SLIDE, packSize: "145 g" }, 1, 0.46),
@@ -94,7 +94,7 @@ test("group totals: units, on-shelf variants, flagged, unit-weighted confidence"
     "Slide Cheese 145g", "Slide Hot & Spicy 160g", "Slide Original 145g", "Slide Sour Cream & Onion 150g",
   ]);
   assert.equal(g.thumbnail, "/t/cheese.png");
-  assert.equal(g.primaryCategory, "Snack");
+  assert.equal(g.primaryCategory, "Snacks");
 });
 
 test("variants without units do not move the group confidence", () => {

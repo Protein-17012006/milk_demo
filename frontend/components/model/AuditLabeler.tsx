@@ -33,7 +33,7 @@ const SKIP_REASONS: { value: string; label: string }[] = [
 ];
 
 interface AuditLabelerProps {
-  /** Audits to label, oldest first: pending ones, or done ones to relabel under rule A (their saved verdicts load
+  /** Audits to label, oldest first: pending ones, or done ones to relabel under the current rule (their saved verdicts load
    * first). Next moves along this list. */
   auditIds: string[];
   onClose(): void;
@@ -214,9 +214,11 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
           {detail && (
             <>
               <span className="font-semibold">
-                {detail.purpose === "training"
-                  ? "Training frame — teaches the flavour gallery, never scored"
-                  : "Scoring frame — counts in the accuracy numbers"}
+                {detail.purpose === "review"
+                  ? "Review frame — machine-unsure cans; your choice teaches the auto-labeller, never scored"
+                  : detail.purpose === "training"
+                    ? "Training frame — teaches the flavour gallery, never scored"
+                    : "Scoring frame — counts in the accuracy numbers"}
               </span>
               <span className="font-mono text-[12px]">{detail.capture_id}</span>
               <span className="text-white/70">{detail.capture_timestamp}</span>
@@ -254,8 +256,8 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
       )}
 
       <p data-rule-a className="bg-[#F3F4F6] px-5 py-2 text-[12.5px] text-[#1F2937]">
-        <b>Rule A</b> — count catalogue cans on the display&apos;s top tray whose face or lid shows enough to tell the
-        flavour. Mark <b>Out of scope</b>: cans on the lower tier, cans almost fully hidden, cans whose flavour you
+        <b>Rule B</b> — count every unit of the store&apos;s shelf plan (can, carton, pack) whose face, lid or top
+        shows enough to tell the product. Mark <b>Out of scope</b>: units almost fully hidden, units whose product you
         can&apos;t tell.
       </p>
 
@@ -281,13 +283,13 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
                     key={b.box_id}
                     data-box={b.box_id}
                     className="cursor-pointer"
-                    onClick={() => setVerdict(b.box_id, nextVerdict(labels[b.box_id]?.verdict ?? null))}
+                    onClick={() => setVerdict(b.box_id, nextVerdict(labels[b.box_id]?.verdict ?? null, b.needs_flavour))}
                   >
                     <rect x={x} y={y} width={w} height={h} fill={style.color} fillOpacity={0.12}
                       stroke={style.color} strokeWidth={3} vectorEffect="non-scaling-stroke" />
                     <text x={x} y={Math.max(y - fontSize * 0.3, fontSize)} fontSize={fontSize} fontWeight={700}
                       fill={style.color} stroke="#FFFFFF" strokeWidth={fontSize / 6} paintOrder="stroke">
-                      {b.box_id}
+                      {b.needs_flavour ? `${b.box_id}?` : b.box_id}
                     </text>
                   </g>
                 );
@@ -322,6 +324,9 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
             Click a box to cycle <b className="text-[#16A34A]">Right</b> → <b className="text-[#DC2626]">Wrong SKU</b> →{" "}
             <b className="text-[#7C3AED]">Not our SKU</b> → <b className="text-[#6B7280]">Out of scope</b>. Click empty shelf to add a unit the model missed; click an
             orange dot to remove it.
+            {detail?.purpose === "review" && (
+              <> A ? box has no suggestion: click to pick its flavour, Not our SKU or Out of scope.</>
+            )}
           </p>
 
           {pendingPoint && (
@@ -364,15 +369,17 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
                   <li key={b.box_id} data-box-row={b.box_id} className="rounded-[8px] border border-black/10 p-2">
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate">
-                        <b>#{b.box_id}</b> {nameOf(b.sku_id)}{" "}
-                        <span className="text-[#6B7280]">· {b.conf.toFixed(2)}</span>
+                        <b>#{b.box_id}</b> {b.needs_flavour ? "? no suggestion" : nameOf(b.sku_id)}{" "}
+                        {!b.needs_flavour && <span className="text-[#6B7280]">· {b.conf.toFixed(2)}</span>}
                       </span>
                       <span className="shrink-0 text-[11.5px] font-semibold" style={{ color: VERDICT_STYLE[verdict ?? "none"].color }}>
-                        {VERDICT_STYLE[verdict ?? "none"].label}
+                        {b.needs_flavour && verdict === "wrong_sku" ? "Flavour" : VERDICT_STYLE[verdict ?? "none"].label}
                       </span>
                     </div>
                     <div className="mt-1.5 flex gap-1">
-                      {(["correct", "wrong_sku", "not_product", "out_of_scope"] as Verdict[]).map((v) => (
+                      {(["correct", "wrong_sku", "not_product", "out_of_scope"] as Verdict[])
+                        .filter((v) => !(b.needs_flavour && v === "correct"))
+                        .map((v) => (
                         <button
                           key={v}
                           type="button"
@@ -383,18 +390,18 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
                           }`}
                           style={verdict === v ? { background: VERDICT_STYLE[v].color, borderColor: VERDICT_STYLE[v].color } : undefined}
                         >
-                          {VERDICT_STYLE[v].label}
+                          {b.needs_flavour && v === "wrong_sku" ? "Flavour" : VERDICT_STYLE[v].label}
                         </button>
                       ))}
                     </div>
                     {verdict === "wrong_sku" && (
                       <select
-                        aria-label={`Right SKU for box ${b.box_id}`}
+                        aria-label={b.needs_flavour ? `Flavour for box ${b.box_id}` : `Right SKU for box ${b.box_id}`}
                         className="mt-1.5 w-full rounded-[6px] border border-black/15 px-2 py-1"
                         value={label?.trueSku ?? ""}
                         onChange={(e) => setTrueSku(b.box_id, e.target.value)}
                       >
-                        <option value="">What is it really?</option>
+                        <option value="">{b.needs_flavour ? "Which flavour?" : "What is it really?"}</option>
                         {detail?.sku_choices
                           .filter((c) => c.label !== b.sku_id)
                           .map((c) => (

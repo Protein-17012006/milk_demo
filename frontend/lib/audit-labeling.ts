@@ -5,7 +5,7 @@
  *   correct      named box: one unit of that SKU; UNRECOGNIZED box: goods outside the catalogue
  *   wrong_sku    one unit of another catalogue SKU (trueSku)
  *   not_product  not a catalogue SKU (named box) / not goods at all (UNRECOGNIZED box)
- *   out_of_scope a real can that rule A does not count; the box is dropped from every number
+ *   out_of_scope a real unit that the labelling rule does not count; the box is dropped from every number
  */
 
 import type { ApiAuditListItem } from "./api";
@@ -29,10 +29,29 @@ export interface MissedPoint {
 }
 
 const CYCLE: (Verdict | null)[] = [null, "correct", "wrong_sku", "not_product", "out_of_scope"];
+// a ? box of a review frame (needs_flavour) has no suggestion to call right: pick its flavour, or say what it is not
+const CYCLE_NEEDS_FLAVOUR: (Verdict | null)[] = [null, "wrong_sku", "not_product", "out_of_scope"];
 
-/** The verdict after one more click on a box: unlabelled → correct → wrong SKU → not our SKU → out of scope → unlabelled. */
-export function nextVerdict(verdict: Verdict | null): Verdict | null {
-  return CYCLE[(CYCLE.indexOf(verdict) + 1) % CYCLE.length];
+/** The verdict after one more click on a box: unlabelled → correct → wrong SKU → not our SKU → out of scope →
+ * unlabelled; a box that needs a flavour skips correct. */
+export function nextVerdict(verdict: Verdict | null, needsFlavour = false): Verdict | null {
+  const cycle = needsFlavour ? CYCLE_NEEDS_FLAVOUR : CYCLE;
+  return cycle[(cycle.indexOf(verdict) + 1) % cycle.length];
+}
+
+const QUEUE_RANK: Record<string, number> = { scoring: 0, training: 1, review: 2 };
+
+/** The order "Label frames" opens pending frames in: scoring, then training, then review frames, each oldest first. */
+export function labelQueueOrder(
+  items: Pick<ApiAuditListItem, "audit_id" | "purpose" | "capture_timestamp">[]
+): string[] {
+  return [...items]
+    .sort(
+      (a, b) =>
+        (QUEUE_RANK[a.purpose] ?? 3) - (QUEUE_RANK[b.purpose] ?? 3) ||
+        a.capture_timestamp.localeCompare(b.capture_timestamp)
+    )
+    .map((a) => a.audit_id);
 }
 
 /** Model units and true units per SKU (model label) for the labels given so far. */
@@ -74,12 +93,16 @@ export type RelabelCandidate = Pick<
   "audit_id" | "capture_timestamp" | "purpose" | "status" | "label_rule"
 >;
 
-/** The frames "Relabel them" opens in the labeller: done scoring frames labelled before rule A (label_rule is not
- * "A"), oldest first. GET /model/audits?old_rule=1 lists only these; the filter keeps the labeller to them anyway.
- * The labeller loads each frame's saved verdicts, and Save stores it under rule A. */
+/** The labelling rule a save stores (backend LABEL_RULE). A (24/11): Slide cans on the display's top tray.
+ * B (25/11): every unit of the store's shelf plan whose face, lid or top shows, so the TH packs too. */
+export const CURRENT_LABEL_RULE = "B";
+
+/** The frames "Relabel them" opens in the labeller: done scoring frames labelled under an older rule (label_rule is
+ * not CURRENT_LABEL_RULE), oldest first. GET /model/audits?old_rule=1 lists only these; the filter keeps the labeller
+ * to them anyway. The labeller loads each frame's saved verdicts, and Save stores it under the current rule. */
 export function relabelQueue(items: RelabelCandidate[]): string[] {
   return items
-    .filter((a) => a.status === "done" && a.purpose === "scoring" && a.label_rule !== "A")
+    .filter((a) => a.status === "done" && a.purpose === "scoring" && a.label_rule !== CURRENT_LABEL_RULE)
     .sort((a, b) => a.capture_timestamp.localeCompare(b.capture_timestamp))
     .map((a) => a.audit_id);
 }

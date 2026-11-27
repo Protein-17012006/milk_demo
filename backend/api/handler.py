@@ -218,6 +218,8 @@ def _load_products_catalog(ddb) -> tuple[list[dict[str, Any]], int, int]:
         master = sku_map.get(sku_id)
         rows = grouped.get(sku_id, [])
         total_units = sum(int(r.get("smoothed_count", r.get("unit_count", 0))) for r in rows)
+        if (master or {}).get("merged_into") and total_units == 0:
+            continue  # counted under another row now: listed only while it still has units of its own
         stores_avail = sum(1 for r in rows if int(r.get("smoothed_count", r.get("unit_count", 0))) > 0)
 
         # Unit-weighted average confidence across stores (per doc p.11)
@@ -705,7 +707,11 @@ def _handle_kpi(event: dict[str, Any], ddb) -> dict[str, Any]:
     # Per A7 (doc p.7): avg_processing_time_ms = mean of one value per capture from capture_log
     proc_times = [int(c.get("processing_time_ms", 0)) for c in captures if int(c.get("processing_time_ms", 0)) > 0]
     avg_proc_ms = round(sum(proc_times) / len(proc_times)) if proc_times else 0
-    total_units = sum(p["unit_count"] for p in products)
+    params = event.get("queryStringParameters") or {}
+    if params.get("store_id") or _category_skus(ddb, params.get("category")) is not None:
+        total_units = _on_shelf_units(ddb, params)  # the Dashboard's Store and Category filters
+    else:
+        total_units = sum(p["unit_count"] for p in products)
 
     return _json_response(
         200,
@@ -718,9 +724,21 @@ def _handle_kpi(event: dict[str, Any], ddb) -> dict[str, Any]:
             "top_50_scope_note": TOP_50_NOTE,
             "captures_count": len(captures),
             "flag_threshold": MILK_FLAG_THRESHOLD,
-            **_shelf_kpis(ddb, event.get("queryStringParameters") or {}),
+            "displays": _display_statuses(ddb, _stores_for(ddb, params)),
+            **_shelf_kpis(ddb, params),
         },
         event,
+    )
+
+
+def _on_shelf_units(ddb, params: dict[str, Any]) -> int:
+    """Units on the shelf now for the chosen stores and category, from the latest reading of each SKU."""
+    stores = {s["store_id"] for s in _stores_for(ddb, params)}
+    skus = _category_skus(ddb, params.get("category"))
+    return sum(
+        int(row.get("smoothed_count", row.get("unit_count", 0)))
+        for row in _scan_all(ddb.Table(LATEST_STOCK_TABLE))
+        if row["sku_id"] != UNRECOGNIZED and row.get("store_id") in stores and (skus is None or row["sku_id"] in skus)
     )
 
 
@@ -783,6 +801,13 @@ def _rollups_by_key(ddb, stores: list[dict[str, Any]], keys: list[str]) -> dict[
     return found
 
 
+def _days_with_checks(rollups: dict[str, list[dict[str, Any]]]) -> int:
+    """Days (UTC+7) that have a counted check among these hour# or day# rollups."""
+    return len(
+        {key.split("#", 1)[1][:8] for key, items in rollups.items() if any(int(i.get("checks", 0)) for i in items)}
+    )
+
+
 def _point_label(key: str) -> str:
     """day#20261127 → 2026-11-27; hour#20261128-09 → 20261128-09."""
     kind, value = key.split("#", 1)
@@ -794,7 +819,7 @@ def _with_hours(stores: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _is_scoring(audit: dict[str, Any]) -> bool:
-    """Only scoring frames (AUD-) count in the metrics; training frames (TRN-) never do."""
+    """Only scoring frames (AUD-) count in the metrics; training (TRN-) and review frames (REV-) never do."""
     return str(audit.get("audit_id", "")).startswith("AUD-")
 
 
@@ -987,26 +1012,32 @@ def _shelf_kpis(ddb, params: dict[str, Any]) -> dict[str, Any]:
     if not open_stores:
         blocked = {"blocked_reason": "no_hours"}
         out["osa"] = {"value": None, "previous": None, **blocked}
-        out["restock_rate"] = {"units_per_day": None, "previous_units_per_day": None, "change_pct": None, **blocked}
+        rate = {"units_per_day": None, "previous_units_per_day": None, "change_pct": None, "measured_days": 0}
+        out["restock_rate"] = {**rate, **blocked}
         out["oos_now"] = {"count": None, "as_of": None, **blocked}
         out["coverage"] = None
     else:
         current_keys, previous_keys = _windows(days)
-        current = shelf.totals([i for v in _rollups_by_key(ddb, open_stores, current_keys).values() for i in v], skus)
-        previous = shelf.totals([i for v in _rollups_by_key(ddb, open_stores, previous_keys).values() for i in v], skus)
+        current_rollups = _rollups_by_key(ddb, open_stores, current_keys)
+        previous_rollups = _rollups_by_key(ddb, open_stores, previous_keys)
+        current = shelf.totals([i for v in current_rollups.values() for i in v], skus)
+        previous = shelf.totals([i for v in previous_rollups.values() for i in v], skus)
         out["osa"] = {
             "value": _r(current["osa"], 4),
             "previous": _r(previous["osa"], 4),
             "blocked_reason": None if current["osa"] is not None else "no_checks",
         }
-        rate = current["restock_units"] / days if current["store_checks"] else None
-        previous_rate = previous["restock_units"] / days if previous["store_checks"] else None
+        # per day that has a counted check: a camera that ran 5 of the 14 days restocked over 5 days, not 14
+        measured_days, previous_days = _days_with_checks(current_rollups), _days_with_checks(previous_rollups)
+        rate = current["restock_units"] / measured_days if measured_days else None
+        previous_rate = previous["restock_units"] / previous_days if previous_days else None
         change = shelf.change_pct(rate, previous_rate)
         reason = "no_checks" if rate is None else ("no_previous" if change is None else None)
         out["restock_rate"] = {
             "units_per_day": _r(rate, 1),
             "previous_units_per_day": _r(previous_rate, 1),
             "change_pct": change,
+            "measured_days": measured_days,
             "blocked_reason": reason,
         }
         out["oos_now"] = _oos_now(ddb, open_stores, skus)
@@ -1255,6 +1286,7 @@ def _handle_seed_initial_data(event: dict[str, Any], ddb) -> dict[str, Any]:
                     "pack_size": meta["pack_size"],
                     "barcode": None,
                     "image_url": meta.get("image_url"),
+                    "merged_into": meta.get("merged_into"),
                     "is_active": True,
                     "updated_at": now_iso,
                 }
@@ -1312,7 +1344,8 @@ def _handle_get_shelf_plan(store_id: str, event: dict[str, Any], ddb) -> dict[st
 
 def _handle_put_shelf_plan(store_id: str, event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
     """team_admin saves opening hours and expected SKUs; the next shelf_tick recomputes the last 15 days."""
-    if not _store_item(ddb, store_id):
+    store = _store_item(ddb, store_id)
+    if not store:
         return _json_response(404, {"error": "STORE_NOT_FOUND"}, event)
     body = _parse_body(event)
     open_time, close_time = str(body.get("open_time") or ""), str(body.get("close_time") or "")
@@ -1335,10 +1368,16 @@ def _handle_put_shelf_plan(store_id: str, event: dict[str, Any], user: dict[str,
     update = "SET open_time = :o, close_time = :c, shelf_plan_updated_by = :by, shelf_plan_updated_at = :at, "
     update += "shelf_recompute_requested_at = :at"
     if skus:
-        update += ", expected_skus = :skus"
+        # when each SKU joined the plan: the shelf numbers count it from then, or from its first count if earlier.
+        # A SKU of a plan saved before join times were kept joined at that plan's last save.
+        joined = store.get("expected_since") or {}
+        before = set(store.get("expected_skus") or [])
+        last_save = store.get("shelf_plan_updated_at") or now_iso
+        update += ", expected_skus = :skus, expected_since = :since"
         values[":skus"] = sorted(set(skus))
+        values[":since"] = {s: joined.get(s) or (last_save if s in before else now_iso) for s in values[":skus"]}
     else:  # an empty list means: use the suggestion again
-        update += " REMOVE expected_skus"
+        update += " REMOVE expected_skus, expected_since"
     ddb.Table(STORE_LIST_TABLE).update_item(
         Key={"store_id": store_id}, UpdateExpression=update, ExpressionAttributeValues=values
     )
@@ -1385,15 +1424,20 @@ def _sku_choices(ddb) -> dict[str, str]:
     return _choices_of(_scan_all(ddb.Table(SKU_MASTER_TABLE)))
 
 
-def _before_rule_a(audit: dict[str, Any]) -> bool:
-    """A done scoring frame labelled before rule A (no label_rule "A"): its numbers follow the old rule until the team
-    relabels it (spec 1.2a)."""
-    return audit.get("status") == "done" and _is_scoring(audit) and audit.get("label_rule") != "A"
+# The labelling rule frames are saved under. A (24/11): Slide cans on the display's top tray. B (25/11, spec
+# 2026-11-25-th-store-view): every unit of the store's shelf plan whose face, lid or top shows, so the TH packs too.
+LABEL_RULE = "B"
+
+
+def _before_current_rule(audit: dict[str, Any]) -> bool:
+    """A done scoring frame labelled under an older rule (label_rule not LABEL_RULE): its numbers follow that rule
+    until the team relabels it."""
+    return audit.get("status") == "done" and _is_scoring(audit) and audit.get("label_rule") != LABEL_RULE
 
 
 def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:
     """Audits of the last `days` days (0: all), newest first, optionally of one status; old_rule=1 keeps only the
-    frames labelled before rule A, for the Model page's "Relabel them". counts are always those of the range."""
+    frames labelled under an older rule, for the Model page's "Relabel them". counts are always those of the range."""
     params = event.get("queryStringParameters") or {}
     status = params.get("status") or ""
     days = int(params.get("days") or 7)
@@ -1401,7 +1445,7 @@ def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:
     audits = [a for a in _scan_all(ddb.Table(AUDITS_TABLE)) if _within_days(str(a.get("capture_timestamp", "")), days)]
     counts = {s: sum(1 for a in audits if a.get("status") == s) for s in ("pending", "done", "skipped")}
     chosen = sorted(
-        (a for a in audits if (not status or a.get("status") == status) and (not old_rule or _before_rule_a(a))),
+        (a for a in audits if (not status or a.get("status") == status) and (not old_rule or _before_current_rule(a))),
         key=lambda a: str(a.get("capture_timestamp", "")),
         reverse=True,
     )
@@ -1489,7 +1533,7 @@ def _handle_model_audit_put(audit_id: str, event: dict[str, Any], user: dict[str
             "verdicts_json": json.dumps(clean_verdicts, separators=(",", ":")),
             "missed_json": json.dumps(clean_missed, separators=(",", ":")),
             "status": "done",
-            "label_rule": "A",
+            "label_rule": LABEL_RULE,
             "misses_checked": True,
             "labeled_by": user["email"],
             "labeled_at": datetime.now(ICT).isoformat(timespec="seconds"),
@@ -1627,7 +1671,7 @@ def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
         if "processing_ms_median" in h
         for _ in range(int(h.get("captures", 0)))
     ]
-    old_rule_frames = sum(1 for a in done if _before_rule_a(a))
+    old_rule_frames = sum(1 for a in done if _before_current_rule(a))
     plans, pairs = _against_the_shelf(ddb, chosen)  # each frame is held to its own store's plan
     return _json_response(
         200,

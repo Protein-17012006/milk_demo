@@ -2,7 +2,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ApiShelfEvent } from "./api";
-import { alertAccuracyByTypeText, alertAccuracyText, blockedText, coverageText, dashboardQuery, displayBanner, gapText, eventLabel, eventText, oosDurationText, pctChange, ptsChange, timeAgo } from "./shelf-ui.ts";
+import { alertAccuracyByTypeText, alertAccuracyText, blockedText, coverageText, dashboardQuery, displayBanner, gapText, eventLabel, eventText, oosDurationText, pctChange, ptsChange, timeAgo,
+  restockDefinition,
+} from "./shelf-ui.ts";
 
 function ev(type: ApiShelfEvent["type"], delta: number, levelAfter: number): ApiShelfEvent {
   return {
@@ -153,4 +155,13 @@ test("alert accuracy per kind of event leaves out kinds nobody confirmed", () =>
   );
   assert.equal(alertAccuracyByTypeText({}), null);
   assert.equal(alertAccuracyByTypeText(undefined), null);
+});
+
+test("the restock card says over how many days with checks its rate is", () => {
+  assert.equal(
+    restockDefinition(14, 5),
+    "Units restocked per day that has checks (5 of the last 14 days), against the 14 days before.",
+  );
+  assert.equal(restockDefinition(1, 1), "Units restocked today, against yesterday.");
+  assert.equal(restockDefinition(14, undefined), "Units restocked per day, against the 14 days before.");
 });

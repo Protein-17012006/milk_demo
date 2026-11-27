@@ -598,3 +598,11 @@ def test_sku_reliability_of_14_days_is_quick():
     start = time.perf_counter()
     sku_reliability(audits)
     assert time.perf_counter() - start < 1.0
+
+
+def test_a_box_that_needs_a_flavour_cannot_be_right():
+    boxes = [{"box_id": 1, "sku_id": None, "needs_flavour": True}, {"box_id": 2, "sku_id": "hot160"}]
+    right = [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}]
+    assert validate_labels(boxes, right, [], CATALOG) == ["box 1 needs a flavour: Right is not offered"]
+    ok = [{"box_id": 1, "verdict": "wrong_sku", "true_sku_id": "hot160"}, {"box_id": 2, "verdict": "correct"}]
+    assert validate_labels(boxes, ok, [], CATALOG) == []

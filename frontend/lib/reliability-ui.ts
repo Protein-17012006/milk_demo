@@ -23,6 +23,12 @@ export function badgeLabel(badge: ReliabilityBadge): "High" | "Medium" | "Low" |
   return LABELS[badge] as ReturnType<typeof badgeLabel>;
 }
 
+/** The pill's text where no column header says what it rates; a bare "Low" under a product reads as low stock.
+ * Without enough samples it is "not rated": the details line and the tooltip give the counts. */
+export function badgePillText(badge: ReliabilityBadge): string {
+  return `Reliability: ${badge === "insufficient" ? "not rated" : LABELS[badge]}`;
+}
+
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /** The details behind a badge, e.g. "found right 24% · 21 cans · 9 frames · often read as Slide Cheese 145g".

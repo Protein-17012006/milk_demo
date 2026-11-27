@@ -93,14 +93,18 @@ export function FrameViewer({
           <span className="font-mono text-[12px]">{readingId}</span>
           <span className="text-white/70">{captureTimestamp}</span>
           <span>
-            {unitCount} {unitCount === 1 ? "unit" : "units"} · {boxes.length}{" "}
-            {boxes.length === 1 ? "box" : "boxes"}
+            {unitCount === 0 && boxes.length > 0
+              ? "0 units now · last sighting:"
+              : `${unitCount} ${unitCount === 1 ? "unit" : "units"} ·`}{" "}
+            {boxes.length} {boxes.length === 1 ? "box" : "boxes"}
           </span>
           <span>Confidence {confidence.toFixed(2)}</span>
-          <span className="inline-flex items-center gap-1 text-white/80">
-            <ShieldCheck className="h-3.5 w-3.5" />
-            Faces blurred: {facesBlurred}
-          </span>
+          {facesBlurred > 0 && (
+            <span className="inline-flex items-center gap-1 text-white/80">
+              <ShieldCheck className="h-3.5 w-3.5" />
+              Faces blurred: {facesBlurred}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button

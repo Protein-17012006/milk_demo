@@ -9,6 +9,9 @@ UNRECOGNIZED), one verdict per box and the units the model missed. Verdicts:
     out_of_scope a real can that labelling rule A does not count (lower tier, almost hidden, flavour unclear):
                  the box and its verdict are dropped from every number
 
+A review frame (REV-, auto-label design 5.5) carries boxes with needs_flavour: the auto-labeller could not name them,
+so they show no flavour and "correct" is not a verdict for them. Review frames are never scored (only AUD- are).
+
 The formulas follow the column descriptions of "Validation - Accuracy Report" (the sheet's formula cells
 show #ERROR!), as written in docs/superpowers/specs/2026-11-23-model-quality-page-design.md, section 5.
 
@@ -74,6 +77,7 @@ def validate_labels(ai_boxes: list[dict], verdicts: list[dict], missed: list[dic
     """What is wrong with a labelling before it is saved; an empty list means it can be saved."""
     errors: list[str] = []
     box_ids = {b["box_id"] for b in ai_boxes}
+    needs_flavour = {b["box_id"] for b in ai_boxes if b.get("needs_flavour")}
     seen: set = set()
     for v in verdicts:
         box_id = v.get("box_id")
@@ -85,6 +89,8 @@ def validate_labels(ai_boxes: list[dict], verdicts: list[dict], missed: list[dic
         seen.add(box_id)
         if v.get("verdict") not in VERDICTS:
             errors.append(f"box {box_id} has an unknown verdict {v.get('verdict')!r}")
+        elif v["verdict"] == "correct" and box_id in needs_flavour:
+            errors.append(f"box {box_id} needs a flavour: Right is not offered")
         elif v["verdict"] == "wrong_sku":
             sku = v.get("true_sku_id")
             if not sku:

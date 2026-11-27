@@ -1,6 +1,7 @@
 [
+  {"id": "TMP-MLK-TH-00", "short": "TH 180ml (2 loại)", "name": "TH true MILK Sữa Tươi Tiệt Trùng 180ml (Có đường + Ít đường)", "note": "một dòng cho cả hai loại: camera của tiệm không đọc được chữ phân biệt (spec 2026-11-25)", "color": "#4c78a8"},
   {"id": "TMP-MLK-TH-01", "short": "TH Có đường", "name": "TH true MILK Sữa Tươi Tiệt Trùng Có Đường 180ml", "color": "#1f77b4"},
-  {"id": "TMP-MLK-TH-02", "short": "TH Ít đường", "name": "TH true MILK Sữa Tươi Tiệt Trùng Ít Đường 180ml (tên chờ khớp với pipeline của long)", "color": "#aec7e8"},
+  {"id": "TMP-MLK-TH-02", "short": "TH Ít đường", "name": "TH true MILK Sữa Tươi Tiệt Trùng Ít Đường 180ml", "color": "#aec7e8"},
   {"id": "TMP-MLK-VNM-01", "short": "VNM Không đường", "name": "Vinamilk 100% Sữa Tươi Tiệt Trùng Không Đường 180ml", "color": "#2ca02c"},
   {"id": "TMP-MLK-VNM-02", "short": "VNM Ít đường", "name": "Vinamilk 100% Sữa Tươi Tiệt Trùng Ít Đường 180ml", "color": "#98df8a"},
   {"id": "TMP-MLK-VNM-03", "short": "VNM Có đường", "name": "Vinamilk 100% Sữa Tươi Tiệt Trùng Có Đường 180ml", "color": "#ff7f0e"},

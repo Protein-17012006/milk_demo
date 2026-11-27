@@ -37,6 +37,7 @@ import { ProductDetailsModal } from "./ProductDetailsModal";
 import { ProductRow } from "./ProductRow";
 import { ProductGroupRow } from "./ProductGroupRow";
 import { ReviewBanner, ReviewQueueDialog } from "./ReviewQueue";
+import { cardFromQueueItem, queueKeyForReading } from "@/lib/review-queue";
 import { groupProducts, groupSelection, type ProductGroup } from "@/lib/product-groups";
 import { displayBanner } from "@/lib/shelf-ui";
 
@@ -139,7 +140,7 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
   )
     ? "Noodles"
     : catLower.includes("snack")
-      ? "Snack"
+      ? "Snacks"
       : "Milk";
 
   const status = statusOf(p.is_flagged, p.confidence_score);
@@ -298,7 +299,7 @@ export function CategoryProductsView() {
 
   // Only categories that the live rows actually contain.
   const categoryDropdownOptions = useMemo<CategoryFilterOption[]>(() => {
-    const order: PrimaryCategory[] = ["Milk", "Snack", "Noodles"];
+    const order: PrimaryCategory[] = ["Milk", "Snacks", "Noodles"];
     const present = new Set(products.map((p) => p.primaryCategory));
     return ["All", ...order.filter((c) => present.has(c))];
   }, [products]);
@@ -577,6 +578,38 @@ export function CategoryProductsView() {
     await loadProductDetail(item);
   };
 
+  // "Correct" in the review queue: the card opens on the flagged reading itself (not on the product's latest one),
+  // in place of the queue; closing the card brings the queue back.
+  const openQueueCorrection = (det: ApiReviewQueueItem) => {
+    setReviewQueueOpen(false);
+    setViewingProduct(cardFromQueueItem(det, products.find((p) => p.id === det.sku_id), Date.now()));
+  };
+
+  // A fresh signed frame link for a card opened from the queue: its reading comes from the queue, not from
+  // GET /products/{sku}. A newer doubtful reading may have taken the item over; the card then shows that one.
+  const refreshQueueCard = async (queueKey: string): Promise<string | null> => {
+    try {
+      const queue = await createApiClient(getIdToken).getReviewQueue();
+      setLiveQueue(queue.items);
+      const det = queue.items.find((item) => item.queue_key === queueKey);
+      if (!det) return null;
+      setViewingProduct((curr) =>
+        curr?.reviewQueueKey === queueKey
+          ? cardFromQueueItem(det, products.find((p) => p.id === det.sku_id), Date.now())
+          : curr
+      );
+      return det.reading_id;
+    } catch {
+      return null;
+    }
+  };
+
+  const closeCard = () => {
+    const fromQueue = Boolean(viewingProduct?.reviewQueueKey);
+    setViewingProduct(null);
+    if (fromQueue) setReviewQueueOpen(true);
+  };
+
   const handleSaveAudit = async (
     productId: string,
     payload: { expectedLabel: string; mismatchType: string }
@@ -588,17 +621,27 @@ export function CategoryProductsView() {
       }
       try {
         const api = createApiClient(getIdToken);
-        const prod = products.find((p) => p.id === productId);
+        // the reading on the open card: the list row may already hold a newer one
+        const card = viewingProduct?.id === productId ? viewingProduct : products.find((p) => p.id === productId);
+        // the queue item this correction answers: the one the card was opened from, or the waiting item of the
+        // very reading the card shows. With its key the backend marks it "Đã sửa".
+        const queueKey = card?.reviewQueueKey ?? queueKeyForReading(liveQueue ?? [], card?.cvOutput.reading_id);
         await api.submitCorrection({
-          store_id: prod?.cvOutput.store_id || "DEMO-S01",
-          reading_id: prod?.cvOutput.reading_id,
-          capture_id: prod?.cvOutput.capture_id,
+          store_id: card?.cvOutput.store_id || "DEMO-S01",
+          queue_key: queueKey,
+          reading_id: card?.cvOutput.reading_id,
+          capture_id: card?.cvOutput.capture_id,
           sku_id: productId,
           corrected_sku_id: payload.expectedLabel,
           correction_type: payload.mismatchType,
+          discrepancy_category: payload.mismatchType,
           action: "correct",
         });
-        showToast("Saved correction to AWS DynamoDB (corrections)");
+        showToast(
+          queueKey
+            ? "Saved the correction. The reading is checked off in the review queue."
+            : "Saved correction to AWS DynamoDB (corrections)"
+        );
         void loadLiveData();
       } catch (err) {
         showToast(
@@ -607,22 +650,21 @@ export function CategoryProductsView() {
         return;
       }
     }
-    setProducts((prev) =>
-      prev.map((item) =>
-        item.id === productId
-          ? {
-              ...item,
-              status: "Validated",
-              audit: {
-                ...item.audit,
-                expectedLabel: payload.expectedLabel,
-                mismatchType: payload.mismatchType,
-                reviewedAt: new Date().toISOString(),
-              },
-            }
-          : item
-      )
-    );
+    const reviewed = (item: SkuProduct): SkuProduct => ({
+      ...item,
+      status: "Validated",
+      audit: {
+        ...item.audit,
+        expectedLabel: payload.expectedLabel,
+        mismatchType: payload.mismatchType,
+        reviewedAt: new Date().toISOString(),
+      },
+    });
+    setViewingProduct((curr) => (curr?.id === productId ? reviewed(curr) : curr));
+    // a card opened from the queue reviewed an older reading: the product's row keeps its latest one as it is
+    if (!viewingProduct?.reviewQueueKey) {
+      setProducts((prev) => prev.map((item) => (item.id === productId ? reviewed(item) : item)));
+    }
     if (!liveMode) {
       showToast("Saved correction to audit state");
     }
@@ -666,7 +708,7 @@ export function CategoryProductsView() {
         <header className="flex flex-wrap items-start justify-between gap-4 border-b border-black/10 pb-[16px]">
           <div>
             <h1 className="text-[22px] font-normal leading-tight text-black">
-              Products
+              Category
             </h1>
             <p className="mt-[4px] text-[12px] font-normal text-[#6B7280]">
               {liveMode
@@ -888,12 +930,16 @@ export function CategoryProductsView() {
 
       {/* Product Details / Validation Card Modal (aligned with CV Output 16-col spec) */}
       <ProductDetailsModal
-        key={viewingProduct?.id ?? "closed"}
+        key={viewingProduct ? `${viewingProduct.id}|${viewingProduct.reviewQueueKey ?? ""}` : "closed"}
         product={viewingProduct}
-        onClose={() => setViewingProduct(null)}
+        onClose={closeCard}
         onSaveAudit={handleSaveAudit}
         onRefreshDetail={() =>
-          viewingProduct ? loadProductDetail(viewingProduct) : Promise.resolve(null)
+          !viewingProduct
+            ? Promise.resolve(null)
+            : viewingProduct.reviewQueueKey
+              ? refreshQueueCard(viewingProduct.reviewQueueKey)
+              : loadProductDetail(viewingProduct)
         }
       />
 
@@ -903,6 +949,7 @@ export function CategoryProductsView() {
           items={liveQueue}
           onClose={() => setReviewQueueOpen(false)}
           onConfirm={(det) => void confirmQueueItem(det)}
+          onCorrect={openQueueCorrection}
         />
       )}
 

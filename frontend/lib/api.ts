@@ -175,8 +175,11 @@ export interface ApiKpiResponse {
     units_per_day: number | null;
     previous_units_per_day: number | null;
     change_pct: number | null;
+    measured_days?: number; // days of the period that have a counted check; older backends leave it out
     blocked_reason: BlockedReason | null;
   };
+  // one per camera of the chosen stores: whether it sees the display now (older backends leave it out)
+  displays?: ApiDisplayStatus[];
   oos_now?: { count: number | null; as_of: string | null; blocked_reason: BlockedReason | null };
   // Hours of the period: measured, open, and open hours in which the camera could not see the display.
   // null when the store has no opening hours (an older backend leaves the field out).
@@ -286,16 +289,20 @@ export interface ApiReportsSeriesResponse {
 
 export type AuditStatus = "pending" | "done" | "skipped";
 
-/** One box the model drew on a sampled frame; sku_id is the model label (null = UNRECOGNIZED). */
+/** One box the model drew on a sampled frame; sku_id is the model label (null = UNRECOGNIZED). On a review frame a box
+ * may need a flavour (the auto-labeller could not name it: sku_id null, no Right) and names its can (track_id). */
 export interface ApiAuditBox {
   box_id: number;
   sku_id: string | null;
   conf: number;
   box: [number, number, number, number]; // x, y, w, h in frame pixels
+  needs_flavour?: boolean;
+  track_id?: string;
 }
 
-// scoring frames count in the accuracy numbers; training frames only teach the flavour gallery
-export type AuditPurpose = "scoring" | "training";
+// scoring frames count in the accuracy numbers; training frames only teach the flavour gallery; review frames carry
+// the cans the auto-labeller could not decide, and are never scored either
+export type AuditPurpose = "scoring" | "training" | "review";
 
 export interface ApiAuditListItem {
   audit_id: string;
@@ -307,7 +314,7 @@ export interface ApiAuditListItem {
   status: AuditStatus;
   n_boxes: number;
   labeled_by?: string | null;
-  label_rule?: string | null; // "A" when labelled under rule A; null when labelled before it, or not labelled yet
+  label_rule?: string | null; // the rule it was labelled under ("B" now, "A" before 25/11); null before rules, or not labelled yet
 }
 
 export interface ApiAuditListResponse {
@@ -418,7 +425,7 @@ export interface ApiDisplayCheck {
 
 export interface ApiModelSummary {
   n_audits: number;
-  old_rule_frames: number; // done frames not labelled under rule A
+  old_rule_frames: number; // done frames not labelled under the current rule (B)
   out_of_scope_share: { value: number | null; n: number }; // out_of_scope boxes / all AI boxes; n = boxes
   kpis: Record<string, ApiKpiValue>;
   per_sku: ApiPerSkuRow[];
@@ -591,6 +598,7 @@ export function createApiClient(getIdToken: TokenGetter) {
       corrected_sku_id?: string;
       corrected_count?: number;
       correction_type?: string;
+      discrepancy_category?: string; // the field the backend stores; correction_type alone was dropped
       action?: "correct" | "confirm";
       notes?: string;
     }) =>
@@ -663,7 +671,7 @@ export function createApiClient(getIdToken: TokenGetter) {
     exportCaptureLogCsv: () =>
       requestWithAuth("/exports/capture-log.csv", getIdToken, {}, true) as Promise<string>,
 
-    // oldRule: only the done scoring frames labelled before rule A, for "Relabel them"
+    // oldRule: only the done scoring frames labelled under an older rule, for "Relabel them"
     listAudits: (status?: AuditStatus, days = 7, options: { oldRule?: boolean } = {}) => {
       const sp = new URLSearchParams({ days: String(days) });
       if (status) sp.set("status", status);
