@@ -3,7 +3,7 @@
 
 import type { ApiReliability } from "./api";
 
-export type PrimaryCategory = "Milk" | "Snack" | "Noodles";
+export type PrimaryCategory = "Milk" | "Snacks" | "Noodles";
 export type CategoryFilterOption = "All" | PrimaryCategory;
 export type ProductStatus = "Validated" | "Needs Review" | "Low Confidence";
 export type StatusFilterOption = "All" | ProductStatus;
@@ -34,6 +34,7 @@ export const MISMATCH_TYPE_OPTIONS = [
   "Unrecognized SKU",
   "Partial Occlusion",
   "Count Mismatch",
+  "Not on the shelf (false reading)",
 ];
 
 /** is_flagged = TRUE below this confidence (Data Dictionary); the API also returns it as flag_threshold. */
@@ -105,4 +106,27 @@ export interface SkuProduct {
   audit: SkuAudit;
   /** Reliability badge from the last 14 days of labelled frames; absent from older backends. */
   reliability?: ApiReliability;
+  /** Set when the card was opened from the review queue: it shows that flagged reading, not the latest one, and
+   * saving a correction checks the queue item off. */
+  reviewQueueKey?: string;
+}
+
+/** The confidence a row may show: a row without units has only the score of an older reading, so none. */
+export function shownConfidence(units: number, confidence: number): number | null {
+  return units > 0 ? confidence : null;
+}
+
+/** For a card whose SKU is at 0: its frame and boxes are from the last capture that saw it, not from now.
+ * timestamp is the reading's capture_timestamp (ISO, UTC+7). */
+export function lastSeenNote(units: number, boxes: number, timestamp: string | null): string | null {
+  if (units > 0 || boxes === 0 || !timestamp) return null;
+  const when = `${timestamp.slice(11, 16)} on ${timestamp.slice(8, 10)}/${timestamp.slice(5, 7)}`;
+  return `Not on the shelf at the last check. The frame and its ${boxes} ${boxes === 1 ? "box" : "boxes"} are from ${when}, when it was last seen.`;
+}
+
+/** The card's Audit Status: "Validated" only once a person reviewed the reading; an unflagged reading nobody
+ * looked at is "Not reviewed". */
+export function auditStatusText(status: ProductStatus, reviewedAt: string | null): string {
+  if (status !== "Validated") return status;
+  return reviewedAt ? "Validated" : "Not reviewed";
 }

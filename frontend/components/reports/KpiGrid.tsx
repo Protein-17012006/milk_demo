@@ -4,7 +4,7 @@ import React from "react";
 import { Area, AreaChart, ResponsiveContainer } from "recharts";
 import type { ApiKpiResponse, ApiTrendPoint } from "@/lib/api";
 import type { KpiMetrics } from "@/lib/reports-ui";
-import { blockedText, coverageText, ptsChange } from "@/lib/shelf-ui";
+import { blockedText, coverageText, ptsChange, restockDefinition } from "@/lib/shelf-ui";
 
 // Shown wherever the API has no value; the cards never show a number the backend did not return.
 const NO_VALUE = "—";
@@ -131,7 +131,7 @@ export function KpiGrid({ metrics, kpi, sparklines, days, storeName }: KpiGridPr
               ? blockedText(restock.blocked_reason, storeName)
               : NO_VALUE}
         </Sub>
-        <Defn>Units restocked per day against {period}.</Defn>
+        <Defn>{restockDefinition(days, restock?.measured_days)}</Defn>
         <OrangeSparkline points={sparklines.restock} gradientId="kpiRestockSparkline" />
       </div>
     </div>

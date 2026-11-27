@@ -5,6 +5,8 @@ import { AlertTriangle, Check, Image as ImageIcon, ShieldCheck, X } from "lucide
 import {
   MILK_FLAG_THRESHOLD,
   MISMATCH_TYPE_OPTIONS,
+  auditStatusText,
+  lastSeenNote,
   type SkuProduct,
 } from "@/lib/products-ui";
 import { FrameViewer } from "./FrameViewer";
@@ -84,6 +86,8 @@ export function ProductDetailsModal({
     );
   };
   const confidencePct = Math.round(cvOutput.confidence_score * 100);
+  const auditStatus = auditStatusText(product.status, audit.reviewedAt);
+  const lastSeen = lastSeenNote(cvOutput.unit_count, cvOutput.bounding_box.length, cvOutput.capture_timestamp);
 
   const handleSave = () => {
     onSaveAudit?.(product.id, { expectedLabel, mismatchType });
@@ -132,8 +136,7 @@ export function ProductDetailsModal({
               CV Output reading{" "}
               <span className="font-mono text-[12px] text-[#374151]">
                 {cvOutput.reading_id}
-              </span>{" "}
-              &middot; Visual pipeline ({cvOutput.pipeline})
+              </span>
             </p>
           </div>
           <button
@@ -188,8 +191,8 @@ export function ProductDetailsModal({
                 Audit Status
               </p>
               <p className="mt-0.5 inline-flex items-center gap-1.5 text-[15px] font-semibold text-[#111827]">
-                <span>{product.status}</span>
-                {product.status === "Validated" && (
+                <span>{auditStatus}</span>
+                {auditStatus === "Validated" && (
                   <Check
                     className="h-4 w-4 text-[#16A34A]"
                     strokeWidth={2.5}
@@ -198,6 +201,26 @@ export function ProductDetailsModal({
               </p>
             </div>
           </div>
+          {product.reviewQueueKey && (
+            <p
+              data-from-queue
+              role="status"
+              className="rounded-[10px] border border-[#FED7AA] bg-[#FFF7ED] px-3.5 py-2 text-[12.5px] leading-[1.45] text-[#7C2D12]"
+            >
+              From the review queue: this is the doubtful reading of {cvOutput.capture_timestamp.slice(11, 16)} on{" "}
+              {cvOutput.capture_timestamp.slice(8, 10)}/{cvOutput.capture_timestamp.slice(5, 7)}, not the
+              product&apos;s latest one. Saving a correction checks it off.
+            </p>
+          )}
+          {lastSeen && (
+            <p
+              data-last-seen
+              role="status"
+              className="rounded-[10px] border border-[#FDE68A] bg-[#FFFBEB] px-3.5 py-2 text-[12.5px] leading-[1.45] text-[#92400E]"
+            >
+              {lastSeen}
+            </p>
+          )}
 
           {/* Section 1: Product Information (SKU Master + Alias) */}
           <div className="rounded-[12px] border border-[#E5E7EB] bg-[#F9FAFB]/70 p-4">
@@ -251,10 +274,7 @@ export function ProductDetailsModal({
               <div className="grid grid-cols-1 gap-1 sm:grid-cols-[200px_1fr]">
                 <dt className="text-[#6B7280]">Detection Method</dt>
                 <dd className="font-normal text-[#111827]">
-                  {cvOutput.detection_method}{" "}
-                  <span className="text-[12px] text-[#6B7280]">
-                    (YOLO26s &middot; DINOv2-S &middot; LanceDB)
-                  </span>
+                  {cvOutput.detection_method}
                 </dd>
               </div>
               <div className="grid grid-cols-1 gap-1 sm:grid-cols-[200px_1fr]">
@@ -295,7 +315,8 @@ export function ProductDetailsModal({
               <div className="grid grid-cols-1 gap-1 sm:grid-cols-[200px_1fr]">
                 <dt className="text-[#6B7280]">Processing Time</dt>
                 <dd className="font-normal text-[#111827]">
-                  {cvOutput.processing_time_ms} ms
+                  {/* a reading opened from the review queue does not carry its processing time */}
+                  {cvOutput.processing_time_ms > 0 ? `${cvOutput.processing_time_ms} ms` : "—"}
                 </dd>
               </div>
             </dl>
@@ -405,12 +426,14 @@ export function ProductDetailsModal({
                   <span className="break-all font-mono text-[11.5px] text-[#111827]">
                     {cvOutput.image_key}
                   </span>
-                  <span className="inline-flex items-center gap-1 rounded-full bg-[#EEF2FF] px-2 py-0.5 text-[10.5px] font-medium text-[#3730A3]">
-                    <ShieldCheck className="h-3 w-3" />
-                    <span>
-                      Faces blurred: {cvOutput.faces_blurred}
+                  {cvOutput.faces_blurred > 0 && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-[#EEF2FF] px-2 py-0.5 text-[10.5px] font-medium text-[#3730A3]">
+                      <ShieldCheck className="h-3 w-3" />
+                      <span>
+                        Faces blurred: {cvOutput.faces_blurred}
+                      </span>
                     </span>
-                  </span>
+                  )}
                 </dd>
               </div>
             </dl>

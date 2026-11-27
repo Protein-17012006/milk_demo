@@ -192,3 +192,11 @@ export function dashboardQuery(q: DashboardQuery): string {
   const s = sp.toString();
   return s ? `?${s}` : "";
 }
+
+/** The Restock Rate card's small print. The rate is per day that has checks (an older backend does not say how
+ * many: measuredDays undefined), so a camera that ran 5 of the 14 days is not averaged over 14. */
+export function restockDefinition(days: number, measuredDays: number | undefined): string {
+  if (days === 1) return "Units restocked today, against yesterday.";
+  const over = measuredDays === undefined ? "" : ` that has checks (${measuredDays} of the last ${days} days)`;
+  return `Units restocked per day${over}, against the ${days} days before.`;
+}

@@ -136,6 +136,27 @@ def build_check(bucket: str, captures: list[dict]) -> dict[str, Any]:
     return check
 
 
+def expected_at(check: dict, plan: list[str], since: dict[str, str], joined: dict[str, str]) -> list[str]:
+    """The plan's SKUs that count at this check, in name order.
+
+    A SKU starts at the first measurable check that counted it with a sure box, or at the check where it joined the
+    plan (joined: SKU -> bucket), whichever comes first. Before that the system knew nothing of it, so its empty
+    space is not out of stock. since (SKU -> the bucket it started at) is read and updated."""
+    counts = check.get("counts") or {}
+    sure = set(check.get("confident_skus") or []) if check.get("measurable", True) else set()
+    bucket = check["bucket"]
+    out = []
+    for sku in sorted(plan):
+        if sku not in since:
+            counted = sku in sure and int(counts.get(sku, 0)) > 0
+            if not counted and not (sku in joined and bucket >= joined[sku]):
+                continue
+            since[sku] = bucket
+        if bucket >= since[sku]:
+            out.append(sku)
+    return out
+
+
 def gap_between(last_measured: str | None, bucket: str) -> tuple[str, str] | None:
     """(last_measured, bucket) when these two measured checks are more than GAP_MINUTES apart, else None."""
     if last_measured is None or bucket_time(bucket) - bucket_time(last_measured) <= timedelta(minutes=GAP_MINUTES):

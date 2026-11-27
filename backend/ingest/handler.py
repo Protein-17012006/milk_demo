@@ -700,15 +700,28 @@ def _expected_skus(ddb_resource, store: dict[str, Any], now_utc: datetime) -> li
     return sorted({sku for day in days for sku in day.get("confident_skus") or []})
 
 
+def _plan_joined(store: dict[str, Any]) -> dict[str, str]:
+    """SKU -> the bucket where it joined the saved plan. A plan saved before join times were kept gives each of its
+    SKUs the time of its last save; a suggested plan has no join times."""
+    joined = store.get("expected_since") or {}
+    last_save = store.get("shelf_plan_updated_at")
+    out = {}
+    for sku in store.get("expected_skus") or []:
+        at = joined.get(sku) or last_save
+        if at:
+            out[sku] = shelf.bucket_of(at)
+    return out
+
+
 def _apply_check(
-    check: dict, store: dict, expected: list[str], skus_state: dict, last_measured: str | None
+    check: dict, store: dict, plan: list[str], skus_state: dict, last_measured: str | None, since: dict[str, str]
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Mark the check open or not and record the list it was counted against. An open, measured check with a list
-    steps each expected SKU's state, with the gap since the last measured check if there is one; any other check
-    leaves the state alone. Returns the events and the last measured bucket. Checks stored before measurable
-    existed were measured."""
+    """Mark the check open or not and record the SKUs it was counted against: the plan's SKUs that have started
+    (shelf.expected_at; since is updated). An open, measured check with such SKUs steps the state of each, with the
+    gap since the last measured check if there is one; any other check leaves the state alone. Returns the events
+    and the last measured bucket. Checks stored before measurable existed were measured."""
     check["open"] = shelf.is_open(check["bucket"], store.get("open_time"), store.get("close_time"))
-    check["expected"] = expected
+    expected = check["expected"] = shelf.expected_at(check, plan, since, _plan_joined(store))
     if not (check["open"] and check.get("measurable", True) and expected):
         return [], last_measured
     gap = shelf.gap_between(last_measured, check["bucket"])
@@ -896,6 +909,7 @@ def _shelf_store_tick(s3_client, ddb_resource, store: dict[str, Any], now_utc: d
     by_bucket = _captures_by_bucket(ddb_resource, cameras, first, last)
     expected = _expected_skus(ddb_resource, store, now_utc)
     skus_state = dict((state_item or {}).get("skus") or {})
+    since = dict((state_item or {}).get("since") or {})
     last_measured = (state_item or {}).get("last_measured_bucket")
     events_table = ddb_resource.Table(SHELF_EVENTS_TABLE)
     hours: set[str] = set()
@@ -904,7 +918,7 @@ def _shelf_store_tick(s3_client, ddb_resource, store: dict[str, Any], now_utc: d
     while bucket <= last:
         if by_bucket.get(bucket):
             check = shelf.build_check(bucket, by_bucket[bucket])
-            events, last_measured = _apply_check(check, store, expected, skus_state, last_measured)
+            events, last_measured = _apply_check(check, store, expected, skus_state, last_measured, since)
             table.put_item(Item=_check_item(store_id, check))
             for event in events:
                 event.update(_event_photos(s3_client, ddb_resource, store_id, event))
@@ -921,6 +935,7 @@ def _shelf_store_tick(s3_client, ddb_resource, store: dict[str, Any], now_utc: d
             "last_bucket": last,
             "last_measured_bucket": last_measured,
             "skus": skus_state,
+            "since": since,
         }
     )
     try:  # only one run moves a store's state on; an overlapping run stops here
@@ -983,6 +998,9 @@ def shelf_recompute(s3_client, ddb_resource, store_id: str, days: int, now_utc: 
         events_table, KeyConditionExpression=Key("store_id").eq(store_id) & Key("event_key").between(first, f"{last}~")
     )
     kept_photos = {e["event_key"]: {k: e[k] for k in PHOTO_KEYS if e.get(k)} for e in old_events}
+    # SKUs that started before these days stay started; the others start again from the checks replayed
+    old_state = from_dynamodb(table.get_item(Key={"store_id": store_id, "key": "state"}).get("Item")) or {}
+    since = {sku: bucket for sku, bucket in (old_state.get("since") or {}).items() if bucket < first}
     frames_from = shelf.bucket_of((now_utc - timedelta(days=CAPTURE_TTL_DAYS)).isoformat())
     with table.batch_writer() as writer:
         for item in [*stale, {"key": "state"}]:
@@ -1008,7 +1026,7 @@ def shelf_recompute(s3_client, ddb_resource, store_id: str, days: int, now_utc: 
             stored = checks[bucket]
             check = {k: stored[k] for k in ("bucket", "counts", "captures", "cameras", "confident_skus")}
             check.update({k: stored[k] for k in display_fields if k in stored})
-            events, last_measured = _apply_check(check, store, expected, skus_state, last_measured)
+            events, last_measured = _apply_check(check, store, expected, skus_state, last_measured, since)
             replayed[bucket] = check
             for event in events:
                 event.update(kept_photos.get(event["event_key"], {}))
@@ -1019,7 +1037,7 @@ def shelf_recompute(s3_client, ddb_resource, store_id: str, days: int, now_utc: 
             writer.put_item(Item=_check_item(store_id, check))
             hours.add(bucket[:11])
     state = {"store_id": store_id, "key": "state", "last_bucket": last, "last_measured_bucket": last_measured}
-    table.put_item(Item=to_dynamodb_safe({**state, "skus": skus_state}))
+    table.put_item(Item=to_dynamodb_safe({**state, "skus": skus_state, "since": since}))
     _write_rollups(ddb_resource, store_id, hours)
     return {"action": "shelf_recompute", "store_id": store_id, "checks": len(checks), "hours": len(hours)}
 
