@@ -12,11 +12,11 @@ from model_versions import STATE_ID, STATUSES, can  # noqa: E402
 
 def test_put_live_needs_a_parallel_run_and_a_verdict():
     state = {"live": "v1", "previous": None, "candidate": "v2", "request": None}
-    assert can("put_live", state, {"status": "parallel"}, "better") is None
-    assert can("put_live", state, {"status": "parallel"}, "no_difference") is None
-    assert can("put_live", state, {"status": "parallel"}, "waiting") is not None
-    assert can("put_live", state, {"status": "parallel"}, "worse") is not None
-    assert can("put_live", state, {"status": "candidate"}, "better") is not None
+    assert can("put_live", state, {"version_id": "v2", "status": "parallel"}, "better") is None
+    assert can("put_live", state, {"version_id": "v2", "status": "parallel"}, "no_difference") is None
+    assert can("put_live", state, {"version_id": "v2", "status": "parallel"}, "waiting") is not None
+    assert can("put_live", state, {"version_id": "v2", "status": "parallel"}, "worse") is not None
+    assert can("put_live", state, {"version_id": "v2", "status": "candidate"}, "better") is not None
     assert can("put_live", state, None, "better") is not None
     assert can("rollback", state, None, None) is not None
     assert can("rollback", {**state, "previous": "v0"}, None, None) is None
@@ -24,9 +24,9 @@ def test_put_live_needs_a_parallel_run_and_a_verdict():
 
 def test_discard_only_a_waiting_or_running_candidate():
     state = {"live": "v1", "previous": None, "candidate": "v2", "request": None}
-    assert can("discard", state, {"status": "candidate"}, None) is None
-    assert can("discard", state, {"status": "parallel"}, "worse") is None
-    assert can("discard", state, {"status": "live"}, None) is not None
+    assert can("discard", state, {"version_id": "v2", "status": "candidate"}, None) is None
+    assert can("discard", state, {"version_id": "v2", "status": "parallel"}, "worse") is None
+    assert can("discard", state, {"version_id": "v2", "status": "live"}, None) is not None
     assert can("discard", state, None, None) is not None
 
 
@@ -46,3 +46,10 @@ def test_an_unknown_action_is_refused():
 def test_names_the_runner_and_the_website_share():
     assert STATE_ID == "#state"
     assert STATUSES == ("candidate", "parallel", "live", "replaced", "discarded", "stopped")
+
+
+def test_only_the_candidate_that_is_running_can_be_put_live():
+    state = {"live": "v1", "previous": None, "candidate": "v2", "request": None}
+    assert can("put_live", state, {"version_id": "v2", "status": "parallel"}, "better") is None
+    left_behind = {"version_id": "v3", "status": "parallel"}  # a row that still says parallel but is not the candidate
+    assert can("put_live", state, left_behind, "better") == "Only the candidate that is running now can be put live."

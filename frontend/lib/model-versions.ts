@@ -65,6 +65,20 @@ export function requestStatus(state: ApiVersionsState): RequestStatus {
   return result.ok ? { kind: "idle" } : { kind: "failed", message: result.message };
 }
 
+const QUIET_AFTER_MS = 3 * 60 * 1000; // the counting machine writes a sign of life every minute
+const QUICK_FOR_MS = 2 * 60 * 1000; // a request is done within about a minute; after that, look less often
+
+/** Whether the counting machine has stopped giving signs of life (or never gave one). */
+export function runnerQuiet(seenAt: string | null | undefined, nowMs: number): boolean {
+  const seen = seenAt ? Date.parse(seenAt) : NaN;
+  return Number.isNaN(seen) || nowMs - seen > QUIET_AFTER_MS;
+}
+
+/** How long the block waits before it reads again: quickly only while a live machine works on a fresh request. */
+export function pollDelay(p: { waiting: boolean; quiet: boolean; waitedMs: number }): number {
+  return p.waiting && !p.quiet && p.waitedMs < QUICK_FOR_MS ? 5000 : 60000;
+}
+
 export interface SkuRow {
   key: string;
   name: string;

@@ -13,8 +13,9 @@ Steps:
     ("start_parallel", id)           put a waiting release beside the live one
     ("stop", id, reason)             take a candidate out: it stopped itself, restarts the worker, or draws at night
     ("fail", request_id, message)    answer a request "no"
+    ("mark_discarded", request_id, id) discard a release that is not running: only its row changes
     ("point", pointer)               write live.json for the request in hand
-    ("restart_worker",)
+    ("restart_worker",)              for a request; or alone, when the worker runs something else than live.json names
     ("confirm", request_id, version) wait for the worker to say it runs `version`, then answer the request
     ("sync_status", id, numbers)     copy the worker's numbers about the candidate to its row
 """
@@ -32,6 +33,11 @@ NIGHT_FRAMES = 100  # frames without the display a candidate must have read befo
 NIGHT_LIMIT = 1.0  # named boxes per 100 such frames; more stops the candidate (the TH night gate)
 RESTARTS = 3
 RESTART_WINDOW_S = 15 * 60
+REQUEST_TTL_S = 30 * 60  # a request nobody began within this time is answered no, not carried out late
+EXPIRED = (
+    "The counting machine did not get to this request within 30 minutes, so nothing was changed. "
+    "Ask again if it is still wanted."
+)
 NUMBERS = ("windows", "late", "errors")
 
 
@@ -87,6 +93,22 @@ def _why_stop(candidate: str, status: dict | None, night: float | None) -> str |
     return None
 
 
+def _expired(request: dict, now: datetime | None) -> bool:
+    if now is None or not request.get("at"):
+        return False
+    try:
+        return (now - datetime.fromisoformat(request["at"])).total_seconds() > REQUEST_TTL_S
+    except (TypeError, ValueError):
+        return False
+
+
+def _runs_what_is_named(worker_started: dict | None, pointer: Pointer) -> bool:
+    """Whether the worker's start record names the releases live.json names; no record means nothing is known."""
+    if not worker_started:
+        return True
+    return (worker_started.get("live"), worker_started.get("candidate") or None) == (pointer.live, pointer.candidate)
+
+
 def next_steps(
     pointer: Pointer,
     state: dict,
@@ -94,6 +116,9 @@ def next_steps(
     on_disk: list[str],
     worker_status: dict | None,
     night: float | None,
+    *,
+    now: datetime | None = None,
+    worker_started: dict | None = None,
 ) -> list[tuple]:
     registers = [("register", release_id) for release_id in sorted(on_disk) if release_id not in versions]
     if not state:
@@ -105,13 +130,14 @@ def next_steps(
     if request_running(state):
         request = state["request"]
         if why_stop and request.get("version_id") == candidate:
-            return [
-                *steps,
-                ("stop", candidate, why_stop),
-                ("fail", request["id"], f"The candidate was stopped: {why_stop}."),
-            ]
+            failed = ("fail", request["id"], f"The candidate was stopped: {why_stop}.")
+            return [*steps, ("stop", candidate, why_stop), failed]
+        if request.get("action") == "discard" and request.get("version_id") != candidate:
+            return [*steps, ("mark_discarded", request["id"], request["version_id"])]
         goal = target(state, request)
         if pointer != goal:
+            if _expired(request, now):  # not begun in time: the situation it was asked in may be gone
+                return [*steps, ("fail", request["id"], EXPIRED)]
             steps.append(("point", goal))
         return [*steps, ("restart_worker",), ("confirm", request["id"], goal.live)]
 
@@ -124,6 +150,8 @@ def next_steps(
             return [*steps, ("start_parallel", candidate)]
         if why_stop:
             return [*steps, ("stop", candidate, why_stop)]
+        if not _runs_what_is_named(worker_started, pointer):
+            return [*steps, ("restart_worker",)]
         if worker_status and worker_status.get("candidate") == candidate:
             numbers = {k: int(worker_status.get(k) or 0) for k in NUMBERS}
             if numbers != {k: int((row.get("worker") or {}).get(k) or 0) for k in NUMBERS}:
@@ -137,4 +165,6 @@ def next_steps(
     )
     if waiting:
         steps.append(("start_parallel", waiting[0][1]))
+    elif not _runs_what_is_named(worker_started, pointer):
+        steps.append(("restart_worker",))
     return steps

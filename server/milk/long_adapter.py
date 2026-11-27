@@ -93,6 +93,19 @@ def _th_overlap(env: Mapping[str, str] | None = None) -> float:
     return value
 
 
+def require_own_code(module, root: Path) -> None:
+    """Stops a release whose MILK_LONG_DIR is not the folder this process already loaded the recognition code from.
+    Python keeps one cv_output and one recognize module per process, so such a release, loaded as a candidate beside
+    the live one, would run the live release's code and read exactly like it; then go live and only there load its
+    own folder for the first time."""
+    loaded_from = Path(module.__file__).resolve().parent
+    if loaded_from != Path(root).resolve():
+        raise RuntimeError(
+            f"MILK_LONG_DIR is {root}, but this process already loaded the recognition code from {loaded_from}: "
+            "a release that changes MILK_LONG_DIR cannot run beside the live one"
+        )
+
+
 def drop_shared(det: np.ndarray, is_th: Sequence[bool], limit: float) -> np.ndarray:
     """The detector's rows (x0, y0, x1, y1, confidence, ...) without the merged-TH boxes that repeat a surer one: going
     from the surest TH box down, a TH box goes when what it shares with a kept TH box is `limit` or more of the smaller
@@ -182,6 +195,8 @@ class LongPipeline:
             raise FileNotFoundError(f"cv_output.py not found in {root}; set MILK_LONG_DIR")
         sys.path.insert(0, str(root))
         import cv_output  # the team's pipeline; it puts its own folder on sys.path
+
+        require_own_code(cv_output, root)
         from recognize import Recognizer
         from ultralytics import YOLO
 

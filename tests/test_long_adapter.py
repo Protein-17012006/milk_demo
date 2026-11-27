@@ -312,3 +312,20 @@ def test_adapters_read_the_process_environment_in_one_place_only():
     for name in ("long_adapter.py", "slide_adapter.py"):
         source = (Path(milk.__file__).parent / name).read_text(encoding="utf-8")
         assert source.count("os.environ") == 1, name
+
+
+def test_a_release_cannot_borrow_the_recognition_code_another_release_loaded(tmp_path):
+    # Python keeps one cv_output module per process: a candidate whose MILK_LONG_DIR is another folder would run the
+    # live release's code and read exactly like it. It must stop with a reason instead.
+    import types
+
+    from milk.long_adapter import require_own_code
+
+    live_dir, candidate_dir = tmp_path / "carton_recognition", tmp_path / "carton_recognition_v2"
+    live_dir.mkdir()
+    candidate_dir.mkdir()
+    loaded = types.ModuleType("cv_output")
+    loaded.__file__ = str(live_dir / "cv_output.py")
+    require_own_code(loaded, live_dir)
+    with pytest.raises(RuntimeError, match="carton_recognition_v2"):
+        require_own_code(loaded, candidate_dir)

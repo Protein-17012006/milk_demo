@@ -35,6 +35,8 @@ def can(action: str, state: dict, version: dict | None, verdict_state: str | Non
     status = (version or {}).get("status")
     if action == "discard":
         return None if status in ("candidate", "parallel") else "Only a waiting or running candidate can be discarded."
+    if (version or {}).get("version_id") != state.get("candidate"):
+        return "Only the candidate that is running now can be put live."
     if status != "parallel":
         return "Only a version that is running in parallel with the live one can be put live."
     if verdict_state not in MAY_GO_LIVE:

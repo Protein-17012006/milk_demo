@@ -4,6 +4,7 @@ disk or the worker: next_steps only reads what it is given."""
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 from milk.release import Pointer as P
 from ops.decide import NIGHT_FRAMES, NIGHT_LIMIT, next_steps, night_rate
@@ -176,3 +177,59 @@ def test_night_rate_counts_only_frames_without_the_display_that_this_candidate_r
     captures += night_captures(50, boxes=50, version="v3")
     captures += [{"display_visible": False}] * 30  # the candidate never read these
     assert night_rate(captures, "v2") == 2.0
+
+
+# --- after the whole-branch review -----------------------------------------------------------------------------
+
+NOW = datetime.fromisoformat("2026-11-28T09:40:00+07:00")
+EXPIRED = (
+    "The counting machine did not get to this request within 30 minutes, so nothing was changed. "
+    "Ask again if it is still wanted."
+)
+
+
+def test_a_request_left_for_more_than_half_an_hour_is_answered_no_not_carried_out():
+    request = {"id": "r1", "action": "rollback", "at": "2026-11-28T09:00:00+07:00"}
+    st = state(live="v2", previous="v1", request=request)
+    args = (P(live="v2", previous="v1"), st, rows(v1="replaced", v2="live"), ["v1", "v2"], None, None)
+    assert next_steps(*args, now=NOW) == [("fail", "r1", EXPIRED)]
+
+
+def test_a_request_asked_a_few_minutes_ago_is_carried_out():
+    request = {"id": "r1", "action": "rollback", "at": "2026-11-28T09:30:00+07:00"}
+    st = state(live="v2", previous="v1", request=request)
+    args = (P(live="v2", previous="v1"), st, rows(v1="replaced", v2="live"), ["v1", "v2"], None, None)
+    assert next_steps(*args, now=NOW)[0] == ("point", P(live="v1", previous="v2"))
+
+
+def test_an_old_request_that_was_already_begun_is_finished():
+    # live.json already points where the request wanted: the switch has happened, only the answer is missing
+    request = {"id": "r1", "action": "rollback", "at": "2026-11-28T09:00:00+07:00"}
+    st = state(live="v2", previous="v1", request=request)
+    args = (P(live="v1", previous="v2"), st, rows(v1="replaced", v2="live"), ["v1", "v2"], None, None)
+    assert next_steps(*args, now=NOW) == [("restart_worker",), ("confirm", "r1", "v1")]
+
+
+def test_discarding_a_release_that_is_not_running_only_marks_it():
+    request = {"id": "r1", "action": "discard", "version_id": "v3"}
+    st = state(live="v1", candidate="v2", request=request)
+    args = (P(live="v1", candidate="v2"), st, rows(v1="live", v2="parallel", v3="candidate"), ["v1", "v2", "v3"])
+    assert next_steps(*args, None, None) == [("mark_discarded", "r1", "v3")]
+
+
+def test_a_worker_that_runs_something_other_than_live_json_names_is_restarted():
+    st = state(live="v1", candidate="v2")
+    args = (P(live="v1", candidate="v2"), st, rows(v1="live", v2="parallel"), ["v1", "v2"], None, None)
+    without = {"live": "v1", "candidate": None, "started_at": "2026-11-28T02:00:00+00:00"}
+    assert next_steps(*args, worker_started=without) == [("restart_worker",)]
+    as_named = {"live": "v1", "candidate": "v2", "started_at": "2026-11-28T02:00:00+00:00"}
+    assert next_steps(*args, worker_started=as_named) == []
+    assert next_steps(*args, worker_started=None) == []  # no start record yet: nothing is known
+
+
+def test_a_candidate_that_must_stop_is_stopped_rather_than_restarted_into():
+    st = state(live="v1", candidate="v2")
+    args = (P(live="v1", candidate="v2"), st, rows(v1="live", v2="parallel"), ["v1", "v2"])
+    without = {"live": "v1", "candidate": None, "started_at": "2026-11-28T02:00:00+00:00"}
+    steps = next_steps(*args, status("v2", stopped="error: FileNotFoundError"), None, worker_started=without)
+    assert steps == [("stop", "v2", "error: FileNotFoundError")]

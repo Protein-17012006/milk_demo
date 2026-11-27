@@ -36,6 +36,7 @@ from ops.decide import next_steps, night_rate
 log = logging.getLogger("ops.runner")
 ICT = timezone(timedelta(hours=7))
 NIGHT_EVERY_S = 30 * 60  # the night rule reads many capture rows: twice an hour is enough
+RECONCILE_EVERY_S = 5 * 60  # a restart asked only because the worker runs something else: not more often
 NightReader = Callable[[str, str | None], list[dict]]
 
 
@@ -80,6 +81,7 @@ class Runner:
         self._night_at = 0.0
         self._night_value: float | None = None
         self._night_of: str | None = None
+        self._reconciled_at = float("-inf")
 
     # --- reading ------------------------------------------------------------------------------------------------
 
@@ -133,9 +135,17 @@ class Runner:
             release.release_ids(self.root),
             self._candidate_status(),
             self._night(state, rows),
+            now=datetime.now(ICT),
+            worker_started=release.read_worker_status(self.root),
         )
         done: list[tuple] = []
+        asked_by_a_request = any(s[0] == "confirm" for s in steps)
         for step in steps:
+            if step == ("restart_worker",) and not asked_by_a_request:
+                # the worker runs something else than live.json names: ask again, but not every minute
+                if self._clock() - self._reconciled_at < RECONCILE_EVERY_S:
+                    continue
+                self._reconciled_at = self._clock()
             try:
                 getattr(self, "_do_" + step[0])(*step[1:])
             except Exception:  # noqa: BLE001 - the next turn reads the state again and goes on
@@ -241,12 +251,46 @@ class Runner:
             if old_live:
                 self._set(old_live, {"status": "replaced"})
 
+    def _worker_runs(self, wanted: release.Pointer) -> tuple[bool, dict | None]:
+        """Waits for the worker's start record, written after the restart just asked for, to name what `wanted`
+        names. Returns whether it did in time, and the last record seen."""
+        asked_at = self._asked_at or datetime.now(UTC).replace(microsecond=0)
+        deadline = self._clock() + self._confirm_timeout_s
+        while True:
+            seen = release.read_worker_status(self.root)
+            if (
+                seen
+                and datetime.fromisoformat(seen["started_at"]) >= asked_at
+                and seen.get("live") == wanted.live
+                and (seen.get("candidate") or None) == wanted.candidate
+            ):
+                return True, seen
+            if self._clock() >= deadline:
+                return False, seen
+            self._sleep(self._poll_s)
+
     def _do_start_parallel(self, release_id: str) -> None:
+        """Puts a waiting release beside the live one. The table says "parallel" only once the worker has said it
+        started with it; a worker that does not is put back as it was and the release is marked stopped. A restart
+        that cannot even be asked leaves the release waiting, and the next turn tries again."""
         pointer = release.read_pointer(self.root)
-        release.write_pointer(self.root, release.Pointer(pointer.live, pointer.previous, release_id))
+        without = release.Pointer(pointer.live, pointer.previous, None)
+        wanted = release.Pointer(pointer.live, pointer.previous, release_id)
+        release.write_pointer(self.root, wanted)
+        try:
+            self._restart()
+        except Exception:
+            release.write_pointer(self.root, without)
+            self._set(STATE_ID, {}, remove=("candidate",))
+            raise
+        if not self._worker_runs(wanted)[0]:
+            release.write_pointer(self.root, without)
+            self._set(release_id, {"status": "stopped", "stopped_reason": "the worker did not start with it"})
+            self._set(STATE_ID, {}, remove=("candidate",))
+            self._restart()
+            return
         self._set(release_id, {"status": "parallel", "parallel_started_at": self._now()})
         self._set(STATE_ID, {"candidate": release_id})
-        self._restart()
 
     def _do_stop(self, release_id: str, reason: str) -> None:
         pointer = release.read_pointer(self.root)
@@ -259,6 +303,13 @@ class Runner:
     def _do_fail(self, request_id: str, message: str) -> None:
         self._answer(request_id, False, message)
 
+    def _do_mark_discarded(self, request_id: str, release_id: str) -> None:
+        """A release that is not running is discarded: its row says so, and nothing else changes."""
+        request = self._state().get("request") or {}
+        decided = {"decided_by": request.get("by", ""), "decided_at": request.get("at", "")}
+        self._set(release_id, {"status": "discarded", **decided})
+        self._answer(request_id, True, "")
+
     def _do_point(self, pointer: release.Pointer) -> None:
         release.write_pointer(self.root, pointer)
 
@@ -270,43 +321,38 @@ class Runner:
 
     def _do_confirm(self, request_id: str, version: str) -> None:
         """Waits for the worker's start record to name `version` (and the pointer's candidate), then writes what the
-        request changed and answers it. A worker that does not get there in time is reported; nothing is undone."""
-        wanted = release.read_pointer(self.root)
-        asked_at = self._asked_at or datetime.now(UTC).replace(microsecond=0)
-        deadline = self._clock() + self._confirm_timeout_s
-        seen = None
-        while True:
-            seen = release.read_worker_status(self.root)
-            if (
-                seen
-                and datetime.fromisoformat(seen["started_at"]) >= asked_at
-                and seen.get("live") == version
-                and (seen.get("candidate") or None) == wanted.candidate
-            ):
-                break
-            if self._clock() >= deadline:
-                said = f"its last start was with {seen.get('live')}" if seen else "it has written no start record"
-                self._answer(request_id, False, f"The worker did not start with {version}: {said}.")
-                return
-            self._sleep(self._poll_s)
+        request changed and answers it. A worker that does not get there in time is reported; nothing is undone.
+
+        The rows of the releases are written first; the state row's new live/previous/candidate and the answer go in
+        ONE write. ops.decide works out where live.json must point from the state row, so the state may only change
+        together with the answer: cut anywhere before that write, the next turn does the same request again and ends
+        in the same place."""
+        runs, seen = self._worker_runs(release.read_pointer(self.root))
+        if not runs:
+            said = f"its last start was with {seen.get('live')}" if seen else "it has written no start record"
+            self._answer(request_id, False, f"The worker did not start with {version}: {said}.")
+            return
         state = self._state()
         request = state.get("request") or {}
-        old_live, action = state.get("live"), request.get("action")
+        old_live, running, action = state.get("live"), state.get("candidate"), request.get("action")
         decided = {"decided_by": request.get("by", ""), "decided_at": request.get("at", "")}
-        if action == "put_live":
-            self._set(version, {"status": "live", **decided})
-            if old_live and old_live != version:
-                self._set(old_live, {"status": "replaced"})
-            self._set(STATE_ID, {"live": version, "previous": old_live}, remove=("candidate",))
-        elif action == "rollback":
-            self._set(version, {"status": "live"})
-            if old_live and old_live != version:
-                self._set(old_live, {"status": "replaced"})
-            self._set(STATE_ID, {"live": version, "previous": old_live}, remove=("candidate",))
-        elif action == "discard":
+        answer = {"request_id": request_id, "ok": True, "message": "", "at": self._now()}
+        if action == "discard":
             self._set(request["version_id"], {"status": "discarded", **decided})
-            self._set(STATE_ID, {}, remove=("candidate",))
-        self._answer(request_id, True, "")
+            self._set(STATE_ID, {"last_result": answer}, remove=("candidate",))
+            return
+        self._set(version, {"status": "live", **(decided if action == "put_live" else {})})
+        if old_live and old_live != version:
+            self._set(old_live, {"status": "replaced"})
+        if running and running != version:  # a candidate that was running beside the old live release
+            self._set(running, {"status": "stopped", "stopped_reason": f"taken out when {version} went live"})
+        values = {"live": version, "last_result": answer}
+        remove = ["candidate"]
+        if old_live and old_live != version:
+            values["previous"] = old_live
+        else:
+            remove.append("previous")
+        self._set(STATE_ID, values, remove=tuple(remove))
 
 
 def restart_worker_task() -> None:

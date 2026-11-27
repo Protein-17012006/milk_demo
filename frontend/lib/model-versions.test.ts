@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   canPutLive,
+  pollDelay,
   requestStatus,
   runLine,
+  runnerQuiet,
   sinceText,
   skuRows,
   statusText,
@@ -98,4 +100,19 @@ test("the product table goes by units judged, with names where they are known", 
     { key: "cheese145", name: "cheese145", units: 3, liveRight: 1, candRight: 2 },
   ]);
   assert.deepEqual(skuRows({}, {}), []);
+});
+
+test("the counting machine counts as quiet when it has not been seen for three minutes", () => {
+  const now = Date.parse("2026-11-28T09:10:00+07:00");
+  assert.equal(runnerQuiet("2026-11-28T09:08:30+07:00", now), false);
+  assert.equal(runnerQuiet("2026-11-28T09:06:59+07:00", now), true);
+  assert.equal(runnerQuiet(undefined, now), true);
+  assert.equal(runnerQuiet("not a time", now), true);
+});
+
+test("the block looks again quickly only while a live machine is working on a fresh request", () => {
+  assert.equal(pollDelay({ waiting: true, quiet: false, waitedMs: 20_000 }), 5_000);
+  assert.equal(pollDelay({ waiting: true, quiet: true, waitedMs: 20_000 }), 60_000);
+  assert.equal(pollDelay({ waiting: true, quiet: false, waitedMs: 3 * 60_000 }), 60_000);
+  assert.equal(pollDelay({ waiting: false, quiet: false, waitedMs: 0 }), 60_000);
 });

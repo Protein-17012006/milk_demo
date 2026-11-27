@@ -230,3 +230,135 @@ def test_every_turn_leaves_a_sign_of_life(root, table):
 def test_no_pointer_means_nothing_is_done(tmp_path, table):
     assert runner_for(tmp_path, table, Worker(tmp_path)).tick() == []
     assert row(table, STATE) is None
+
+
+# --- after the whole-branch review -----------------------------------------------------------------------------
+
+
+def fail_once(runner, when):
+    """Makes the runner's next table write for which `when(version_id, values)` is true fail, once."""
+    real, state = runner._set, {"failed": False}
+
+    def flaky(version_id, values, *args, **kwargs):
+        if not state["failed"] and when(version_id, values):
+            state["failed"] = True
+            raise RuntimeError("the table was away for a moment")
+        return real(version_id, values, *args, **kwargs)
+
+    runner._set = flaky
+    return state
+
+
+def test_a_roll_back_cut_short_before_its_last_write_is_finished_not_undone(root, table):
+    worker = Worker(root)
+    runner = running_in_parallel(root, table, worker)
+    ask(table, "put_live", "v2")
+    runner.tick()
+    ask(table, "rollback", request_id="r2")
+    cut = fail_once(runner, lambda version_id, values: version_id == STATE and "last_result" in values)
+    runner.tick()  # the worker is back on v1, but the answer could not be written
+    assert cut["failed"]
+    runner.tick()
+    assert release.read_pointer(root) == release.Pointer(live="v1", previous="v2")
+    state = row(table, STATE)
+    assert (state["live"], state["previous"]) == ("v1", "v2")
+    assert (state["last_result"]["request_id"], state["last_result"]["ok"]) == ("r2", True)
+    assert (row(table, "v1")["status"], row(table, "v2")["status"]) == ("live", "replaced")
+
+
+def test_put_live_cut_short_before_its_last_write_keeps_the_way_back(root, table):
+    worker = Worker(root)
+    runner = running_in_parallel(root, table, worker)
+    ask(table, "put_live", "v2")
+    fail_once(runner, lambda version_id, values: version_id == STATE and "last_result" in values)
+    runner.tick()
+    runner.tick()
+    state = row(table, STATE)
+    assert (state["live"], state["previous"], state["last_result"]["ok"]) == ("v2", "v1", True)
+
+
+def test_a_roll_back_takes_a_running_candidate_out_and_says_why(root, table):
+    worker = Worker(root)
+    runner = running_in_parallel(root, table, worker)
+    ask(table, "put_live", "v2")
+    runner.tick()
+    write_release(root, "v3", env={"MILK_PIPELINE": "null"}, kind="rules", parent="v2")
+    runner.tick()
+    runner.tick()
+    assert row(table, "v3")["status"] == "parallel"
+    ask(table, "rollback", request_id="r2")
+    runner.tick()
+    assert release.read_pointer(root) == release.Pointer(live="v1", previous="v2")
+    v3 = row(table, "v3")
+    assert (v3["status"], v3["stopped_reason"]) == ("stopped", "taken out when v1 went live")
+    assert "candidate" not in row(table, STATE)
+
+
+def test_discarding_a_waiting_release_leaves_the_running_one_alone(root, table):
+    worker = Worker(root)
+    runner = running_in_parallel(root, table, worker)
+    write_release(root, "v3", env={"MILK_PIPELINE": "null"}, kind="rules", parent="v1")
+    runner.tick()  # v3 is registered and waits: v2 is running
+    restarts = worker.restarts
+    ask(table, "discard", "v3")
+    assert runner.tick() == [("mark_discarded", "r1", "v3")]
+    assert (row(table, "v3")["status"], row(table, "v2")["status"]) == ("discarded", "parallel")
+    assert release.read_pointer(root) == release.Pointer(live="v1", candidate="v2")
+    assert row(table, STATE)["last_result"]["ok"] is True and worker.restarts == restarts
+
+
+def test_a_candidate_the_worker_does_not_come_up_with_is_taken_out_again(root, table):
+    worker = Worker(root)
+    runner = runner_for(root, table, worker, confirm_timeout_s=0.05)
+    runner.tick()
+    write_release(root, "v2", env={"MILK_PIPELINE": "null"}, kind="rules", parent="v1")
+    runner.tick()
+    worker.loads = False  # the worker never says it started with the candidate
+    runner.tick()
+    v2 = row(table, "v2")
+    assert (v2["status"], v2["stopped_reason"]) == ("stopped", "the worker did not start with it")
+    assert release.read_pointer(root) == release.Pointer(live="v1")
+    assert "candidate" not in row(table, STATE)
+    assert worker.restarts == 2  # once with the candidate, once more without it
+
+
+def test_a_restart_that_fails_leaves_the_release_waiting_and_is_tried_again(root, table):
+    worker = Worker(root)
+    runner = runner_for(root, table, worker)
+    runner.tick()
+    write_release(root, "v2", env={"MILK_PIPELINE": "null"}, kind="rules", parent="v1")
+    runner.tick()
+    real_restart, calls = worker.restart, {"n": 0}
+
+    def breaks_once():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Start-ScheduledTask failed")
+        real_restart()
+
+    runner._restart_worker_now = breaks_once
+    runner.tick()
+    assert row(table, "v2")["status"] == "candidate"
+    assert release.read_pointer(root) == release.Pointer(live="v1")
+    runner.tick()
+    assert row(table, "v2")["status"] == "parallel"
+    assert release.read_pointer(root) == release.Pointer(live="v1", candidate="v2")
+
+
+def test_a_worker_found_running_without_the_candidate_is_restarted_once(root, table):
+    worker = Worker(root)
+    runner = running_in_parallel(root, table, worker)
+    release.write_worker_status(root, live="v1", candidate=None)  # as if a later restart had not taken the candidate
+    restarts = worker.restarts
+    assert runner.tick() == [("restart_worker",)]
+    assert worker.restarts == restarts + 1
+    assert runner.tick() == []
+
+
+def test_a_restart_that_changes_nothing_is_not_repeated_every_minute(root, table):
+    worker = Worker(root)
+    runner = running_in_parallel(root, table, worker)
+    worker.loads = False
+    release.write_worker_status(root, live="v1", candidate=None)
+    assert runner.tick() == [("restart_worker",)]
+    assert runner.tick() == []  # asked a moment ago: wait before asking again

@@ -30,6 +30,7 @@ STATUS_FILE = release.CANDIDATE_STATUS_FILE
 MAX_HELD = 12  # frames of one window kept in memory for the candidate
 LATE_LIMIT = 3  # windows in a row the candidate could not finish before it is stopped
 LOAD_TIMES_KEPT = 5
+DIED_LOADING_LIMIT = 2  # starts in a row that ended while this candidate was loading: it is not loaded again
 
 
 def _now() -> str:
@@ -68,6 +69,7 @@ class CandidateRunner:
             "late": self._late,
             "errors": self._errors,
             "load_times": self._load_times,
+            "loads_unfinished": 0,
             "stopped": self.stopped,
         }
 
@@ -135,7 +137,11 @@ class CandidateRunner:
 
 def load_candidate(root: Path, base_env: Mapping[str, str], models_dir: str, sampled: bool) -> CandidateRunner | None:
     """The runner of the candidate that live.json names, or None: no candidate, a worker that reads the stream all
-    the time (there is no idle time to run it in), or a candidate that cannot be loaded. Never raises."""
+    the time (there is no idle time to run it in), or a candidate that cannot be loaded. Never raises.
+
+    The attempt is written to candidate-status.json before the load begins, so a worker that dies while loading the
+    candidate (a native crash takes the whole process) leaves a trace: after DIED_LOADING_LIMIT such starts in a row
+    the candidate is left out and the live release comes up alone. The job runner then takes it out of live.json."""
     root = Path(root)
     status_path = root / STATUS_FILE
     try:
@@ -145,16 +151,37 @@ def load_candidate(root: Path, base_env: Mapping[str, str], models_dir: str, sam
         return None
     if not version:
         return None
-    if not sampled:
-        log.warning("candidate %s is not run: the worker reads the stream continuously", version)
-        return None
     load_times: list[str] = []
+    unfinished = 0
     try:
         old = json.loads(status_path.read_text(encoding="utf-8"))
         if old.get("candidate") == version:
             load_times = [str(t) for t in old.get("load_times") or []]
-    except (OSError, ValueError):
+            unfinished = int(old.get("loads_unfinished") or 0)
+    except (OSError, ValueError, TypeError):
         pass
+
+    def status(stopped: str | None, times: list[str], still_loading: int = 0, errors: int = 0) -> dict:
+        return {
+            "candidate": version,
+            "windows": 0,
+            "late": 0,
+            "errors": errors,
+            "load_times": times,
+            "loads_unfinished": still_loading,
+            "stopped": stopped,
+        }
+
+    if not sampled:
+        log.warning("candidate %s is not run: the worker reads the stream continuously", version)
+        _write_status(status_path, status("not run: the worker reads the stream continuously", load_times))
+        return None
+    if unfinished >= DIED_LOADING_LIMIT:
+        log.error("candidate %s is left out: the worker died %d times while loading it", version, unfinished)
+        _write_status(status_path, status("error: the worker died twice while loading it", load_times, unfinished, 1))
+        return None
+    load_times = (load_times + [_now()])[-LOAD_TIMES_KEPT:]
+    _write_status(status_path, status(None, load_times, unfinished + 1))
     try:
         candidate = release.load_release(root, version)
         pipeline = load_pipeline(
@@ -162,19 +189,9 @@ def load_candidate(root: Path, base_env: Mapping[str, str], models_dir: str, sam
         )
     except Exception as exc:  # noqa: BLE001 - the live release must start whatever the candidate does
         log.exception("candidate %s could not be loaded", version)
-        _write_status(
-            status_path,
-            {
-                "candidate": version,
-                "windows": 0,
-                "late": 0,
-                "errors": 1,
-                "load_times": load_times,
-                "stopped": f"error: {type(exc).__name__}",
-            },
-        )
+        _write_status(status_path, status(f"error: {type(exc).__name__}", load_times, 0, 1))
         return None
-    runner = CandidateRunner(pipeline, version, status_path, load_times=(load_times + [_now()])[-LOAD_TIMES_KEPT:])
+    runner = CandidateRunner(pipeline, version, status_path, load_times=load_times)
     runner.write_status()
     log.info("candidate %s loaded (%s)", version, pipeline.name)
     return runner

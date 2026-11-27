@@ -3025,3 +3025,46 @@ def test_a_request_about_something_unknown_is_refused(monkeypatch: pytest.Monkey
     unknown = {"camera_id": "CAM-S01-A", "action": "discard", "version_id": "v9"}
     assert _call(api, "POST", REQUEST, body=unknown, **admin)[0] == 404
     assert "request" not in _state_row()
+
+
+@mock_aws
+def test_the_versions_route_reads_the_frames_of_the_run_by_key_and_only_those(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _versions_seed(EASY_CRITERIA)
+    for hour in range(8, 14):
+        _judge_hour(api, ingest, hour)
+    # a labelled frame of the day before the parallel run started that carries the candidate's id by mistake,
+    # and one of another camera: neither belongs to this run
+    judged = _audits()["AUD-CAM-S01-A-20261121-08"]
+    before = {**judged, "audit_id": "AUD-CAM-S01-A-20261120-08", "capture_timestamp": "2026-11-20T08:07:00+07:00"}
+    other = {**judged, "audit_id": "AUD-CAM-S01-B-20261121-08", "camera_id": "CAM-S01-B"}
+    for item in (before, other):
+        _table("test-audits").put_item(Item=item)
+    real_scan = api._scan_all
+
+    def never_the_audits(table, **kwargs):
+        assert table.name != "test-audits", "the audits table grows for good: it is read by key, not scanned"
+        return real_scan(table, **kwargs)
+
+    monkeypatch.setattr(api, "_scan_all", never_the_audits)
+    status, body = _call(api, "GET", "/v1/model/versions")
+    assert status == 200
+    tally = body["cameras"][0]["candidate"]["tally"]
+    assert (tally["frames"], tally["cand_wins"]) == (6, 6)
+
+
+@mock_aws
+def test_a_request_to_put_live_a_row_left_behind_is_refused(monkeypatch: pytest.MonkeyPatch):
+    api, _ingest_module = _backend(monkeypatch)
+    _versions_seed(EASY_CRITERIA)
+    left = {
+        "camera_id": "CAM-S01-A",
+        "version_id": "v3",
+        "status": "parallel",
+        "kind": "rules",
+        "criteria": EASY_CRITERIA,
+    }
+    _table("test-model-versions").put_item(Item=common.to_dynamodb_safe(left))
+    body = {"camera_id": "CAM-S01-A", "action": "put_live", "version_id": "v3"}
+    status, answer = _call(api, "POST", REQUEST, groups="team_admin", body=body)
+    assert (status, answer["message"]) == (409, "Only the candidate that is running now can be put live.")

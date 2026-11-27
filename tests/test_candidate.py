@@ -222,3 +222,76 @@ def test_load_times_start_again_for_another_candidate(tmp_path):
     load_candidate(tmp_path, {}, "", sampled=True)
     status = json.loads((tmp_path / candidate.STATUS_FILE).read_text(encoding="utf-8"))
     assert (status["candidate"], len(status["load_times"])) == ("v3", 1)
+
+
+def read_status(root):
+    return json.loads((root / candidate.STATUS_FILE).read_text(encoding="utf-8"))
+
+
+def test_the_attempt_to_load_is_written_down_before_the_load_begins(tmp_path, monkeypatch):
+    write_pointer_with_candidate(tmp_path, "v1", "v2")
+    during = {}
+
+    def loading(kind, models_dir, env=None):
+        during.update(read_status(tmp_path))  # what a worker that died right here would leave behind
+        return FakePipeline()
+
+    monkeypatch.setattr(candidate, "load_pipeline", loading)
+    assert load_candidate(tmp_path, {}, "", sampled=True) is not None
+    assert (during["candidate"], during["loads_unfinished"], len(during["load_times"])) == ("v2", 1, 1)
+    assert read_status(tmp_path)["loads_unfinished"] == 0
+
+
+def test_a_candidate_the_worker_died_loading_twice_is_not_loaded_a_third_time(tmp_path, monkeypatch):
+    write_pointer_with_candidate(tmp_path, "v1", "v2")
+    left = {
+        "candidate": "v2",
+        "windows": 0,
+        "late": 0,
+        "errors": 0,
+        "load_times": [],
+        "loads_unfinished": 2,
+        "stopped": None,
+    }
+    (tmp_path / candidate.STATUS_FILE).write_text(json.dumps(left), encoding="utf-8")
+    loads = []
+    monkeypatch.setattr(candidate, "load_pipeline", lambda *args, **kwargs: loads.append(1) or FakePipeline())
+    assert load_candidate(tmp_path, {}, "", sampled=True) is None
+    assert loads == []
+    assert read_status(tmp_path)["stopped"] == "error: the worker died twice while loading it"
+
+
+def test_unfinished_loads_of_another_candidate_do_not_count(tmp_path):
+    write_pointer_with_candidate(tmp_path, "v1", "v2")
+    left = {
+        "candidate": "v9",
+        "windows": 0,
+        "late": 0,
+        "errors": 0,
+        "load_times": [],
+        "loads_unfinished": 2,
+        "stopped": None,
+    }
+    (tmp_path / candidate.STATUS_FILE).write_text(json.dumps(left), encoding="utf-8")
+    assert load_candidate(tmp_path, {}, "", sampled=True) is not None
+    assert read_status(tmp_path)["loads_unfinished"] == 0
+
+
+def test_a_candidate_that_failed_to_load_did_not_die_loading(tmp_path, monkeypatch):
+    write_pointer_with_candidate(tmp_path, "v1", "v2")
+
+    def broken(kind, models_dir, env=None):
+        raise FileNotFoundError("weights not found")
+
+    monkeypatch.setattr(candidate, "load_pipeline", broken)
+    for _ in range(3):
+        assert load_candidate(tmp_path, {}, "", sampled=True) is None
+    status = read_status(tmp_path)
+    assert (status["stopped"], status["loads_unfinished"]) == ("error: FileNotFoundError", 0)
+
+
+def test_a_candidate_not_run_because_the_stream_is_read_all_the_time_says_so(tmp_path):
+    write_pointer_with_candidate(tmp_path, "v1", "v2")
+    assert load_candidate(tmp_path, {}, "", sampled=False) is None
+    status = read_status(tmp_path)
+    assert (status["candidate"], status["stopped"]) == ("v2", "not run: the worker reads the stream continuously")

@@ -1868,12 +1868,33 @@ def _handle_model_health(event: dict[str, Any], ddb) -> dict[str, Any]:
     return _json_response(200, {"items": items}, event)
 
 
+def _run_audits(ddb, camera_id: str, version: dict[str, Any]) -> list[dict[str, Any]]:
+    """The scoring and comparison frames of one camera from the day a release's parallel run started, read by
+    key (ids are AUD-/CMP-<camera>-<YYYYMMDD>-…). The audits table keeps every frame for good and this is asked
+    for by every open Model page, so it is never scanned here."""
+    newest = (
+        ddb.Table(CAPTURES_TABLE)
+        .query(KeyConditionExpression=Key("camera_id").eq(camera_id), ScanIndexForward=False, Limit=1)
+        .get("Items", [])
+    )
+    if not newest:
+        return []
+    store = Key("store_id").eq(newest[0]["store_id"])
+    since = str(version.get("parallel_started_at") or version.get("created_at") or "")[:10].replace("-", "")
+    table = ddb.Table(AUDITS_TABLE)
+    items: list[dict[str, Any]] = []
+    for kind in ("AUD", "CMP"):
+        low, high = f"{kind}-{camera_id}-{since}", f"{kind}-{camera_id}-~"
+        items.extend(_query_all(table, KeyConditionExpression=store & Key("audit_id").between(low, high)))
+    return items
+
+
 def _candidate_report(ddb, camera_id: str, version: dict[str, Any]) -> dict[str, Any]:
     """How a candidate stands against the live release, from the frames people have labelled that show both."""
     version_id = version["version_id"]
     audits = [
         _whole_audit(a)
-        for a in _scan_all(ddb.Table(AUDITS_TABLE))
+        for a in _run_audits(ddb, camera_id, version)
         if a.get("candidate_version") == version_id and a.get("camera_id") == camera_id
     ]
     counted = compare.tally(audits, version_id)

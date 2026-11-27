@@ -1,8 +1,18 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { ApiCameraVersions, ApiModelVersions, VersionAction } from "@/lib/api";
-import { canPutLive, requestStatus, runLine, sinceText, skuRows, statusText, verdictText } from "@/lib/model-versions";
+import {
+  canPutLive,
+  pollDelay,
+  requestStatus,
+  runLine,
+  runnerQuiet,
+  sinceText,
+  skuRows,
+  statusText,
+  verdictText,
+} from "@/lib/model-versions";
 
 interface ModelVersionsProps {
   load: () => Promise<ApiModelVersions>;
@@ -38,12 +48,15 @@ export function ModelVersions({ load, send, isAdmin, names }: ModelVersionsProps
   const [asking, setAsking] = useState<Asking | null>(null);
   const [sending, setSending] = useState(false);
   const [tick, setTick] = useState(0);
+  const [readAt, setReadAt] = useState(0); // when the data on screen was read: the clock the block judges by
 
   useEffect(() => {
     let cancelled = false;
     load()
       .then((res) => {
-        if (!cancelled) setData(res.cameras);
+        if (cancelled) return;
+        setData(res.cameras);
+        setReadAt(Date.now());
       })
       .catch(() => {
         // the rest of the Model page does not depend on this block: it stays hidden until it can be read
@@ -54,12 +67,19 @@ export function ModelVersions({ load, send, isAdmin, names }: ModelVersionsProps
     };
   }, [load, tick]);
 
-  // while a request waits for the counting machine, look again every few seconds; otherwise once a minute
+  // while a request waits for a counting machine that gives signs of life, look again every few seconds, for
+  // two minutes at most; otherwise once a minute
   const waiting = (data ?? []).some((c) => requestStatus(c.state).kind === "waiting");
+  const waitingSince = useRef<number | null>(null);
   useEffect(() => {
-    const timer = setTimeout(() => setTick((n) => n + 1), waiting ? 5000 : 60000);
+    const now = Date.now();
+    if (!waiting) waitingSince.current = null;
+    else if (waitingSince.current === null) waitingSince.current = now;
+    const quiet = (data ?? []).every((c) => runnerQuiet(c.state.runner_seen_at, now));
+    const delay = pollDelay({ waiting, quiet, waitedMs: waitingSince.current === null ? 0 : now - waitingSince.current });
+    const timer = setTimeout(() => setTick((n) => n + 1), delay);
     return () => clearTimeout(timer);
-  }, [waiting, tick]);
+  }, [waiting, tick, data]);
 
   const confirm = useCallback(async () => {
     if (!asking) return;
@@ -86,6 +106,7 @@ export function ModelVersions({ load, send, isAdmin, names }: ModelVersionsProps
         const request = requestStatus(state);
         const busy = sending || request.kind === "waiting";
         const rows = candidate ? skuRows(candidate.tally.per_sku, names) : [];
+        const quiet = runnerQuiet(state.runner_seen_at, readAt);
         const askingHere = asking?.cameraId === camera.camera_id ? asking : null;
         return (
           <div
@@ -144,7 +165,13 @@ export function ModelVersions({ load, send, isAdmin, names }: ModelVersionsProps
               </p>
             )}
 
-            {request.kind === "waiting" && (
+            {quiet && (
+              <p data-runner-quiet className="mt-2 text-[#B91C1C]">
+                The counting machine has not answered since {sinceText(state.runner_seen_at)}. A request waits
+                until it is back, and is dropped if that takes more than 30 minutes.
+              </p>
+            )}
+            {request.kind === "waiting" && !quiet && (
               <p data-version-request="waiting" className="mt-2 text-[#92400E]">
                 Waiting for the counting machine…
               </p>
