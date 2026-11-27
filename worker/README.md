@@ -38,15 +38,61 @@ python -m milk.counter --env ~/milk-camera/worker.env
 
 ## Phiên bản model
 
-Mỗi kết quả worker lưu đều có trường `model_version`. Trang Model trên website dựa vào trường này
-để so trước và sau mỗi lần đổi model. Mỗi lần đổi trọng số thì đặt lại biến trong `worker.env`, ví dụ:
+Mỗi kết quả worker lưu đều có trường `model_version`. Trang Model trên website dựa vào trường này để so trước và sau
+mỗi lần đổi model. Kết quả còn có `detections`: từng hộp với độ tin cậy riêng của nó.
+
+Có hai cách đặt model cho worker. Cách thứ hai là cách dùng trên máy đếm thật.
+
+### Cách cũ: biến trong `worker.env`
+
+Khi `worker.env` không có `MILK_RELEASES_DIR`, worker đọc `MILK_PIPELINE`, các biến `MILK_LONG_*`, `MILK_SLIDE_*` và
+`MILK_MODEL_VERSION` thẳng từ file đó. Không đặt `MILK_MODEL_VERSION` thì worker tự ghép `MILK_PIPELINE` với tên thư
+mục chứa `MILK_SLIDE_WEIGHTS`, ví dụ `long+slide:runs_v3`.
+
+### Bản chạy (release) và trang Model
+
+Khi `worker.env` có `MILK_RELEASES_DIR=<thư mục>`, worker bỏ qua các biến model trong `worker.env` và đọc chúng từ một
+*bản chạy*. Thiết kế: `docs/superpowers/specs/2026-11-27-operations-loop-design.md`, mục 5.2.
 
 ```
-MILK_MODEL_VERSION=long-2026-10-13+slide-v3
+<MILK_RELEASES_DIR>\
+  live.json                  {"live": "<id>", "previous": "<id>"|null, "candidate": "<id>"|null}
+  <id>\release.json          các biến model của bản đó, và tiêu chí để chấm khi nó chạy song song
+  worker-status.json         worker ghi lúc khởi động: nó đã nạp bản nào
+  candidate-status.json      worker ghi về bản ứng viên: số lượt đọc, số lượt trễ, lý do dừng
 ```
 
-Không đặt thì worker tự ghép `MILK_PIPELINE` với tên thư mục chứa `MILK_SLIDE_WEIGHTS`, ví dụ
-`long+slide:runs_v3`. Kết quả còn có `detections`: từng hộp với độ tin cậy riêng của nó.
+- **`live`** là bản worker đang chạy. Id của nó là `model_version` trên mọi kết quả.
+- **`candidate`** là bản chạy song song: nó đọc lại đúng các frame bản live vừa lưu, sau khi lượt đọc đã xong. Kết quả
+  của nó được lưu riêng và không hiện cho người xem. Worker chỉ chạy bản ứng viên khi đọc theo nhịp
+  (`MILK_SAMPLE_EVERY_S` lớn hơn 0).
+- **Một bản chạy chứa trọn bộ biến model.** Biến nào bản đó không ghi thì coi như không đặt, dù `worker.env` có ghi.
+- **`live.json` hoặc bản live đọc không được thì worker dừng**, không lặng lẽ chạy bằng biến cũ. Bản ứng viên hỏng thì
+  bản live vẫn chạy.
+
+**Tạo một bản chạy:**
+
+```
+python -m ops.make_release --root C:\Users\huyho\Datagent\releases --id <id mới> --kind rules ^
+    --from-release <id bản đang live> --set MILK_SLIDE_CONF=0.35
+```
+
+`--kind` là `detector` (đổi trọng số), `gallery` (đổi kho ảnh), `rules` (đổi luật đọc) hoặc `baseline`. Một bản đã tạo
+không bao giờ bị ghi đè. Tạo xong không đổi gì ở bản live.
+
+**Đưa một bản lên chạy thật:** không sửa file nào bằng tay. Task `milk-ops` (`worker\windows\run-ops.ps1`, chạy
+`python -m ops.runner`) thấy thư mục mới, cho nó chạy song song với bản live, và chép số liệu lên website. Trên trang
+Model, khối "Model versions" hiện kết luận từ các frame người đã chấm; `team_admin` bấm `Put live`, `Discard` hoặc
+`Roll back`. `milk-ops` đổi `live.json`, khởi động lại task `milk-worker`, và chỉ báo xong khi `worker-status.json`
+ghi đúng bản mới.
+
+**Khi `milk-ops` hỏng** (log ở `logs\ops-<ngày>.log`):
+
+1. Đổi bằng tay: sửa `live.json` cho `live` trỏ tới bản muốn chạy, để `candidate` là `null`, rồi
+   `Stop-ScheduledTask milk-worker; Start-ScheduledTask milk-worker`. Khi `milk-ops` chạy lại, nó lấy `live.json` làm
+   chuẩn và sửa bảng trên website theo.
+2. Bỏ hẳn cách này: xoá dòng `MILK_RELEASES_DIR` khỏi `worker.env` và khởi động lại task. Worker quay về đọc biến trong
+   `worker.env` như cách cũ.
 
 ## Chạy trên Windows (máy HUYHOANG, từ 23/11)
 
