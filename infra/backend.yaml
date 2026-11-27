@@ -286,6 +286,29 @@ Resources:
         - AttributeName: audit_id
           KeyType: RANGE
 
+  # Model page: the releases of each camera's worker and the request the website made (operations-loop design 5.2)
+  ModelVersionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain  # who put which version live, and when
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "milk-backend-${Env}-model-versions"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: camera_id
+          AttributeType: S
+        - AttributeName: version_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: camera_id
+          KeyType: HASH
+        - AttributeName: version_id
+          KeyType: RANGE
+
   # Model page: one health item per camera-hour, kept 90 days
   ModelHealthTable:
     Type: AWS::DynamoDB::Table
@@ -622,6 +645,7 @@ Resources:
                   - !GetAtt ModelHealthTable.Arn
                   - !GetAtt ShelfTable.Arn
                   - !GetAtt ShelfEventsTable.Arn
+                  - !GetAtt ModelVersionsTable.Arn
               - Effect: Allow
                 Action:
                   - dynamodb:DeleteItem
@@ -684,6 +708,7 @@ Resources:
           MODEL_HEALTH_TABLE: !Ref ModelHealthTable
           SHELF_TABLE: !Ref ShelfTable
           SHELF_EVENTS_TABLE: !Ref ShelfEventsTable
+          MODEL_VERSIONS_TABLE: !Ref ModelVersionsTable
           ANALYTICS_BUCKET: !Ref AnalyticsBucket
           HUB_BUCKET: !Ref HubDataBucket
           ALLOWED_ORIGINS: !Ref AllowedOrigins
@@ -710,6 +735,7 @@ Resources:
           SHELF_TABLE: !Ref ShelfTable
           SHELF_EVENTS_TABLE: !Ref ShelfEventsTable
           STORE_LIST_TABLE: !Ref StoreListTable
+          MODEL_VERSIONS_TABLE: !Ref ModelVersionsTable
           ANALYTICS_BUCKET: !Ref AnalyticsBucket
           CAPTURE_TTL_DAYS: "7"
 

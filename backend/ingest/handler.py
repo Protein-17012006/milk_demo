@@ -53,6 +53,7 @@ HEALTH_TTL_DAYS = 90
 SHELF_TABLE = os.environ.get("SHELF_TABLE", "")
 SHELF_EVENTS_TABLE = os.environ.get("SHELF_EVENTS_TABLE", "")
 STORE_LIST_TABLE = os.environ.get("STORE_LIST_TABLE", "")
+MODEL_VERSIONS_TABLE = os.environ.get("MODEL_VERSIONS_TABLE", "")
 # The shelf tick and the recompute copy event photos inside this Lambda's 60 s: a hung S3 call gives up fast
 PHOTO_S3_CONFIG = Config(connect_timeout=3, read_timeout=10, retries={"max_attempts": 2})
 
@@ -273,6 +274,39 @@ def ingest_capture(
         "skus_updated": len(seen_skus),
         "flagged_rows": record["flagged_rows"],
     }
+
+
+CANDIDATE_FIELDS = ("camera_id", "capture_id", "candidate_version", "detections")
+
+
+def ingest_candidate(raw: dict[str, Any], ddb_resource=None) -> dict[str, Any]:
+    """A candidate release's boxes for a capture the live release has already read (operations-loop design 5.2):
+    kept on that capture's row and nowhere else. Stock, the review queue, the shelf numbers and CV Output
+    know only the live release. A result whose capture is not there, or that lacks a field, is skipped and
+    logged, never raised: nobody sees a candidate's result, so it must not fill the dead-letter queue."""
+    capture_id = raw.get("capture_id") if isinstance(raw, dict) else None
+    missing = [f for f in CANDIDATE_FIELDS if not isinstance(raw, dict) or raw.get(f) is None]
+    if missing:
+        print(json.dumps({"candidate_skipped": capture_id, "reason": f"missing {missing}"}))
+        return {"status": "skipped", "reason": f"missing {missing}", "capture_id": capture_id}
+    if ddb_resource is None:
+        _, ddb_resource = _aws_clients()
+    try:
+        ddb_resource.Table(CAPTURES_TABLE).update_item(
+            Key={"camera_id": raw["camera_id"], "capture_id": capture_id},
+            UpdateExpression="SET candidate_version = :v, candidate_detections_json = :d",
+            ConditionExpression="attribute_exists(capture_id)",
+            ExpressionAttributeValues={
+                ":v": str(raw["candidate_version"]),
+                ":d": json.dumps(raw["detections"], separators=(",", ":")),
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+        print(json.dumps({"candidate_skipped": capture_id, "reason": "no capture"}))
+        return {"status": "skipped", "reason": "no capture", "capture_id": capture_id}
+    return {"status": "stored", "capture_id": capture_id}
 
 
 def _record_display(table, store_id: str, camera_id: str, capture_ts: str, visible: bool) -> None:
@@ -1104,6 +1138,9 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
                 continue
             obj = s3_client.get_object(Bucket=bucket, Key=key)
             raw = json.loads(obj["Body"].read().decode("utf-8"))
+            if key.endswith(".candidate.json"):  # a candidate release's boxes for a capture, not a capture
+                processed.append(ingest_candidate(raw, ddb_resource))
+                continue
             rec = _normalize_record(raw, source_bucket=bucket)
             processed.append(ingest_capture(rec, s3_client=s3_client, ddb_resource=ddb_resource))
 

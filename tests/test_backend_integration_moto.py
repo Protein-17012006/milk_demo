@@ -63,6 +63,7 @@ def _create_mock_infra(region: str = "ap-southeast-1"):
         ("test-model-health", "camera_id", "hour"),
         ("test-shelf", "store_id", "key"),
         ("test-shelf-events", "store_id", "event_key"),
+        ("test-model-versions", "camera_id", "version_id"),
     ]
     for name, pk, sk in tables:
         key_schema = [{"AttributeName": pk, "KeyType": "HASH"}]
@@ -103,6 +104,7 @@ def _backend(monkeypatch: pytest.MonkeyPatch):
         "MODEL_HEALTH_TABLE": "test-model-health",
         "SHELF_TABLE": "test-shelf",
         "SHELF_EVENTS_TABLE": "test-shelf-events",
+        "MODEL_VERSIONS_TABLE": "test-model-versions",
         "ANALYTICS_BUCKET": "test-analytics-bucket",
         "HUB_BUCKET": "test-hub-bucket",
     }
@@ -2585,3 +2587,85 @@ def test_model_summary_names_every_model_label(monkeypatch: pytest.MonkeyPatch):
     names = _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1]["sku_names"]
     assert names["TMP-MLK-TH-01"] == TH_OLD  # a label whose own row no longer shows in /products
     assert names["cheese145"] == CHEESE
+
+
+# --- a candidate release's results (operations-loop design 5.2) -------------------------------------------------
+
+OTHER_TABLES = (
+    "test-latest-stock",
+    "test-review-queue",
+    "test-audits",
+    "test-model-health",
+    "test-shelf",
+    "test-shelf-events",
+    "test-corrections",
+    "test-model-versions",
+)
+
+
+def _candidate(hhmmss: str, version: str = "v2", boxes: int = 3, camera_id: str = "CAM-S01-A") -> dict:
+    return {
+        "camera_id": camera_id,
+        "capture_id": f"CAP-S01-20261121-{hhmmss}",
+        "capture_timestamp": f"2026-11-21T{hhmmss[:2]}:{hhmmss[2:4]}:{hhmmss[4:6]}+07:00",
+        "candidate_version": version,
+        "processing_time_ms": 300,
+        "detections": [{"sku_id": "hot160", "conf": 0.9, "box": [10 + 60 * k, 20, 50, 80]} for k in range(boxes)],
+    }
+
+
+def _snapshot(names=OTHER_TABLES) -> dict[str, list[str]]:
+    return {n: sorted(json.dumps(i, default=str, sort_keys=True) for i in _table(n).scan()["Items"]) for n in names}
+
+
+def _capture_row(hhmmss: str, camera_id: str = "CAM-S01-A") -> dict | None:
+    key = {"camera_id": camera_id, "capture_id": f"CAP-S01-20261121-{hhmmss}"}
+    return _table("test-captures").get_item(Key=key).get("Item")
+
+
+def test_a_candidate_result_updates_only_its_capture(monkeypatch: pytest.MonkeyPatch):
+    with mock_aws():
+        _api, ingest = _backend(monkeypatch)
+        _ingest(ingest, "CAM-S01-A", "101500", [("hot160", 5)])
+        before = _snapshot()
+        ddb = boto3.resource("dynamodb", region_name="ap-southeast-1")
+        out = ingest.ingest_candidate(_candidate("101500"), ddb)
+        row = _capture_row("101500")
+        assert out["status"] == "stored"
+        assert row["candidate_version"] == "v2" and len(json.loads(row["candidate_detections_json"])) == 3
+        assert row["units_found"] == 5  # the live reading stays as it was
+        assert _snapshot() == before
+
+
+def test_a_candidate_result_without_its_capture_is_skipped(monkeypatch: pytest.MonkeyPatch):
+    with mock_aws():
+        _api, ingest = _backend(monkeypatch)
+        ddb = boto3.resource("dynamodb", region_name="ap-southeast-1")
+        assert ingest.ingest_candidate(_candidate("999999"), ddb)["status"] == "skipped"
+        assert _capture_row("999999") is None
+
+
+def test_a_candidate_result_with_a_field_missing_is_skipped_not_raised(monkeypatch: pytest.MonkeyPatch):
+    with mock_aws():
+        _api, ingest = _backend(monkeypatch)
+        _ingest(ingest, "CAM-S01-A", "101500", [("hot160", 5)])
+        ddb = boto3.resource("dynamodb", region_name="ap-southeast-1")
+        broken = {k: v for k, v in _candidate("101500").items() if k != "candidate_version"}
+        assert ingest.ingest_candidate(broken, ddb)["status"] == "skipped"
+        assert "candidate_version" not in _capture_row("101500")
+
+
+def test_the_queue_sends_a_candidate_file_to_its_own_path(monkeypatch: pytest.MonkeyPatch):
+    with mock_aws():
+        api, ingest = _backend(monkeypatch)
+        _ingest(ingest, "CAM-S01-A", "101500", [("hot160", 5)])
+        units_before = _units(api)
+        key = "results/CAM-S01-A/2026-11-21/CAP-S01-20261121-101500.candidate.json"
+        boto3.client("s3", region_name="ap-southeast-1").put_object(
+            Bucket="test-hub-bucket", Key=key, Body=json.dumps(_candidate("101500", boxes=9)).encode()
+        )
+        s3_event = {"Records": [{"s3": {"bucket": {"name": "test-hub-bucket"}, "object": {"key": key}}}]}
+        out = ingest.lambda_handler({"Records": [{"body": json.dumps(s3_event)}]})
+        assert out["results"] == [{"status": "stored", "capture_id": "CAP-S01-20261121-101500"}]
+        assert _capture_row("101500")["candidate_version"] == "v2"
+        assert _units(api) == units_before
