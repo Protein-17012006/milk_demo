@@ -1,8 +1,9 @@
 import os
 
 import pytest
+from test_release import write_release
 
-from milk import config
+from milk import config, release
 
 
 def test_env_file_fills_missing_settings_but_never_overrides(tmp_path, monkeypatch):
@@ -125,3 +126,29 @@ def test_bad_display_zone_is_rejected(monkeypatch):
     monkeypatch.setenv("MILK_DISPLAY_ZONE", "0.1,0.2,0.8")
     with pytest.raises(ValueError, match="MILK_DISPLAY_ZONE"):
         config.load()
+
+
+def test_load_takes_the_live_release(tmp_path, monkeypatch):
+    write_release(tmp_path, "v1", env={"MILK_PIPELINE": "null"})
+    release.write_pointer(tmp_path, release.Pointer(live="v1", previous=None, candidate=None))
+    monkeypatch.setenv("MILK_RELEASES_DIR", str(tmp_path))
+    monkeypatch.setenv("MILK_PIPELINE", "long+slide")
+    monkeypatch.setenv("MILK_SLIDE_WEIGHTS", "stale.pt")
+    monkeypatch.setenv("MILK_MODEL_VERSION", "by-hand")
+    settings = config.load()
+    assert (settings.pipeline, settings.model_version) == ("null", "v1")
+    assert "MILK_SLIDE_WEIGHTS" not in os.environ
+
+
+def test_load_stops_when_the_live_release_is_missing(tmp_path, monkeypatch):
+    release.write_pointer(tmp_path, release.Pointer(live="gone", previous=None, candidate=None))
+    monkeypatch.setenv("MILK_RELEASES_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="gone"):
+        config.load()
+
+
+def test_load_without_releases_dir_is_unchanged(monkeypatch):
+    monkeypatch.delenv("MILK_RELEASES_DIR", raising=False)
+    monkeypatch.setenv("MILK_PIPELINE", "null")
+    monkeypatch.setenv("MILK_MODEL_VERSION", "by-hand")
+    assert config.load().model_version == "by-hand"

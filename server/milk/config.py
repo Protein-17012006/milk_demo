@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from pathlib import PurePath
+from pathlib import Path, PurePath
+
+from . import release
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -105,10 +107,23 @@ def _flag(name: str, default: bool) -> bool:
     return default if value is None else value.strip().lower() not in ("0", "false", "no", "off")
 
 
+def use_live_release(root: Path) -> None:
+    """Puts the live release's model settings into the environment in place of any that are there: the adapters and
+    Settings read them from it. A live.json or release that cannot be read raises, which stops the worker."""
+    live = release.load_release(root, release.read_pointer(root).live)
+    env = release.model_env(os.environ, live)
+    for key in [k for k in os.environ if release.is_model_key(k)]:
+        del os.environ[key]
+    os.environ.update({k: v for k, v in env.items() if release.is_model_key(k)})
+
+
 def load(env_file: str | None = None) -> Settings:
     env_file = env_file or _env("MILK_ENV_FILE")
     if env_file:
         load_env_file(env_file)
+    releases_dir = _env("MILK_RELEASES_DIR")
+    if releases_dir:
+        use_live_release(Path(releases_dir))
     camera_path = _env("MILK_CAMERA_PATH", "cam-s01-a")
     sample_every_s, sample_for_s = _sampling()
     return Settings(
