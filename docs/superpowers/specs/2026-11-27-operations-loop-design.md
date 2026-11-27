@@ -1,6 +1,6 @@
 # Vòng vận hành lâu dài: gán nhãn, train và đưa model lên chạy thật — thiết kế
 
-Ngày 27/11/2026. Trạng thái: bản nháp, chờ hoang duyệt.
+Ngày 27/11/2026. Trạng thái: chờ hoang duyệt. Hai câu hỏi ở mục 5.9 đã được hoang trả lời ngày 27/11.
 
 Đây là bản thiết kế chung cho cả vòng: mỗi phần làm gì và nối với phần khác thế nào. Năm phần ở mục 5 được lên kế hoạch và làm lần lượt, mỗi phần một kế hoạch riêng.
 
@@ -97,7 +97,7 @@ Liên quan:
 - Không ghi đè file worker đang dùng (`TRAINING.md`).
 
 **Quyền và tiền:**
-- Hiện chỉ laptop có quyền AWS. HUYHOANG chỉ có token của hub.
+- HUYHOANG đã có quyền AWS (hoang, 27/11: *"máy HUYHOANG có rồi"*). Kiểm ngày 27/11: `%USERPROFILE%\.aws` có profile `milk`, vùng `ap-southeast-1`. AWS CLI chưa cài trên máy đó, và chưa có lệnh gọi AWS nào được thử bằng profile này. Câu "chỉ laptop có quyền AWS" trong thiết kế auto-label (25/11) không còn đúng.
 - Tài khoản AWS chạy tối đa 10 Lambda cùng lúc.
 - Ảnh worker gửi về hub tốn tiền truyền dữ liệu. Worker đang đọc luồng 30 giây mỗi 5 phút để giảm tiền.
 
@@ -224,8 +224,10 @@ Ba dòng việc (sản phẩm mới, vòng chậm, vòng nhanh) đều kết th�
 - `worker.env` không còn được sửa tay để đổi model. Cách sửa tay vẫn dùng được khi máy chạy việc hỏng, và ghi trong `TRAINING.md`.
 
 **Máy chạy việc nói chuyện với backend thế nào.**
-- Nó gọi API của backend bằng một tài khoản máy riêng, chỉ dùng được một nhóm route mới (đọc nhãn, ghi phiên bản, nhận yêu cầu, đẩy frame review). Không đặt khoá AWS trên HUYHOANG *(đề xuất, cần hoang đồng ý: xem mục 5.9)*.
-- Worker giữ lại trên đĩa một bản của mỗi frame nó gửi đi, đúng bản đã làm mờ mặt, nên việc gom frame để train không cần quyền đọc S3 và không tốn tiền tải về *(đề xuất)*. Với nhịp đọc hiện nay là khoảng 1 GB một ngày, nên phải có hạn giữ; frame đã gán nhãn và frame đã dùng để train thì giữ lại. Danh sách frame nào là `AUD-` lấy qua API.
+- Nó dùng profile `milk` đã có trên HUYHOANG và đọc, ghi thẳng các bảng và bucket của backend, như các công cụ trong `training/store_view` đang làm từ laptop (đọc bảng audits, đẩy frame review). Không cần tài khoản máy mới hay route mới cho nó.
+- Nó nhận yêu cầu của website (đưa lên, quay lui, bỏ, train ngay) bằng cách đọc bảng phiên bản theo nhịp.
+- Việc đầu tiên của phần 1 là xác nhận profile `milk` đọc được bảng audits và ghi được vào bucket analytics.
+- Worker giữ lại trên đĩa một bản của mỗi frame nó gửi đi, đúng bản đã làm mờ mặt, nên việc gom frame để train không tốn tiền tải từ S3 về *(đề xuất)*. `harvest.py` vẫn dùng cho các frame có trước lúc đó. Với nhịp đọc hiện nay là khoảng 1 GB một ngày, nên phải có hạn giữ; frame đã gán nhãn và frame đã dùng để train thì giữ lại. Danh sách frame nào là `AUD-` lấy qua API.
 
 ### 5.3 Phần 2. Vòng nhanh: kho ảnh
 
@@ -271,7 +273,8 @@ Số frame đưa cho người mỗi ngày không tăng so với hiện nay, tr�
 **Frame biết trước đáp án.**
 - Cứ 10 frame trong hàng chờ thì có 1 frame đã có đáp án (lấy từ đáp án vẽ tay, hoặc frame mà hai người đã chấm giống nhau). Người chấm không được báo frame nào.
 - Kết quả là độ khớp của từng người theo tuần, chỉ `team_admin` thấy.
-- Nhãn của một người có độ khớp dưới ngưỡng chưa vào kho hay tập train cho tới khi một người khác xác nhận *(đề xuất, cần hoang đồng ý: xem mục 5.9)*.
+- Nhãn của một người có độ khớp dưới ngưỡng chưa vào kho hay tập train cho tới khi một người khác xác nhận.
+- Áp dụng cho mọi người gán, kể cả người của client. hoang đồng ý ngày 27/11 (*"làm theo đề xuất của bạn"*). Ngưỡng độ khớp do người làm đề xuất sau khi có số của vài tuần đầu.
 
 **Nhãn đáng ngờ.** Sau mỗi lần train, những box mà model mới bất đồng mạnh với nhãn được đưa vào danh sách xem lại, qua đường "Relabel them" đã có trên trang Model.
 
@@ -359,7 +362,14 @@ Phần 1 đi trước vì mọi phần khác cần cửa lên live. Phần 2 đi
 - Số ảnh tổng hợp cho mỗi sản phẩm, cách dựng cảnh trong Blender.
 - Cách viết test.
 
-### 5.9 Những điều Claude tự quyết, và hai điều cần hoang quyết
+### 5.9 Những điều hoang đã quyết, và những điều Claude tự quyết
+
+**hoang quyết ngày 27/11:**
+- Cách A: hai vòng, kho ảnh cộng với train định kỳ.
+- Model mới chạy song song với bản đang chạy rồi mới được đưa lên; người chấm quyết định ai thắng, tín hiệu máy chỉ để dừng sớm; một người duyệt.
+- Sản phẩm mới luôn bắt đầu bằng model 3D, ảnh tổng hợp và chạy thử.
+- Máy chạy việc trên HUYHOANG dùng quyền AWS đã có trên máy đó.
+- Đo độ khớp của từng người gán, kể cả người của client; chỉ `team_admin` thấy; nhãn của người có độ khớp thấp chờ người thứ hai xác nhận.
 
 **Claude tự quyết** (hoang đổi được):
 - Thứ tự năm phần. hoang đã nghe ngày 27/11 và không đổi.
@@ -371,10 +381,7 @@ Phần 1 đi trước vì mọi phần khác cần cửa lên live. Phần 2 đi
 - Frame dạy mỗi giờ chọn theo tín hiệu, tổng số frame không tăng.
 - Khi có ứng viên, frame chấm điểm hiện box gộp của hai bản. Số sót của bản live trên trang Model có thể tăng, vì lon mà chỉ ứng viên tìm ra được tính là sót của bản live.
 - Đáp án của các ngày giữ riêng mới lấy từ frame chấm điểm do người chấm, không còn do Claude vẽ tay.
-
-**Cần hoang quyết:**
-1. **Máy HUYHOANG có được giữ một tài khoản máy để gọi API của backend không?** Không có thì mọi việc đọc nhãn và ghi phiên bản vẫn phải qua laptop, và vòng không tự chạy được.
-2. **Có đo độ khớp của từng người gán không,** kể cả người của client, và nhãn của người có độ khớp thấp có phải chờ người thứ hai xác nhận không?
+- Máy chạy việc dùng profile `milk` như nó đang có. Claude chưa xem profile đó có những quyền gì; thu hẹp quyền cho một tiến trình chạy không người trông nằm ở mục 7.
 
 ## 6. Khác với tài liệu của team
 
@@ -390,6 +397,7 @@ Phần 1 đi trước vì mọi phần khác cần cửa lên live. Phần 2 đi
 
 - Nhiều camera và nhiều tiệm: kho ảnh và tập giữ riêng theo từng camera đã nằm trong thiết kế, nhưng chưa có gì để đo.
 - Train trên cloud khi một máy không đủ.
+- Thay profile `milk` của máy chạy việc bằng một user AWS chỉ có quyền trên các bảng và thư mục nó cần.
 - Chạy song song nhiều ứng viên cùng lúc.
 - Vẽ box trên trang Model thay vì chỉ chấm điểm lon sót.
 - Dọn frame `frames/corrections/` sau khi `fed_back_to_model = true` (đã ghi trong `docs/NHAT-P01.md`).
