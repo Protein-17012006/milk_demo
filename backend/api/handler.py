@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import boto3
+import compare
 import shelf
 from audit_scoring import (
     SKIP_REASONS,
@@ -970,6 +971,8 @@ def _is_scoring(audit: dict[str, Any]) -> bool:
 
 def _purpose(audit: dict[str, Any]) -> str:
     """The audit's purpose; an old audit without one is judged by its id."""
+    if str(audit.get("audit_id", "")).startswith("CMP-"):
+        return "compare"
     return audit.get("purpose") or ("scoring" if _is_scoring(audit) else "training")
 
 
@@ -1006,7 +1009,7 @@ def _done_audits(ddb, stores: list[dict[str, Any]], days: int) -> list[dict[str,
     for store in stores:
         for a in _scoring_audits_of(ddb, store["store_id"], first_day, last_day):
             if a.get("status") == "done" and _is_scoring(a) and str(a.get("capture_timestamp", "")) >= since:
-                out.append(_audit_view(a))
+                out.append(_scored_view(a))
     return out
 
 
@@ -1535,13 +1538,29 @@ def _handle_put_shelf_plan(store_id: str, event: dict[str, Any], user: dict[str,
 # --- Model page (spec docs/superpowers/specs/2026-11-23-model-quality-page-design.md) -------------------------
 
 
-def _audit_view(item: dict[str, Any]) -> dict[str, Any]:
+def _whole_audit(item: dict[str, Any]) -> dict[str, Any]:
+    """The audit as stored, its JSON fields read. On a frame that shows two releases, each box still says which
+    release drew it: this never leaves the backend (see _audit_view and _scored_view)."""
     out = {k: v for k, v in item.items() if not k.endswith("_json")}
     out["purpose"] = _purpose(item)
     out["ai_boxes"] = json.loads(item.get("ai_boxes_json") or "[]")
     out["verdicts"] = json.loads(item.get("verdicts_json") or "[]")
     out["missed"] = json.loads(item.get("missed_json") or "[]")
     return out
+
+
+def _audit_view(item: dict[str, Any]) -> dict[str, Any]:
+    """The audit as the browser gets it: no box says which release drew it."""
+    out = _whole_audit(item)
+    out["ai_boxes"] = compare.public_boxes(out["ai_boxes"])
+    return out
+
+
+def _scored_view(item: dict[str, Any]) -> dict[str, Any]:
+    """The audit as the live release is scored on it. A frame that shows two releases is split first, so the
+    live release is held to its own boxes and names, and a real unit only the candidate found is one the live
+    release missed."""
+    return compare.split_audit(_whole_audit(item))[0]
 
 
 def _find_audit(ddb, audit_id: str) -> dict[str, Any] | None:
@@ -1811,7 +1830,7 @@ def _handle_model_summary(event: dict[str, Any], ddb) -> dict[str, Any]:
         v = a.get("model_version") or "unknown"
         latest[v] = max(latest.get(v, ""), str(a.get("capture_timestamp", "")))
     in_version = [a for a in scoring if version == "all" or (a.get("model_version") or "unknown") == version]
-    chosen = [_audit_view(a) for a in in_version if a.get("status") == "done"]
+    chosen = [_scored_view(a) for a in in_version if a.get("status") == "done"]
     health = [h for h in _scan_all(ddb.Table(MODEL_HEALTH_TABLE)) if _hour_within_days(str(h.get("hour", "")), days)]
     processing = [
         float(h["processing_ms_median"])

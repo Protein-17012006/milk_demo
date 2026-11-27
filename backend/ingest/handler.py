@@ -24,6 +24,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import boto3
+import compare
 import shelf
 from boto3.dynamodb.conditions import Key
 from botocore.config import Config
@@ -38,6 +39,7 @@ from common import (
     validate_capture_payload,
 )
 from model_health import capture_boxes, hour_stats
+from model_versions import STATE_ID
 
 ICT = timezone(timedelta(hours=7))
 
@@ -526,13 +528,38 @@ def captures_in_hour(ddb_resource, camera_id: str, store_code: str, hour: str) -
     return from_dynamodb(items)
 
 
+def parallel_candidate(ddb_resource, camera_id: str) -> str | None:
+    """The release that runs in parallel with the live one on this camera, by the model-versions table: the
+    candidate of the state row, when its own row says its parallel run has started. None otherwise."""
+    if not MODEL_VERSIONS_TABLE:
+        return None
+    table = ddb_resource.Table(MODEL_VERSIONS_TABLE)
+    state = table.get_item(Key={"camera_id": camera_id, "version_id": STATE_ID}).get("Item") or {}
+    version = state.get("candidate")
+    if not version:
+        return None
+    row = table.get_item(Key={"camera_id": camera_id, "version_id": version}).get("Item") or {}
+    return str(version) if row.get("status") == "parallel" else None
+
+
 def _write_frame_audit(
-    s3_client, table, audit_id: str, purpose: str, pick: dict[str, Any], camera_id: str
+    s3_client, table, audit_id: str, purpose: str, pick: dict[str, Any], camera_id: str, candidate: str | None = None
 ) -> str | None:
     """Copies the picked capture's frame to the analytics bucket and writes a pending audit of that purpose, with
     what the worker's display check said of the capture: display_visible, and display_score when the check had one
     (the Model page's display check counts only the frames it judged). Returns the audit id, or None when the audit
-    already exists."""
+    already exists.
+
+    A scoring or comparison frame of a capture that `candidate` (the release running in parallel) has also read
+    shows the boxes of both releases as one set (compare.merge_boxes) and keeps the candidate's id; a training
+    frame, and any frame the candidate has not read, shows the live release's boxes as always."""
+    both = (
+        purpose in ("scoring", "compare")
+        and bool(candidate)
+        and pick.get("candidate_version") == candidate
+        and pick.get("candidate_detections_json") is not None
+    )
+    boxes = compare.frame_boxes(pick, candidate) if both else capture_boxes(pick)
     filename = pick.get("image_filename") or pick["image_key"].rsplit("/", 1)[-1]
     image_key = f"audits/frames/{camera_id}/{pick['capture_timestamp'][:10]}/{filename}"
     s3_client.copy_object(
@@ -550,12 +577,13 @@ def _write_frame_audit(
                     "capture_timestamp": pick["capture_timestamp"],
                     "image_key": image_key,
                     "model_version": pick.get("model_version") or "unknown",
+                    **({"candidate_version": candidate} if both else {}),
                     "pipeline": pick.get("pipeline", ""),
                     "display_visible": pick.get("display_visible", True) is not False,
                     **({"display_score": pick["display_score"]} if pick.get("display_score") is not None else {}),
                     "status": "pending",
                     "sampled_at": datetime.now(ICT).isoformat(timespec="seconds"),
-                    "ai_boxes_json": json.dumps(capture_boxes(pick), separators=(",", ":")),
+                    "ai_boxes_json": json.dumps(boxes, separators=(",", ":")),
                     "verdicts_json": "[]",
                     "missed_json": "[]",
                 }
@@ -569,6 +597,61 @@ def _write_frame_audit(
     return audit_id
 
 
+def _frames_in_opening_hours(items: list[dict[str, Any]], store: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The captures that have a frame, in id order; with the store's hours known, only those taken while it is open."""
+    with_frame = sorted((it for it in items if it.get("image_key")), key=lambda it: it["capture_id"])
+    if store and store.get("open_time") and store.get("close_time"):
+        with_frame = [
+            it
+            for it in with_frame
+            if shelf.is_open(shelf.bucket_of(it["capture_timestamp"]), store["open_time"], store["close_time"])
+        ]
+    return with_frame
+
+
+def sample_compare(
+    s3_client,
+    ddb_resource,
+    camera_id: str,
+    items: list[dict[str, Any]],
+    hour: str,
+    rng: random.Random,
+    store: dict[str, Any] | None,
+    candidate: str | None,
+) -> list[str]:
+    """A comparison frame (CMP-<camera>-<YYYYMMDD>-<n>) for one camera-hour, while `candidate` runs in parallel:
+    one capture, picked at random among those of the hour that both releases read differently and that is not
+    the hour's scoring or training frame. At most compare.CMP_PER_DAY a day, and one an hour however often the
+    hour is sampled. Comparison frames are never scored. Returns the audit id created now, if any."""
+    if not candidate:
+        return []
+    differing = [
+        it
+        for it in _frames_in_opening_hours(items, store)
+        if it.get("candidate_version") == candidate and compare.differs(compare.frame_boxes(it, candidate))
+    ]
+    if not differing:
+        return []
+    table = ddb_resource.Table(AUDITS_TABLE)
+    store_id = differing[0]["store_id"]
+    prefix = f"CMP-{camera_id}-{hour[:8]}-"
+    today = _query_all(table, KeyConditionExpression=Key("store_id").eq(store_id) & Key("audit_id").begins_with(prefix))
+    of_this_hour = {it["capture_id"] for it in items}
+    if len(today) >= compare.CMP_PER_DAY or any(a.get("capture_id") in of_this_hour for a in today):
+        return []
+    taken = set()
+    for audit_id in (f"AUD-{camera_id}-{hour}", f"TRN-{camera_id}-{hour}"):
+        other = table.get_item(Key={"store_id": store_id, "audit_id": audit_id}).get("Item")
+        if other:
+            taken.add(other.get("capture_id"))
+    free = [it for it in differing if it["capture_id"] not in taken]
+    if not free:
+        return []
+    audit_id = f"{prefix}{len(today) + 1}"
+    written = _write_frame_audit(s3_client, table, audit_id, "compare", rng.choice(free), camera_id, candidate)
+    return [audit_id] if written else []
+
+
 def sample_frames(
     s3_client,
     ddb_resource,
@@ -577,17 +660,12 @@ def sample_frames(
     hour: str,
     rng: random.Random,
     store: dict[str, Any] | None,
+    candidate: str | None = None,
 ) -> list[str]:
     """Picks, for one camera-hour, a scoring frame (AUD-, any capture with a frame) and a training frame
     (TRN-, a different capture whose worker saw the display). Frames outside the store's opening hours are not
     sampled. Returns the audit ids created now (0, 1 or 2); an existing audit is left alone."""
-    with_frame = sorted((it for it in items if it.get("image_key")), key=lambda it: it["capture_id"])
-    if store and store.get("open_time") and store.get("close_time"):
-        with_frame = [
-            it
-            for it in with_frame
-            if shelf.is_open(shelf.bucket_of(it["capture_timestamp"]), store["open_time"], store["close_time"])
-        ]
+    with_frame = _frames_in_opening_hours(items, store)
     if not with_frame:
         return []
     table = ddb_resource.Table(AUDITS_TABLE)
@@ -601,7 +679,7 @@ def sample_frames(
     else:
         pick = rng.choice(with_frame)
         scoring_capture = pick["capture_id"]
-        if _write_frame_audit(s3_client, table, scoring_id, "scoring", pick, camera_id):
+        if _write_frame_audit(s3_client, table, scoring_id, "scoring", pick, camera_id, candidate):
             created.append(scoring_id)
 
     if not table.get_item(Key={"store_id": store_id, "audit_id": training_id}).get("Item"):
@@ -644,7 +722,9 @@ def _run_hour(s3_client, ddb_resource, hour: str, rng: random.Random, sample: bo
                 store = from_dynamodb(
                     ddb_resource.Table(STORE_LIST_TABLE).get_item(Key={"store_id": items[0]["store_id"]}).get("Item")
                 )
-                audits.extend(sample_frames(s3_client, ddb_resource, camera_id, items, hour, rng, store))
+                candidate = parallel_candidate(ddb_resource, camera_id)
+                audits.extend(sample_frames(s3_client, ddb_resource, camera_id, items, hour, rng, store, candidate))
+                audits.extend(sample_compare(s3_client, ddb_resource, camera_id, items, hour, rng, store, candidate))
         except Exception as exc:  # noqa: BLE001 - one camera failing must not stop the others
             print(json.dumps({"model_page_hour_failed": camera_id, "hour": hour, "error": repr(exc)}))
     return {"hour": hour, "audits": audits, "health_items": health}

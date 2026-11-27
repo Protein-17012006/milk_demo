@@ -2669,3 +2669,187 @@ def test_the_queue_sends_a_candidate_file_to_its_own_path(monkeypatch: pytest.Mo
         assert out["results"] == [{"status": "stored", "capture_id": "CAP-S01-20261121-101500"}]
         assert _capture_row("101500")["candidate_version"] == "v2"
         assert _units(api) == units_before
+
+
+# --- frames that show the boxes of both versions, and comparison frames ------------------------------------------
+
+PRIVATE = {"src", "live_sku", "cand_sku"}
+
+
+def _parallel_candidate(version: str = "v2", status: str = "parallel", camera_id: str = "CAM-S01-A") -> None:
+    table = _table("test-model-versions")
+    table.put_item(Item={"camera_id": camera_id, "version_id": "#state", "live": "v1", "candidate": version})
+    table.put_item(Item={"camera_id": camera_id, "version_id": version, "status": status, "kind": "rules"})
+
+
+def _both_read(ingest, hhmmss: str, live_units: int = 2, candidate_boxes: int = 3, version: str = "v2") -> None:
+    """One stored capture of 21/11 that the live release and the candidate have both read: the live release found
+    live_units Hot cans side by side, the candidate found candidate_boxes of them in the same places."""
+    _ingest(ingest, "CAM-S01-A", hhmmss, [("hot160", live_units)], with_frame=True)
+    ddb = boto3.resource("dynamodb", region_name="ap-southeast-1")
+    assert (
+        ingest.ingest_candidate(_candidate(hhmmss, version=version, boxes=candidate_boxes), ddb)["status"] == "stored"
+    )
+
+
+@mock_aws
+def test_a_scoring_frame_shows_the_boxes_of_both_versions_while_a_candidate_runs(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _parallel_candidate()
+    _both_read(ingest, "140700")
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    audit = _audits()[AUDIT_14]
+    boxes = json.loads(audit["ai_boxes_json"])
+    assert audit["candidate_version"] == "v2"
+    assert [(b["src"], b["sku_id"], b["needs_flavour"]) for b in boxes] == [
+        ("both", "hot160", False),
+        ("both", "hot160", False),
+        ("cand", None, True),
+    ]
+
+
+@mock_aws
+def test_a_training_frame_keeps_the_live_boxes_only(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _parallel_candidate()
+    _both_read(ingest, "140700")
+    _both_read(ingest, "141200")
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    training = _audits()[TRN_14]
+    assert "candidate_version" not in training
+    assert all(not PRIVATE & set(b) for b in json.loads(training["ai_boxes_json"]))
+    assert len(json.loads(training["ai_boxes_json"])) == 2
+
+
+@pytest.mark.parametrize("seed", ["none", "waiting", "another"])
+def test_without_that_candidate_in_parallel_a_scoring_frame_is_as_before(monkeypatch: pytest.MonkeyPatch, seed):
+    with mock_aws():
+        _, ingest = _backend(monkeypatch)
+        if seed == "waiting":
+            _parallel_candidate(status="candidate")
+        if seed == "another":
+            _parallel_candidate(version="v3")
+        _both_read(ingest, "140700")
+        ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+        audit = _audits()[AUDIT_14]
+        assert "candidate_version" not in audit
+        assert json.loads(audit["ai_boxes_json"]) == [
+            {"box_id": 1, "sku_id": "hot160", "conf": 0.9, "box": [10, 20, 50, 80]},
+            {"box_id": 2, "sku_id": "hot160", "conf": 0.9, "box": [70, 20, 50, 80]},
+        ]
+
+
+@mock_aws
+def test_the_browser_never_learns_which_version_drew_a_box(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _parallel_candidate()
+    _both_read(ingest, "140700")
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    status, detail = _call(api, "GET", f"/v1/model/audits/{AUDIT_14}")
+    assert status == 200
+    assert [(b["sku_id"], b["needs_flavour"]) for b in detail["ai_boxes"]] == [
+        ("hot160", False),
+        ("hot160", False),
+        (None, True),
+    ]
+    assert all(not PRIVATE & set(b) for b in detail["ai_boxes"])
+    body = {
+        "verdicts": [
+            {"box_id": 1, "verdict": "correct"},
+            {"box_id": 2, "verdict": "correct"},
+            {"box_id": 3, "verdict": "wrong_sku", "true_sku_id": "hot160"},
+        ],
+        "missed": [],
+        "misses_checked": True,
+    }
+    status, saved = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body=body)
+    assert status == 200 and all(not PRIVATE & set(b) for b in saved["ai_boxes"])
+
+
+@mock_aws
+def test_a_disputed_box_cannot_be_called_right(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _parallel_candidate()
+    _both_read(ingest, "140700")
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    body = {
+        "verdicts": [{"box_id": n, "verdict": "correct"} for n in (1, 2, 3)],
+        "missed": [],
+        "misses_checked": True,
+    }
+    status, answer = _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body=body)
+    assert status == 400 and "box 3 needs a flavour" in answer["message"]
+
+
+@mock_aws
+def test_sampling_an_hour_again_adds_no_second_compare_frame(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _parallel_candidate()
+    for minute in ("05", "10", "15", "20"):
+        _both_read(ingest, f"14{minute}00")
+    for _ in range(3):
+        ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    assert sorted(i for i in _audits() if i.startswith("CMP-")) == ["CMP-CAM-S01-A-20261121-1"]
+
+
+@mock_aws
+def test_the_summary_scores_the_live_release_on_a_frame_with_both(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _parallel_candidate()
+    _both_read(ingest, "140700")
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    body = {
+        "verdicts": [
+            {"box_id": 1, "verdict": "correct"},
+            {"box_id": 2, "verdict": "correct"},
+            {"box_id": 3, "verdict": "wrong_sku", "true_sku_id": "hot160"},  # a real Hot can only the candidate found
+        ],
+        "missed": [],
+        "misses_checked": True,
+    }
+    assert _call(api, "PUT", f"/v1/model/audits/{AUDIT_14}", body=body)[0] == 200
+    _, summary = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
+    assert summary["n_audits"] == 1
+    hot = next(row for row in summary["per_sku"] if row["sku_id"] == "hot160")
+    assert (hot["model_units"], hot["true_units"], hot["missed_units"]) == (2, 3, 1)
+
+
+def _day_of_differing_captures(ingest, candidate_boxes: int = 3) -> None:
+    for hour in range(6, 22):
+        for minute in ("05", "10", "15"):
+            _both_read(ingest, f"{hour:02d}{minute}00", candidate_boxes=candidate_boxes)
+        ingest.lambda_handler({"action": "sample_audits", "hour": f"20261121-{hour:02d}"})
+
+
+@mock_aws
+def test_compare_frames_stop_at_eight_a_day(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _parallel_candidate()
+    _day_of_differing_captures(ingest)
+    audits = _audits()
+    compare_ids = sorted(i for i in audits if i.startswith("CMP-"))
+    assert compare_ids == [f"CMP-CAM-S01-A-20261121-{n}" for n in range(1, 9)]
+    assert {audits[i]["purpose"] for i in compare_ids} == {"compare"}
+    assert {audits[i]["candidate_version"] for i in compare_ids} == {"v2"}
+    for hour in range(6, 14):  # eight frames, one from each of the first eight hours
+        taken = [a["capture_id"] for a in audits.values() if a["capture_id"].startswith(f"CAP-S01-20261121-{hour:02d}")]
+        assert len(taken) == len(set(taken)) == 3
+    _, listed = _call(api, "GET", "/v1/model/audits", query={"days": "0"})
+    assert {i["purpose"] for i in listed["items"] if i["audit_id"].startswith("CMP-")} == {"compare"}
+    _, summary = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
+    assert summary["n_audits"] == 0  # nothing labelled yet, and a comparison frame never counts
+
+
+@mock_aws
+def test_no_compare_frame_when_the_two_versions_agree(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _parallel_candidate()
+    _day_of_differing_captures(ingest, candidate_boxes=2)
+    assert not [i for i in _audits() if i.startswith("CMP-")]
+
+
+@mock_aws
+def test_no_compare_frame_without_a_candidate_in_parallel(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _day_of_differing_captures(ingest)
+    assert not [i for i in _audits() if i.startswith("CMP-")]
