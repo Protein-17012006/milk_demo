@@ -39,6 +39,8 @@ def reindex(s3, table, bucket: str, prefix: str = "", dry_run: bool = False, now
         for page in pages:
             for obj in page.get("Contents", []):
                 key = obj["Key"]
+                if key.endswith(".candidate.json"):  # a candidate release's boxes, not a capture
+                    continue
                 if not key.endswith(".json"):
                     stats["skipped"] += 1
                     continue

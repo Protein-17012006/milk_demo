@@ -200,6 +200,23 @@ async def internal_persist(request: Request):
     return JSONResponse({"ok": True}, status_code=202)
 
 
+CANDIDATE_FIELDS = ("camera_id", "capture_id", "capture_timestamp", "candidate_version", "detections")
+
+
+@app.post("/internal/candidate")
+async def internal_candidate(request: Request):
+    """A candidate release's boxes for a capture already stored. Kept as a file for the backend; the hub's own
+    dashboard, history and exports never see it."""
+    if PERSIST is None:
+        raise HTTPException(status_code=503, detail="storage not configured")
+    payload = await request.json()
+    missing = [f for f in CANDIDATE_FIELDS if f not in payload] if isinstance(payload, dict) else list(CANDIDATE_FIELDS)
+    if missing:
+        raise HTTPException(status_code=422, detail=f"missing fields: {missing}")
+    PERSIST.submit_candidate(payload)
+    return JSONResponse({"ok": True}, status_code=202)
+
+
 # --- dashboard API ---------------------------------------------------------------------
 
 

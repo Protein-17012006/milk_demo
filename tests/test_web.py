@@ -196,3 +196,40 @@ def test_status_reports_the_ingest_server_as_down_when_absent(local):
 def test_logout_clears_the_session():
     response = remote().post("/api/logout")
     assert response.status_code == 200 and "milk_session=" in response.headers["set-cookie"]
+
+
+CANDIDATE = {
+    "camera_id": "CAM-T-A",
+    "capture_id": "CAP-S01-20261127-100005",
+    "capture_timestamp": "2026-11-27T10:00:05+07:00",
+    "candidate_version": "v2",
+    "processing_time_ms": 310,
+    "detections": [{"sku_id": "original145", "conf": 0.9, "box": [15, 25, 30, 40]}],
+}
+
+
+class FakeCandidateStore(FakePersistence):
+    def __init__(self):
+        super().__init__()
+        self.candidates = []
+
+    def submit_candidate(self, payload):
+        self.candidates.append(payload)
+
+
+def test_a_candidate_result_needs_the_token_and_its_fields(local, monkeypatch):
+    fake = FakeCandidateStore()
+    monkeypatch.setattr(web, "PERSIST", fake)
+    assert local.post("/internal/candidate", json=CANDIDATE).status_code == 403
+    for missing in ("camera_id", "capture_id", "capture_timestamp", "candidate_version", "detections"):
+        body = {k: v for k, v in CANDIDATE.items() if k != missing}
+        assert local.post("/internal/candidate", json=body, headers=TOKEN).status_code == 422, missing
+    assert fake.candidates == []
+    assert local.post("/internal/candidate", json=CANDIDATE, headers=TOKEN).status_code == 202
+    assert fake.candidates == [CANDIDATE]
+    assert fake.items == []
+
+
+def test_a_candidate_result_without_storage_configured_is_503(local, monkeypatch):
+    monkeypatch.setattr(web, "PERSIST", None)
+    assert local.post("/internal/candidate", json=CANDIDATE, headers=TOKEN).status_code == 503

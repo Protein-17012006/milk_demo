@@ -7,7 +7,7 @@ from conftest import BUCKET, REGION, TABLE
 
 from milk import reindex as reindex_module
 from milk.cvoutput import CaptureIdAllocator, Detection, build_capture, counts_of
-from milk.store import Persistence
+from milk.store import Persistence, candidate_key
 
 ICT = timezone(timedelta(hours=7))
 JPEG = b"\xff\xd8\xff\xe0fake"
@@ -108,3 +108,51 @@ def test_reindex_main_prints_a_summary(aws, monkeypatch, capsys):
     assert reindex_module.main(["--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "reindex_summary" in out and "loaded=1" in out and "dry_run=true" in out
+
+
+CANDIDATE = {
+    "camera_id": "CAM-T-A",
+    "capture_id": "CAP-S01-20261127-100005",
+    "capture_timestamp": "2026-11-27T10:00:05+07:00",
+    "candidate_version": "v2",
+    "processing_time_ms": 310,
+    "detections": [{"sku_id": "original145", "conf": 0.9, "box": [15, 25, 30, 40]}],
+}
+
+
+def test_candidate_key_sits_beside_the_capture_result():
+    payload = {
+        "camera_id": "CAM-S01-A",
+        "capture_id": "CAP-S01-20261127-100005",
+        "capture_timestamp": "2026-11-27T10:00:05+07:00",
+    }
+    assert candidate_key(payload) == "results/CAM-S01-A/2026-11-27/CAP-S01-20261127-100005.candidate.json"
+
+
+def test_a_candidate_result_is_one_file_and_no_row(aws):
+    s3, table = aws
+    store = Persistence(REGION, BUCKET, TABLE)
+    store._handle("candidate", CANDIDATE, None)
+    stored = json.loads(s3.get_object(Bucket=BUCKET, Key=candidate_key(CANDIDATE))["Body"].read())
+    assert stored == CANDIDATE
+    assert table.scan()["Items"] == []
+    assert "Contents" not in s3.list_objects_v2(Bucket=BUCKET, Prefix="frames/")
+
+
+def test_a_candidate_result_waits_in_the_same_queue_and_is_dropped_when_it_is_full(aws):
+    store = Persistence(REGION, BUCKET, TABLE, maxsize=1)
+    store.submit_candidate(CANDIDATE)
+    store.submit_candidate({**CANDIDATE, "capture_id": "CAP-S01-20261127-100015"})
+    assert store.dropped == 1
+    assert store._queue.get_nowait() == ("candidate", CANDIDATE, None)
+
+
+def test_reindex_leaves_candidate_files_alone(aws):
+    s3, table = aws
+    store = Persistence(REGION, BUCKET, TABLE)
+    record = capture(datetime.now(ICT))
+    store._save(record, JPEG)
+    store._handle("candidate", {**CANDIDATE, "capture_id": record["capture_id"]}, None)
+    table.delete_item(Key={"camera_id": "CAM-T-A", "capture_id": record["capture_id"]})
+    stats = reindex_module.reindex(s3, table, BUCKET)
+    assert stats == {"loaded": 1, "expired": 0, "skipped": 0}
