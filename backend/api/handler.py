@@ -21,6 +21,7 @@ from typing import Any
 
 import boto3
 import compare
+import model_versions
 import shelf
 from audit_scoring import (
     SKIP_REASONS,
@@ -61,6 +62,7 @@ ANALYTICS_BUCKET = os.environ.get("ANALYTICS_BUCKET", "")
 HUB_BUCKET = os.environ.get("HUB_BUCKET", "")
 AUDITS_TABLE = os.environ.get("AUDITS_TABLE", "")
 MODEL_HEALTH_TABLE = os.environ.get("MODEL_HEALTH_TABLE", "")
+MODEL_VERSIONS_TABLE = os.environ.get("MODEL_VERSIONS_TABLE", "")
 SHELF_TABLE = os.environ.get("SHELF_TABLE", "")
 SHELF_EVENTS_TABLE = os.environ.get("SHELF_EVENTS_TABLE", "")
 ALLOWED_ORIGINS = {
@@ -1866,11 +1868,115 @@ def _handle_model_health(event: dict[str, Any], ddb) -> dict[str, Any]:
     return _json_response(200, {"items": items}, event)
 
 
+def _candidate_report(ddb, camera_id: str, version: dict[str, Any]) -> dict[str, Any]:
+    """How a candidate stands against the live release, from the frames people have labelled that show both."""
+    version_id = version["version_id"]
+    audits = [
+        _whole_audit(a)
+        for a in _scan_all(ddb.Table(AUDITS_TABLE))
+        if a.get("candidate_version") == version_id and a.get("camera_id") == camera_id
+    ]
+    counted = compare.tally(audits, version_id)
+    criteria = version.get("criteria")
+    return {
+        "version": version_id,
+        "status": version.get("status"),
+        "tally": counted,
+        "verdict": compare.verdict(counted, criteria),
+        "criteria": criteria,
+    }
+
+
+def _handle_model_versions(event: dict[str, Any], ddb) -> dict[str, Any]:
+    """Per camera: the live release, the one before it, the candidate and how its parallel run stands, the request
+    in hand, and every release there has been (newest first). No box and no frame is in this answer."""
+    wanted = (event.get("queryStringParameters") or {}).get("camera_id")
+    by_camera: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in _scan_all(ddb.Table(MODEL_VERSIONS_TABLE)):
+        by_camera[row["camera_id"]][row["version_id"]] = row
+    cameras = []
+    for camera_id in sorted(by_camera):
+        if wanted and camera_id != wanted:
+            continue
+        rows = by_camera[camera_id]
+        state = {k: v for k, v in rows.get(model_versions.STATE_ID, {}).items() if k not in ("camera_id", "version_id")}
+        versions = sorted(
+            (r for version_id, r in rows.items() if version_id != model_versions.STATE_ID),
+            key=lambda r: (str(r.get("created_at", "")), r["version_id"]),
+            reverse=True,
+        )
+        candidate = rows.get(state.get("candidate") or "")
+        cameras.append(
+            {
+                "camera_id": camera_id,
+                "state": state,
+                "versions": versions,
+                "candidate": _candidate_report(ddb, camera_id, candidate) if candidate else None,
+            }
+        )
+    return _json_response(200, {"cameras": cameras}, event)
+
+
+def _handle_model_version_request(event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
+    """A team admin asks for a candidate to be put live or discarded, or for a roll-back. The request is written on
+    the camera's state row; the job runner on the counting machine carries it out and writes last_result. Whether
+    it may be asked is model_versions.can's call, and one request is in hand at a time."""
+    denied = _require_groups(user, ADMIN_GROUPS, event)
+    if denied:
+        return denied
+    body = _parse_body(event)
+    camera_id, action, version_id = body.get("camera_id"), body.get("action"), body.get("version_id")
+    if action not in model_versions.ACTIONS:
+        return _json_response(400, {"error": "UNKNOWN_ACTION", "message": f"Unknown action: {action}."}, event)
+    table = ddb.Table(MODEL_VERSIONS_TABLE)
+    key = {"camera_id": str(camera_id or ""), "version_id": model_versions.STATE_ID}
+    state = from_dynamodb(table.get_item(Key=key).get("Item")) if camera_id else None
+    if not state:
+        return _json_response(404, {"error": "NOT_FOUND", "message": "No model versions for this camera."}, event)
+    version, verdict_state = None, None
+    if action != "rollback":
+        found = table.get_item(Key={"camera_id": camera_id, "version_id": str(version_id or "")}) if version_id else {}
+        version = from_dynamodb(found.get("Item"))
+        if not version:
+            return _json_response(404, {"error": "NOT_FOUND", "message": "No such version on this camera."}, event)
+        if action == "put_live":
+            verdict_state = _candidate_report(ddb, camera_id, version)["verdict"]["state"]
+    reason = model_versions.can(action, state, version, verdict_state)
+    if reason:
+        return _json_response(409, {"error": "NOT_ALLOWED", "message": reason}, event)
+    now = datetime.now(ICT)
+    request = {
+        "id": f"REQ-{now.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}",
+        "action": action,
+        **({"version_id": version_id} if action != "rollback" else {}),
+        "by": user["email"],
+        "at": now.isoformat(timespec="seconds"),
+    }
+    try:
+        table.update_item(
+            Key=key,
+            UpdateExpression="SET #r = :r",
+            # no request yet, or the runner has answered the one that is there
+            ConditionExpression="attribute_not_exists(#r) OR attribute_type(#r, :null) OR #l.#rid = #r.#id",
+            ExpressionAttributeNames={"#r": "request", "#l": "last_result", "#rid": "request_id", "#id": "id"},
+            ExpressionAttributeValues={":r": request, ":null": "NULL"},
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+        return _json_response(409, {"error": "NOT_ALLOWED", "message": "Another request is still running."}, event)
+    return _json_response(202, {"request": request}, event)
+
+
 def _route_model(method: str, route_path: str, event: dict[str, Any], user: dict[str, Any], s3, ddb):
     if method == "GET" and route_path == "/model/summary":
         return _handle_model_summary(event, ddb)
     if method == "GET" and route_path == "/model/health":
         return _handle_model_health(event, ddb)
+    if method == "GET" and route_path == "/model/versions":
+        return _handle_model_versions(event, ddb)
+    if method == "POST" and route_path == "/model/versions/request":
+        return _handle_model_version_request(event, user, ddb)
     parts = route_path.strip("/").split("/")  # model, audits, <id>, skip
     if parts[:2] == ["model", "audits"]:
         if len(parts) == 2 and method == "GET":

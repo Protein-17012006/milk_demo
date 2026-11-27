@@ -8,6 +8,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import compare  # noqa: E402
@@ -196,3 +198,151 @@ def test_the_live_side_of_an_undisputed_frame_scores_like_the_frame_did_before()
     live, _cand = compare.split_audit(merged)
     assert comparison_rows(live) == comparison_rows(classic)
     assert frame_tallies(live) == frame_tallies(classic)
+
+
+# --- the verdict of a parallel run ------------------------------------------------------------------------------
+
+DETECTOR = {"min_days": 3, "min_frames": 30, "min_diff_boxes": 0, "alpha": 0.05, "max_sku_drop": 0.05}
+GALLERY = {"min_days": 1, "min_frames": 0, "min_diff_boxes": 30, "alpha": 0.05, "max_sku_drop": 0.05}
+
+
+def judged(audit_id, version, cand_only=0, live_only=0, day="2026-11-27", status="done"):
+    """A labelled frame on which both releases drew one Original can alike, the candidate alone drew `cand_only`
+    real Cheese cans and the live release alone drew `live_only` real Cheese cans."""
+    live = [box(1, "original145", 0.9, [100, 100, 60, 120])]
+    cand = [box(1, "original145", 0.9, [100, 100, 60, 120])]
+    live += [box(10 + n, "cheese145", 0.8, [300 + 100 * n, 100, 60, 120]) for n in range(live_only)]
+    cand += [box(20 + n, "cheese145", 0.8, [300 + 100 * n, 400, 60, 120]) for n in range(cand_only)]
+    boxes = compare.merge_boxes(live, cand) if version else live
+    verdicts = [
+        {"box_id": b["box_id"], "verdict": "wrong_sku", "true_sku_id": "cheese145"}
+        if b.get("needs_flavour")
+        else {"box_id": b["box_id"], "verdict": "correct"}
+        for b in boxes
+    ]
+    audit = {
+        "audit_id": audit_id,
+        "status": status,
+        "capture_timestamp": f"{day}T10:05:00+07:00",
+        "model_version": "v1",
+        "ai_boxes": boxes,
+        "verdicts": verdicts,
+        "missed": [],
+    }
+    return {**audit, "candidate_version": version} if version else audit
+
+
+def test_exact_binomial():
+    assert compare.binomial_two_sided(0, 6) == pytest.approx(0.03125)
+    assert compare.binomial_two_sided(2, 10) == pytest.approx(0.109375)
+    assert compare.binomial_two_sided(8, 10) == pytest.approx(0.109375)
+    assert compare.binomial_two_sided(5, 10) == 1.0
+    assert compare.binomial_two_sided(0, 0) == 1.0
+
+
+def test_tally_counts_the_boxes_only_one_release_got_right():
+    t = compare.tally([judged("AUD-CAM-S01-A-20261127-10", "v2", cand_only=2, live_only=1)], "v2")
+    assert (t["frames"], t["days"], t["cand_wins"], t["live_wins"]) == (1, 1, 2, 1)
+    assert t["per_sku"] == {
+        "original145": {"units": 1, "live_right": 1, "cand_right": 1},
+        "cheese145": {"units": 3, "live_right": 1, "cand_right": 2},
+    }
+
+
+def test_tally_ignores_frames_of_another_candidate_frames_without_one_and_unlabelled_frames():
+    audits = [
+        judged("AUD-CAM-S01-A-20261127-10", "v2", cand_only=2),
+        judged("AUD-CAM-S01-A-20261127-11", "v3", cand_only=5),
+        judged("AUD-CAM-S01-A-20261127-12", None),
+        judged("AUD-CAM-S01-A-20261127-13", "v2", cand_only=4, status="pending"),
+        judged("TRN-CAM-S01-A-20261127-10", "v2", cand_only=7),
+    ]
+    t = compare.tally(audits, "v2")
+    assert (t["frames"], t["cand_wins"], t["live_wins"]) == (1, 2, 0)
+
+
+def test_a_comparison_frame_adds_its_boxes_but_is_not_a_judged_frame():
+    audits = [
+        judged("AUD-CAM-S01-A-20261127-10", "v2", cand_only=1),
+        judged("CMP-CAM-S01-A-20261127-1", "v2", cand_only=3, day="2026-11-28"),
+    ]
+    t = compare.tally(audits, "v2")
+    assert (t["frames"], t["days"], t["cand_wins"]) == (1, 1, 4)
+
+
+def test_tally_counts_days_of_judged_frames():
+    audits = [
+        judged("AUD-CAM-S01-A-20261127-10", "v2"),
+        judged("AUD-CAM-S01-A-20261127-11", "v2"),
+        judged("AUD-CAM-S01-A-20261128-10", "v2", day="2026-11-28"),
+    ]
+    t = compare.tally(audits, "v2")
+    assert (t["frames"], t["days"], t["cand_wins"], t["live_wins"]) == (3, 2, 0, 0)
+
+
+def test_a_box_called_not_a_product_is_a_win_for_the_release_that_did_not_draw_it():
+    audit = merged_audit(
+        LIVE, CAND, verdicts={1: ("correct", None), 2: ("not_product", None), 3: ("not_product", None)}
+    )
+    t = compare.tally([audit], "v2")
+    assert (t["cand_wins"], t["live_wins"]) == (0, 1)  # box 2: both drew it; box 3: only the candidate drew it
+
+
+def test_an_out_of_scope_box_counts_for_no_one():
+    audit = merged_audit(
+        LIVE, CAND, verdicts={1: ("correct", None), 2: ("out_of_scope", None), 3: ("out_of_scope", None)}
+    )
+    t = compare.tally([audit], "v2")
+    assert (t["cand_wins"], t["live_wins"]) == (0, 0)
+    assert t["per_sku"] == {"original145": {"units": 1, "live_right": 1, "cand_right": 1}}
+
+
+def test_a_can_both_releases_missed_is_a_unit_neither_got_right():
+    missed = [{"sku_id": "hot160", "x": 900, "y": 400}]
+    audit = merged_audit(LIVE, LIVE, verdicts={1: ("correct", None), 2: ("correct", None)}, missed=missed)
+    t = compare.tally([audit], "v2")
+    assert t["per_sku"]["hot160"] == {"units": 1, "live_right": 0, "cand_right": 0}
+    assert (t["cand_wins"], t["live_wins"]) == (0, 0)
+
+
+def test_verdict_waits_until_the_criteria_are_met():
+    t = {"frames": 12, "days": 2, "cand_wins": 9, "live_wins": 0, "per_sku": {}}
+    v = compare.verdict(t, DETECTOR)
+    assert v["state"] == "waiting" and v["missing"] == ["1 more day", "18 more judged frames"]
+
+
+def test_a_gallery_change_waits_for_thirty_boxes_the_two_read_differently():
+    t = {"frames": 4, "days": 1, "cand_wins": 20, "live_wins": 2, "per_sku": {}}
+    v = compare.verdict(t, GALLERY)
+    assert v["state"] == "waiting" and v["missing"] == ["8 more judged boxes that the two versions read differently"]
+
+
+def test_verdict_better_worse_and_no_difference():
+    base = {"frames": 40, "days": 4, "per_sku": {}}
+    assert compare.verdict({**base, "cand_wins": 9, "live_wins": 1}, DETECTOR)["state"] == "better"
+    assert compare.verdict({**base, "cand_wins": 1, "live_wins": 9}, DETECTOR)["state"] == "worse"
+    assert compare.verdict({**base, "cand_wins": 4, "live_wins": 3}, DETECTOR)["state"] == "no_difference"
+    same = compare.verdict({**base, "cand_wins": 0, "live_wins": 0}, DETECTOR)
+    assert (same["state"], same["p"], same["missing"], same["sku_drops"]) == ("no_difference", 1.0, [], [])
+
+
+def test_one_product_six_points_down_makes_it_worse():
+    per_sku = {"Slide Original 145g": {"units": 50, "live_right": 45, "cand_right": 42}}
+    t = {"frames": 40, "days": 4, "cand_wins": 12, "live_wins": 2, "per_sku": per_sku}
+    v = compare.verdict(t, DETECTOR)
+    assert v["state"] == "worse" and v["sku_drops"] == ["Slide Original 145g"]
+
+
+def test_five_points_down_is_allowed_and_a_product_with_few_units_is_not_judged():
+    per_sku = {
+        "five down": {"units": 20, "live_right": 19, "cand_right": 18},
+        "few units": {"units": 9, "live_right": 9, "cand_right": 0},
+    }
+    t = {"frames": 40, "days": 4, "cand_wins": 12, "live_wins": 2, "per_sku": per_sku}
+    v = compare.verdict(t, DETECTOR)
+    assert v["state"] == "better" and v["sku_drops"] == []
+
+
+def test_without_criteria_the_verdict_waits_and_says_so():
+    v = compare.verdict({"frames": 40, "days": 4, "cand_wins": 9, "live_wins": 0, "per_sku": {}}, None)
+    assert v["state"] == "waiting" and v["missing"] == ["criteria"]

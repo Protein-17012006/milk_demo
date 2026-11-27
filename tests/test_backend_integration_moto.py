@@ -2853,3 +2853,175 @@ def test_no_compare_frame_without_a_candidate_in_parallel(monkeypatch: pytest.Mo
     _, ingest = _backend(monkeypatch)
     _day_of_differing_captures(ingest)
     assert not [i for i in _audits() if i.startswith("CMP-")]
+
+
+# --- model versions on the Model page: the verdict of a parallel run and the requests a team admin may make --------
+
+DETECTOR_CRITERIA = {"min_days": 3, "min_frames": 30, "min_diff_boxes": 0, "alpha": 0.05, "max_sku_drop": 0.05}
+EASY_CRITERIA = {**DETECTOR_CRITERIA, "min_days": 1, "min_frames": 1}
+REQUEST = "/v1/model/versions/request"
+
+
+def _versions_seed(criteria: dict = DETECTOR_CRITERIA, previous: str | None = None) -> None:
+    """Camera CAM-S01-A: v1 live, v2 running in parallel since 21/11 05:00 with these criteria."""
+    table = _table("test-model-versions")
+    state = {"camera_id": "CAM-S01-A", "version_id": "#state", "live": "v1", "candidate": "v2"}
+    table.put_item(Item={**state, **({"previous": previous} if previous else {})})
+    rows = [
+        {"version_id": "v1", "status": "live", "kind": "baseline", "created_at": "2026-11-20T09:00:00+07:00"},
+        {
+            "version_id": "v2",
+            "status": "parallel",
+            "kind": "rules",
+            "parent": "v1",
+            "created_at": "2026-11-21T04:50:00+07:00",
+            "parallel_started_at": "2026-11-21T05:00:00+07:00",
+            "criteria": criteria,
+        },
+    ]
+    for row in rows:
+        table.put_item(Item=common.to_dynamodb_safe({"camera_id": "CAM-S01-A", **row}))
+
+
+def _judge_hour(api, ingest, hour: int, third: str | None = "hot160") -> None:
+    """One hour whose scoring frame both releases read, labelled by a person: the two cans both drew are right; the
+    third box, which only the candidate drew, is a real can of `third` (the candidate was right alone) or, with
+    third=None, not a product (the live release was right not to draw it)."""
+    _both_read(ingest, f"{hour:02d}0700")
+    ingest.lambda_handler({"action": "sample_audits", "hour": f"20261121-{hour:02d}"})
+    last = (
+        {"box_id": 3, "verdict": "wrong_sku", "true_sku_id": third}
+        if third
+        else {"box_id": 3, "verdict": "not_product"}
+    )
+    body = {
+        "verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}, last],
+        "missed": [],
+        "misses_checked": True,
+    }
+    assert _call(api, "PUT", f"/v1/model/audits/AUD-CAM-S01-A-20261121-{hour:02d}", body=body)[0] == 200
+
+
+def _state_row() -> dict:
+    return _table("test-model-versions").get_item(Key={"camera_id": "CAM-S01-A", "version_id": "#state"})["Item"]
+
+
+@mock_aws
+def test_the_versions_route_shows_the_parallel_run_and_its_verdict(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _versions_seed(EASY_CRITERIA)
+    for hour in range(8, 14):
+        _judge_hour(api, ingest, hour)
+    status, body = _call(api, "GET", "/v1/model/versions")
+    assert status == 200 and [c["camera_id"] for c in body["cameras"]] == ["CAM-S01-A"]
+    camera = body["cameras"][0]
+    assert (camera["state"]["live"], camera["state"]["candidate"]) == ("v1", "v2")
+    assert [(v["version_id"], v["status"]) for v in camera["versions"]] == [("v2", "parallel"), ("v1", "live")]
+    report = camera["candidate"]
+    assert report["version"] == "v2" and report["criteria"] == EASY_CRITERIA
+    assert (report["tally"]["frames"], report["tally"]["days"]) == (6, 1)
+    assert (report["tally"]["cand_wins"], report["tally"]["live_wins"]) == (6, 0)
+    assert report["tally"]["per_sku"]["hot160"] == {"units": 18, "live_right": 12, "cand_right": 18}
+    assert report["verdict"]["state"] == "better" and report["verdict"]["p"] == pytest.approx(0.03125)
+    assert not PRIVATE & set(json.dumps(body).replace('"', " ").split())
+
+
+@mock_aws
+def test_the_versions_route_waits_with_what_is_missing(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _versions_seed()
+    _judge_hour(api, ingest, 8)
+    _, body = _call(api, "GET", "/v1/model/versions", query={"camera_id": "CAM-S01-A"})
+    verdict = body["cameras"][0]["candidate"]["verdict"]
+    assert verdict["state"] == "waiting" and verdict["missing"] == ["2 more days", "29 more judged frames"]
+    assert _call(api, "GET", "/v1/model/versions", query={"camera_id": "CAM-S99-Z"})[1] == {"cameras": []}
+
+
+@mock_aws
+def test_a_camera_without_a_candidate_reports_none(monkeypatch: pytest.MonkeyPatch):
+    api, _ingest_module = _backend(monkeypatch)
+    table = _table("test-model-versions")
+    table.put_item(Item={"camera_id": "CAM-S01-A", "version_id": "#state", "live": "v1"})
+    table.put_item(Item={"camera_id": "CAM-S01-A", "version_id": "v1", "status": "live", "kind": "baseline"})
+    _, body = _call(api, "GET", "/v1/model/versions")
+    assert body["cameras"][0]["candidate"] is None
+    assert _call(api, "GET", "/v1/model/versions", groups="datagent")[0] == 403
+
+
+@mock_aws
+def test_only_a_team_admin_may_request_and_only_what_is_allowed(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _versions_seed(EASY_CRITERIA)
+    put_live = {"camera_id": "CAM-S01-A", "action": "put_live", "version_id": "v2"}
+    assert _call(api, "POST", REQUEST, groups="field_team", body=put_live)[0] == 403
+    status, answer = _call(api, "POST", REQUEST, groups="team_admin", body=put_live)
+    assert status == 409 and "not reached a result" in answer["message"]  # no frame judged yet: waiting
+    assert "request" not in _state_row()
+    for hour in range(8, 14):
+        _judge_hour(api, ingest, hour)
+    status, answer = _call(api, "POST", REQUEST, groups="team_admin", body=put_live)
+    assert status == 202
+    request = _state_row()["request"]
+    assert (request["action"], request["version_id"], request["by"]) == ("put_live", "v2", "tester@datagent.io")
+    assert request["id"] == answer["request"]["id"] and request["at"]
+    status, answer = _call(api, "POST", REQUEST, groups="team_admin", body=put_live)
+    assert (status, answer["message"]) == (409, "Another request is still running.")
+    assert _state_row()["request"]["id"] == request["id"]
+
+
+@mock_aws
+def test_a_worse_candidate_cannot_be_put_live_but_can_be_discarded(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _versions_seed(EASY_CRITERIA)
+    for hour in range(8, 14):
+        _judge_hour(api, ingest, hour, third=None)
+    _, body = _call(api, "GET", "/v1/model/versions")
+    assert body["cameras"][0]["candidate"]["verdict"]["state"] == "worse"
+    put_live = {"camera_id": "CAM-S01-A", "action": "put_live", "version_id": "v2"}
+    assert _call(api, "POST", REQUEST, groups="team_admin", body=put_live)[0] == 409
+    discard = {"camera_id": "CAM-S01-A", "action": "discard", "version_id": "v2"}
+    assert _call(api, "POST", REQUEST, groups="team_admin", body=discard)[0] == 202
+    assert _state_row()["request"]["action"] == "discard"
+
+
+@mock_aws
+def test_roll_back_needs_an_earlier_version(monkeypatch: pytest.MonkeyPatch):
+    api, _ingest_module = _backend(monkeypatch)
+    _versions_seed()
+    rollback = {"camera_id": "CAM-S01-A", "action": "rollback"}
+    status, answer = _call(api, "POST", REQUEST, groups="team_admin", body=rollback)
+    assert (status, answer["message"]) == (409, "There is no earlier version to roll back to.")
+    _versions_seed(previous="v0")
+    assert _call(api, "POST", REQUEST, groups="team_admin", body=rollback)[0] == 202
+    request = _state_row()["request"]
+    assert request["action"] == "rollback" and "version_id" not in request
+
+
+@mock_aws
+def test_a_new_request_is_taken_once_the_runner_has_answered_the_last(monkeypatch: pytest.MonkeyPatch):
+    api, _ingest_module = _backend(monkeypatch)
+    _versions_seed(previous="v0")
+    rollback = {"camera_id": "CAM-S01-A", "action": "rollback"}
+    assert _call(api, "POST", REQUEST, groups="team_admin", body=rollback)[0] == 202
+    first = _state_row()["request"]["id"]
+    _table("test-model-versions").update_item(
+        Key={"camera_id": "CAM-S01-A", "version_id": "#state"},
+        UpdateExpression="SET last_result = :r",
+        ExpressionAttributeValues={
+            ":r": {"request_id": first, "ok": True, "message": "", "at": "2026-11-21T09:00:00+07:00"}
+        },
+    )
+    assert _call(api, "POST", REQUEST, groups="team_admin", body=rollback)[0] == 202
+    assert _state_row()["request"]["id"] != first
+
+
+@mock_aws
+def test_a_request_about_something_unknown_is_refused(monkeypatch: pytest.MonkeyPatch):
+    api, _ingest_module = _backend(monkeypatch)
+    _versions_seed()
+    admin = {"groups": "team_admin"}
+    assert _call(api, "POST", REQUEST, body={"camera_id": "CAM-S01-A", "action": "retrain"}, **admin)[0] == 400
+    assert _call(api, "POST", REQUEST, body={"camera_id": "CAM-S99-Z", "action": "rollback"}, **admin)[0] == 404
+    unknown = {"camera_id": "CAM-S01-A", "action": "discard", "version_id": "v9"}
+    assert _call(api, "POST", REQUEST, body=unknown, **admin)[0] == 404
+    assert "request" not in _state_row()
