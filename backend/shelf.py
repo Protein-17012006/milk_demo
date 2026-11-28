@@ -8,7 +8,9 @@ A bucket is a 5-minute slot in ICT (UTC+7), named by its first minute: YYYYMMDD-
 from __future__ import annotations
 
 import json
+import math
 import re
+import statistics
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -28,6 +30,9 @@ RECOMPUTE_DAYS = 15
 SUGGEST_DAYS = 7
 CHECK_TTL_DAYS = 15
 ROLLUP_TTL_DAYS = 90
+PRODUCTS_MIN_BOXES = 3  # this many sure named boxes anywhere in the frame show the shelf is in view
+PRODUCTS_MIN_CONF = 0.8  # a box this sure counts toward PRODUCTS_MIN_BOXES
+ARRANGEMENT_JUMP_PX = 500  # the cans' position moving further than this (pixels of the 2560x1440 frame) is a move
 GAP_MINUTES = 30  # two measured checks further apart than this have a gap between them: the shelf was not seen
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -93,6 +98,43 @@ def sees_display(capture: dict) -> bool:
     return capture.get("display_visible", True) is not False
 
 
+def sure_boxes(capture: dict) -> list[dict]:
+    """The named boxes of a capture that are at least PRODUCTS_MIN_CONF sure."""
+    return [b for b in capture_boxes(capture) if b["sku_id"] and b["conf"] >= PRODUCTS_MIN_CONF]
+
+
+def sees_products(capture: dict) -> bool:
+    """Whether the capture holds PRODUCTS_MIN_BOXES sure named boxes, wherever they are in the frame."""
+    return len(sure_boxes(capture)) >= PRODUCTS_MIN_BOXES
+
+
+def sees_shelf(capture: dict) -> bool:
+    """Whether the capture sees the shelf: the zone check passes, or the model sees the cans elsewhere."""
+    return sees_display(capture) or sees_products(capture)
+
+
+def _median_point(points: list[tuple[float, float]]) -> list[int]:
+    return [round(statistics.median(p[0] for p in points)), round(statistics.median(p[1] for p in points))]
+
+
+def capture_position(capture: dict) -> list[int] | None:
+    """Where the cans are in one capture: the median centre [x, y] of its sure boxes; None when it sees no products."""
+    if not sees_products(capture):
+        return None
+    return _median_point([(b["box"][0] + b["box"][2] / 2, b["box"][1] + b["box"][3] / 2) for b in sure_boxes(capture)])
+
+
+def products_position(captures: list[dict]) -> list[int] | None:
+    """Where the cans are over several captures: the median of their positions; None when none has one."""
+    points = [p for p in (capture_position(c) for c in captures) if p is not None]
+    return _median_point([(p[0], p[1]) for p in points]) if points else None
+
+
+def far_apart(a: list[float], b: list[float]) -> bool:
+    """Whether two [x, y] points are more than ARRANGEMENT_JUMP_PX apart (exactly that far is not)."""
+    return math.hypot(a[0] - b[0], a[1] - b[1]) > ARRANGEMENT_JUMP_PX
+
+
 def _frame_boxes(capture: dict) -> dict[str, list]:
     """Per product, its boxes ([x, y, width, height]) in one capture's frame, from the capture's rows."""
     boxes: dict[str, list] = {}
@@ -105,30 +147,38 @@ def _frame_boxes(capture: dict) -> dict[str, list]:
 def build_check(bucket: str, captures: list[dict]) -> dict[str, Any]:
     """One check of a store, from the captures that see the display: per SKU, the lower median of each camera's
     captures (a SKU missing from a capture counts 0 there), summed over cameras. Unrecognized rows are left out.
-    confident_skus: SKUs with one box at CONFIDENT or more.
+    confident_skus: SKUs with one box at CONFIDENT or more; confident_by_camera has them per camera.
+    positions: per camera, where the cans stood (products_position of its captures that see the shelf).
+    captures_zone: captures that pass the zone check alone.
 
-    The check is measurable when at least half of its captures see the display; otherwise it says why. image_key
+    A capture sees the shelf when the zone check passes or sure boxes show the cans elsewhere (sees_shelf).
+    The check is measurable when at least half of its captures see the shelf; otherwise it says why. image_key
     and source_bucket are the frame of the first capture (by capture_id) that sees the display and has one, for
     event photos; frame_boxes are each product's boxes in that very frame ({} without a frame), so a photo of an
     event can show where its product stood. They change no count."""
-    seeing = [item for item in captures if sees_display(item)]
+    seeing = [item for item in captures if sees_shelf(item)]
     per_camera: dict[str, list[dict[str, int]]] = defaultdict(list)
-    confident: set[str] = set()
+    confident: dict[str, set[str]] = defaultdict(set)
+    seen_by_camera: dict[str, list[dict]] = defaultdict(list)
     for item in seeing:
         units: dict[str, int] = defaultdict(int)
         for row in _rows(item):
             if row.get("sku_id"):
                 units[row["sku_id"]] += int(row.get("unit_count", 0))
-        per_camera[str(item.get("camera_id", ""))].append(units)
+        camera = str(item.get("camera_id", ""))
+        per_camera[camera].append(units)
+        seen_by_camera[camera].append(item)
+        confident.setdefault(camera, set())  # a camera that sees the shelf is listed, even with no sure product
         for box in capture_boxes(item):
             name = resolve_sku_alias(box["sku_id"])[0] if box["sku_id"] else None
             if name and box["conf"] >= CONFIDENT:
-                confident.add(name)
+                confident[camera].add(name)
     counts: dict[str, int] = defaultdict(int)
     for caps in per_camera.values():
         for sku in {s for c in caps for s in c}:
             counts[sku] += lower_median([c.get(sku, 0) for c in caps])
     framed = sorted((item for item in seeing if item.get("image_key")), key=lambda item: str(item["capture_id"]))
+    positions = {cam: pos for cam, caps in seen_by_camera.items() if (pos := products_position(caps)) is not None}
     measurable = bool(seeing) and 2 * len(seeing) >= len(captures)
     check = {
         "bucket": bucket,
@@ -137,7 +187,10 @@ def build_check(bucket: str, captures: list[dict]) -> dict[str, Any]:
         "captures_visible": len(seeing),
         "measurable": measurable,
         "cameras": sorted({str(item.get("camera_id", "")) for item in captures}),
-        "confident_skus": sorted(confident),
+        "confident_skus": sorted(set().union(*confident.values())),
+        "confident_by_camera": {cam: sorted(names) for cam, names in sorted(confident.items())},
+        "positions": positions,
+        "captures_zone": sum(1 for item in captures if sees_display(item)),
         "image_key": framed[0]["image_key"] if framed else None,
         "source_bucket": (framed[0].get("source_bucket") or None) if framed else None,
         "frame_boxes": _frame_boxes(framed[0]) if framed else {},

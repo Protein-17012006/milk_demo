@@ -13,17 +13,24 @@ from shelf import (  # noqa: E402
     add_buckets,
     bucket_of,
     build_check,
+    capture_position,
     change_pct,
     expected_at,
+    far_apart,
     gap_between,
     is_open,
     merge,
     open_buckets,
+    products_position,
     rollup,
+    sees_shelf,
     step_state,
     totals,
     valid_hours,
 )
+
+TS = "2026-11-21T14:00:10+07:00"
+PHANTOM = {"sku_id": "cheese145", "conf": 0.5, "box": [0, 0, 8, 8]}  # a night phantom: low confidence
 
 
 def cap(
@@ -253,7 +260,7 @@ def test_change_pct():
 def test_a_check_counts_only_captures_that_see_the_display():
     caps = [
         cap("CAM-A", "2026-11-23T14:05:10+07:00", {"X": 4}),
-        cap("CAM-A", "2026-11-23T14:06:10+07:00", {}, visible=False),
+        cap("CAM-A", "2026-11-23T14:06:10+07:00", {}, boxes=[PHANTOM], visible=False),
         cap("CAM-A", "2026-11-23T14:07:10+07:00", {"X": 4}),
     ]
     c = build_check("20261123-1405", caps)
@@ -261,7 +268,7 @@ def test_a_check_counts_only_captures_that_see_the_display():
 
 
 def test_a_check_mostly_without_the_display_is_not_measurable():
-    caps = [cap("CAM-A", f"2026-11-23T14:0{m}:10+07:00", {}, visible=m == 5) for m in (5, 6, 7)]
+    caps = [cap("CAM-A", f"2026-11-23T14:0{m}:10+07:00", {}, boxes=[PHANTOM], visible=m == 5) for m in (5, 6, 7)]
     assert build_check("20261123-1405", caps)["measurable"] is False
 
 
@@ -278,7 +285,9 @@ def test_a_check_keeps_one_frame_for_event_photos():
 
 
 def test_a_check_without_the_display_says_why():
-    hidden = build_check("20261123-1405", [cap("CAM-A", "2026-11-23T14:05:10+07:00", {"X": 3}, visible=False)])
+    hidden = build_check(
+        "20261123-1405", [cap("CAM-A", "2026-11-23T14:05:10+07:00", {"X": 3}, boxes=[PHANTOM], visible=False)]
+    )
     assert (hidden["counts"], hidden["unmeasured_reason"]) == ({}, "display_not_visible")
     assert "unmeasured_reason" not in build_check("20261123-1405", [cap("CAM-A", "2026-11-23T14:05:10+07:00", {})])
 
@@ -404,3 +413,78 @@ def test_a_check_keeps_the_boxes_of_the_frame_it_shows():
     assert check["image_key"] == "frames/a.jpg"
     assert check["frame_boxes"] == {cheese: [[0, 0, 8, 8], [10, 0, 8, 8]], "Slide Hot & Spicy 160g": [[0, 0, 8, 8]]}
     assert build_check("20261121-1400", [later])["frame_boxes"] == {}  # no frame, so no boxes of it
+
+
+# --- Shelf not in view: seeing the shelf ---
+
+
+def _sure(k: int, cx: int, cy: int, sku: str = "cheese145") -> list[dict]:
+    """k sure boxes (conf 0.9) all centred on (cx, cy)."""
+    return [{"sku_id": sku, "conf": 0.9, "box": [cx - 5, cy - 5, 10, 10]} for _ in range(k)]
+
+
+def test_a_capture_away_from_the_zone_sees_the_shelf_by_three_sure_boxes():
+    sure = [{"sku_id": "cheese145", "conf": 0.9, "box": [100 * k, 0, 10, 10]} for k in range(3)]
+    assert sees_shelf(cap("CAM-S01-A", TS, {}, boxes=sure, visible=False))
+    assert not sees_shelf(cap("CAM-S01-A", TS, {}, boxes=sure[:2], visible=False))
+    assert not sees_shelf(cap("CAM-S01-A", TS, {}, boxes=[{**b, "conf": 0.79} for b in sure], visible=False))
+    assert not sees_shelf(cap("CAM-S01-A", TS, {}, boxes=[{**b, "sku_id": None} for b in sure], visible=False))
+
+
+def test_a_capture_the_zone_check_passes_sees_the_shelf_without_boxes():
+    assert sees_shelf(cap("CAM-S01-A", TS, {}, boxes=[], visible=True))
+    assert sees_shelf(cap("CAM-S01-A", TS, {}))  # older than the display check
+
+
+def test_capture_position_is_the_median_centre_of_its_sure_boxes():
+    boxes = [
+        {"sku_id": "cheese145", "conf": 0.9, "box": [0, 0, 10, 10]},
+        {"sku_id": "hot160", "conf": 0.9, "box": [100, 0, 10, 10]},
+        {"sku_id": "hot160", "conf": 0.95, "box": [200, 40, 10, 10]},
+        {"sku_id": "hot160", "conf": 0.5, "box": [2000, 2000, 10, 10]},  # not sure: left out
+    ]
+    assert capture_position(cap("CAM-S01-A", TS, {}, boxes=boxes, visible=False)) == [105, 5]
+    assert capture_position(cap("CAM-S01-A", TS, {}, boxes=boxes[:2], visible=False)) is None
+
+
+def test_products_position_is_the_median_of_the_captures_positions():
+    # three captures centred near (100, 10), (110, 12) and (400, 50), and one without a position
+    caps = [
+        cap("CAM-S01-A", TS, {}, boxes=_sure(3, 100, 10), visible=False),
+        cap("CAM-S01-A", TS, {}, boxes=_sure(3, 110, 12), visible=False),
+        cap("CAM-S01-A", TS, {}, boxes=_sure(3, 400, 50), visible=False),
+        cap("CAM-S01-A", TS, {}, boxes=[PHANTOM], visible=False),
+    ]
+    assert products_position(caps) == [110, 12]
+    assert products_position([cap("CAM-S01-A", TS, {}, visible=False)]) is None
+
+
+def test_far_apart_means_more_than_500_px():
+    assert not far_apart([0, 0], [300, 400])  # exactly 500
+    assert far_apart([0, 0], [300, 401])
+    assert far_apart([1068, 246], [290, 412])  # 28/11 12:10 -> 12:15
+    assert not far_apart([820, 148], [934, 527])  # 27/11 12:05, 399 px
+
+
+def test_a_check_counts_captures_that_see_products_away_from_the_zone():
+    cheese = "Slide Cheese 145g"
+    caps = [
+        cap("CAM-S01-A", TS, {cheese: 5}, visible=False),
+        cap("CAM-S01-A", "2026-11-21T14:01:10+07:00", {cheese: 5}, visible=False),
+    ]
+    check = build_check("20261121-1400", caps)
+    assert (check["counts"], check["captures_visible"], check["measurable"]) == ({cheese: 5}, 2, True)
+
+
+def test_a_check_keeps_positions_confident_products_by_camera_and_zone_captures():
+    cheese = "Slide Cheese 145g"
+    in_zone = cap("CAM-S01-A", TS, {}, boxes=_sure(3, 1000, 300), visible=True)
+    away = cap("CAM-S01-A", "2026-11-21T14:01:10+07:00", {}, boxes=_sure(3, 1000, 300), visible=False)
+    other = cap("CAM-S01-B", "2026-11-21T14:02:10+07:00", {}, boxes=[PHANTOM], visible=True)
+    check = build_check("20261121-1400", [in_zone, away, other])
+    assert check["positions"] == {"CAM-S01-A": [1000, 300]}
+    assert "CAM-S01-B" not in check["positions"]
+    assert check["confident_by_camera"]["CAM-S01-A"] == [cheese]
+    assert check["confident_by_camera"].get("CAM-S01-B", []) == []
+    assert check["confident_skus"] == [cheese]
+    assert check["captures_zone"] == 2  # the in-zone capture and camera B's (visible=True)
