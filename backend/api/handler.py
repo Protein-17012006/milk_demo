@@ -265,13 +265,76 @@ def _latest_frames(s3, stock_items: list[dict[str, Any]], sku_map: dict[str, dic
     return frames
 
 
+def _shelf_states(ddb, stores: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Each store's shelf `state` item (one get_item per store). A decoration of /products and /kpi: a store whose
+    state cannot be read is logged and left out, as if nothing in it were out of view."""
+    states: dict[str, dict[str, Any]] = {}
+    if not SHELF_TABLE:
+        return states
+    for store in stores:
+        try:
+            item = ddb.Table(SHELF_TABLE).get_item(Key={"store_id": store["store_id"], "key": "state"}).get("Item")
+        except ClientError as exc:
+            print(json.dumps({"shelf_state_failed": store.get("store_id"), "error": repr(exc)}))
+            continue
+        if item:
+            states[store["store_id"]] = from_dynamodb(item)
+    return states
+
+
+def _not_in_view_by_store(
+    ddb, stores: list[dict[str, Any]], states: dict[str, dict[str, Any]] | None = None
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """store_id -> {SKU -> {since, last_units, last_at}} of the products whose place is not in view, times as ISO."""
+    if states is None:
+        states = _shelf_states(ddb, stores)
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for store_id, state in states.items():
+        hidden = {}
+        for sku, st in (state.get("skus") or {}).items():
+            view = shelf.view_of(st)
+            if view:
+                hidden[sku] = {
+                    "since": shelf.bucket_time(view["since"]).isoformat() if view["since"] else None,
+                    "last_units": view["last_units"],
+                    "last_at": shelf.bucket_time(view["last_at"]).isoformat() if view["last_at"] else None,
+                }
+        if hidden:
+            out[store_id] = hidden
+    return out
+
+
+def _merge_not_in_view(
+    by_store: dict[str, dict[str, dict[str, Any]]], states: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """SKU -> info across stores: not in view when some store says so and no store has it in view; the info comes
+    from the store whose "since" is newest."""
+    merged: dict[str, dict[str, Any]] = {}
+    for hidden in by_store.values():
+        for sku, info in hidden.items():
+            if any(
+                shelf.in_view((st.get("skus") or {}).get(sku))
+                for st in states.values()
+                if sku in (st.get("skus") or {})
+            ):
+                continue
+            if sku not in merged or str(info["since"] or "") > str(merged[sku]["since"] or ""):
+                merged[sku] = info
+    return merged
+
+
 def _load_products_catalog(
-    ddb, tables: CatalogTables | None = None, plan: set[str] | None = None
+    ddb,
+    tables: CatalogTables | None = None,
+    plan: set[str] | None = None,
+    not_in_view: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     """Aggregate latest_stock across stores, enriched with sku_master & store_list.
 
     plan: the SKUs on the shelf plan (_plan_skus). When given, each product says whether it is on the plan and, if
-    so, how its stock stands by the shelf rule; a plan SKU that was never seen is listed at 0 units."""
+    so, how its stock stands by the shelf rule; a plan SKU that was never seen is listed at 0 units.
+    not_in_view: SKU -> {since, last_units, last_at} of plan products whose place is outside the frame; such a product
+    says NOT_IN_VIEW instead of a stock status."""
     stock_items, sku_items, store_items = tables or _catalog_tables(ddb)
 
     sku_map = {s["sku_id"]: s for s in sku_items}
@@ -340,6 +403,9 @@ def _load_products_catalog(
             on_plan = sku_id in plan
             products[-1]["in_shelf_plan"] = on_plan
             products[-1]["stock_status"] = shelf.status_of(total_units) if on_plan else None
+            if on_plan and sku_id in (not_in_view or {}):
+                products[-1]["stock_status"] = "NOT_IN_VIEW"
+                products[-1]["not_in_view"] = not_in_view[sku_id]
 
     return products, unrecognized_max, total_stores
 
@@ -353,7 +419,11 @@ def _handle_get_products(event: dict[str, Any], s3, ddb) -> dict[str, Any]:
 
     tables = _catalog_tables(ddb)
     stock_items, sku_items, store_items = tables
-    products, unrecognized_units, total_stores = _load_products_catalog(ddb, tables, _plan_skus(ddb, store_items))
+    states = _shelf_states(ddb, store_items)
+    not_in_view = _merge_not_in_view(_not_in_view_by_store(ddb, store_items, states), states)
+    products, unrecognized_units, total_stores = _load_products_catalog(
+        ddb, tables, _plan_skus(ddb, store_items), not_in_view
+    )
 
     filtered = []
     for p in products:
@@ -890,8 +960,9 @@ def _handle_kpi(event: dict[str, Any], ddb) -> dict[str, Any]:
     proc_times = [int(c.get("processing_time_ms", 0)) for c in captures if int(c.get("processing_time_ms", 0)) > 0]
     avg_proc_ms = round(sum(proc_times) / len(proc_times)) if proc_times else 0
     params = event.get("queryStringParameters") or {}
-    if params.get("store_id") or _category_skus(ddb, params.get("category")) is not None:
-        total_units = _on_shelf_units(ddb, params)  # the Dashboard's Store and Category filters
+    hidden = _not_in_view_by_store(ddb, _stores_for(ddb, params))
+    if hidden or params.get("store_id") or _category_skus(ddb, params.get("category")) is not None:
+        total_units = _on_shelf_units(ddb, params, hidden)  # the Dashboard's Store and Category filters
     else:
         total_units = sum(p["unit_count"] for p in products)
 
@@ -913,14 +984,18 @@ def _handle_kpi(event: dict[str, Any], ddb) -> dict[str, Any]:
     )
 
 
-def _on_shelf_units(ddb, params: dict[str, Any]) -> int:
-    """Units on the shelf now for the chosen stores and category, from the latest reading of each SKU."""
+def _on_shelf_units(ddb, params: dict[str, Any], hidden: dict[str, dict[str, dict[str, Any]]]) -> int:
+    """Units on the shelf now for the chosen stores and category, from the latest reading of each SKU; a product
+    whose place is not in view (hidden: store -> SKU -> info) is left out."""
     stores = {s["store_id"] for s in _stores_for(ddb, params)}
     skus = _category_skus(ddb, params.get("category"))
     return sum(
         int(row.get("smoothed_count", row.get("unit_count", 0)))
         for row in _scan_all(ddb.Table(LATEST_STOCK_TABLE))
-        if row["sku_id"] != UNRECOGNIZED and row.get("store_id") in stores and (skus is None or row["sku_id"] in skus)
+        if row["sku_id"] != UNRECOGNIZED
+        and row.get("store_id") in stores
+        and (skus is None or row["sku_id"] in skus)
+        and row["sku_id"] not in hidden.get(row.get("store_id"), {})
     )
 
 

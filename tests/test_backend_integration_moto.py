@@ -13,6 +13,7 @@ from pathlib import Path
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1635,6 +1636,99 @@ def test_kpi_on_shelf_units_follow_the_category_and_store_filters(monkeypatch: p
     assert _kpi(api, category="Milk")["total_on_shelf_units"] == 2
     assert _kpi(api, category="Snacks")["total_on_shelf_units"] == 3
     assert _kpi(api, store_id="DEMO-S01", category="Snacks")["total_on_shelf_units"] == 3
+
+
+def _hot_not_in_view(api, ingest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan Cheese + Hot; the display moves at 14:10 and Hot's place leaves the frame (its row still holds 3)."""
+    _at(api, monkeypatch, "2026-11-21T14:22:00+07:00")
+    _shelf_plan(expected=(CHEESE, HOT))
+    _seen(ingest, "140010", OLD_PLACE, [("cheese145", 5), ("hot160", 3)])
+    _seen(ingest, "140510", OLD_PLACE, [("cheese145", 5), ("hot160", 3)])
+    _tick(ingest, now="2026-11-21T14:12:00+07:00")
+    _seen(ingest, "141010", NEW_PLACE, [("cheese145", 5)])
+    _seen(ingest, "141510", NEW_PLACE, [("cheese145", 5)])
+    _tick(ingest)
+
+
+def _products(api) -> dict[str, dict]:
+    return {p["sku_id"]: p for p in _call(api, "GET", "/v1/products", groups="datagent")[1]["items"]}
+
+
+@mock_aws
+def test_products_say_not_in_view_with_since_and_last_seen(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _hot_not_in_view(api, ingest, monkeypatch)
+    items = _products(api)
+    assert items[HOT]["stock_status"] == "NOT_IN_VIEW"
+    assert items[HOT]["not_in_view"] == {
+        "since": "2026-11-21T14:10:00+07:00",
+        "last_units": 3,
+        "last_at": "2026-11-21T14:05:00+07:00",
+    }
+    assert items[CHEESE]["stock_status"] == "IN_STOCK" and "not_in_view" not in items[CHEESE]
+
+
+@mock_aws
+def test_products_not_in_view_read_failure_leaves_the_list_answering(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _hot_not_in_view(api, ingest, monkeypatch)
+
+    class Broken:
+        def Table(self, _name):  # noqa: N802 - boto3's name
+            return self
+
+        def get_item(self, **_kw):
+            raise ClientError({"Error": {"Code": "ProvisionedThroughputExceededException", "Message": "x"}}, "GetItem")
+
+    assert api._shelf_states(Broken(), [{"store_id": "DEMO-S01"}]) == {}
+    assert api._not_in_view_by_store(Broken(), [{"store_id": "DEMO-S01"}]) == {}
+
+
+@mock_aws
+def test_a_product_in_view_at_one_store_is_not_marked_not_in_view(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+
+    def gone(since, units):
+        return {"in_view": False, "not_in_view_since": since, "last_seen_units": units, "last_seen_at": "20261121-1355"}
+
+    states = {
+        "A": {"skus": {"X": gone("20261121-1400", 1), "Y": gone("20261121-1400", 2), "Z": gone("20261121-1410", 4)}},
+        "B": {"skus": {"X": {"in_view": True}, "Y": gone("20261121-1420", 7)}},
+    }
+    by_store = {
+        s: {k: api.shelf.view_of(v) for k, v in st["skus"].items() if api.shelf.view_of(v)} for s, st in states.items()
+    }
+    merged = api._merge_not_in_view(by_store, states)
+    assert set(merged) == {"Y", "Z"}  # X is in view at B
+    assert merged["Y"]["last_units"] == 7  # the store with the newest "since"
+
+
+@mock_aws
+def test_kpi_on_shelf_units_leave_out_products_not_in_view(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _hot_not_in_view(api, ingest, monkeypatch)
+    assert _products(api)[HOT]["unit_count"] == 3  # the row still holds the last count
+    assert _kpi(api)["total_on_shelf_units"] == 5
+    assert _kpi(api, store_id="DEMO-S01")["total_on_shelf_units"] == 5
+    assert _kpi(api, category="Snacks")["total_on_shelf_units"] == 5
+
+
+@mock_aws
+def test_oos_now_does_not_count_a_product_not_in_view(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _at(api, monkeypatch, "2026-11-21T14:32:00+07:00")
+    _shelf_plan(expected=(CHEESE, HOT))
+    both = [("cheese145", 5), ("hot160", 3)]
+    cheese = [("cheese145", 5)]
+    _seen(ingest, "140010", OLD_PLACE, both)
+    _seen(ingest, "140510", OLD_PLACE, both)
+    _seen(ingest, "141010", OLD_PLACE, cheese)
+    _seen(ingest, "141510", OLD_PLACE, cheese)
+    _seen(ingest, "142010", NEW_PLACE, cheese)
+    _seen(ingest, "142510", NEW_PLACE, cheese)
+    _tick(ingest, now="2026-11-21T14:32:00+07:00")
+    assert _kpi(api)["oos_now"]["count"] == 0
+    assert _products(api)[HOT]["stock_status"] == "NOT_IN_VIEW"
 
 
 @mock_aws
