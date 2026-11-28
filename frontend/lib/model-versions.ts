@@ -99,3 +99,11 @@ export function skuRows(perSku: ApiVersionTally["per_sku"], names: Record<string
     }))
     .sort((a, b) => b.units - a.units || a.name.localeCompare(b.name));
 }
+
+/** Whether a version was trained with people's labels: the training run writes label_frames and labellers on it. */
+export function versionLabelsText(v: { label_frames?: number; labellers?: number }): string {
+  if (!v.label_frames) return "No people's labels in this version.";
+  const frames = `${v.label_frames} labelled ${v.label_frames === 1 ? "frame" : "frames"}`;
+  if (!v.labellers) return `Trained with ${frames}.`;
+  return `Trained with ${frames} from ${v.labellers} ${v.labellers === 1 ? "person" : "people"}.`;
+}

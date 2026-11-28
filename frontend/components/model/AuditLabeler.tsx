@@ -43,6 +43,8 @@ interface AuditLabelerProps {
   onClose(): void;
   /** Called after a save or a skip, so the page can reload its numbers. */
   onChanged(): void;
+  /** A team admin may vouch for the frame they just labelled: its answers become an answer key. */
+  isAdmin?: boolean;
 }
 
 /**
@@ -51,10 +53,12 @@ interface AuditLabelerProps {
  * Faster ways to the same labels: keys 1 to 4 judge the highlighted box and move on, one button marks every box
  * left as right, and Enter saves once Save is allowed. The rule for saving is unchanged (canSave).
  */
-export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps) {
+export function AuditLabeler({ auditIds, onClose, onChanged, isAdmin = false }: AuditLabelerProps) {
   const { getIdToken } = useAuth();
   const api = useMemo(() => createApiClient(getIdToken), [getIdToken]);
   const [index, setIndex] = useState(0);
+  // team admins: mark this frame's answers as an answer key once they are saved
+  const [asKey, setAsKey] = useState(false);
   const [detail, setDetail] = useState<ApiAuditDetail | null>(null);
   const [labels, setLabels] = useState<Record<number, BoxLabel>>({});
   const [missed, setMissed] = useState<MissedPoint[]>([]);
@@ -166,6 +170,7 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
     setLabels({});
     setMissed([]);
     setMissesChecked(false);
+    setAsKey(false);
     setActiveBox(null);
     setPendingPoint(null);
     setSkipping(false);
@@ -179,6 +184,17 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
     setBusy(true);
     try {
       await api.saveAudit(detail.audit_id, toPayload(labels, missed));
+      if (isAdmin && asKey) {
+        try {
+          await api.setAnswerKey(detail.audit_id, true);
+        } catch (err) {
+          // the labels are saved; the frame stays on screen so the reason can be read
+          onChanged();
+          setAsKey(false);
+          setMessage(`Saved, but not marked as an answer key: ${err instanceof Error ? err.message : String(err)}`);
+          return;
+        }
+      }
       onChanged();
       goNext();
     } catch (err) {
@@ -546,6 +562,18 @@ export function AuditLabeler({ auditIds, onClose, onChanged }: AuditLabelerProps
                 />
                 <span>I checked for cans the model missed (click the shelf to add them)</span>
               </label>
+              {isAdmin && (
+                <label className="flex w-full items-start gap-2 text-[12.5px]">
+                  <input
+                    type="checkbox"
+                    data-answer-key
+                    checked={asKey}
+                    onChange={(e) => setAsKey(e.target.checked)}
+                    className="mt-0.5 cursor-pointer"
+                  />
+                  <span>Use as answer key (I checked every unit)</span>
+                </label>
+              )}
               <button
                 type="button"
                 data-save

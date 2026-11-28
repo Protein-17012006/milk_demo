@@ -4,7 +4,15 @@
  * whole labelled frames (docs/superpowers/specs/2026-11-24-reliability-design.md, 1.2c).
  */
 
-import type { ApiCheckLevel, ApiDisplayCheck, ApiInterval, ApiPeriodSku, ApiStat, DayPeriod } from "./api";
+import type {
+  ApiCheckLevel,
+  ApiDisplayCheck,
+  ApiInterval,
+  ApiMyLabels,
+  ApiPeriodSku,
+  ApiStat,
+  DayPeriod,
+} from "./api";
 
 export interface KpiValue {
   value: number | null;
@@ -210,4 +218,33 @@ export function displayCheckText(d: ApiDisplayCheck): string {
   const agree = statText(d.agree, "percent", "scoring frame");
   if (d.agree.value === null) return `Display check: ${agree}`;
   return `Display check: matched the labellers on ${agree} · wrongly "not in view" ${d.false_not_visible} · wrongly "in view" ${d.false_visible}`;
+}
+
+/**
+ * "Your labels" under the Label frames button: what the signed-in labeller labelled and where it is. The second
+ * half of the first line names a live version only when one was trained with people's labels; until then it says
+ * plainly that none was. Scoring frames get their own line: they measure the model and never train it.
+ */
+export function myLabelsText(res: ApiMyLabels): string[] {
+  const { teaching, scoring, in_live_version: live } = res;
+  if (teaching.frames === 0 && scoring.frames === 0) return ["You have not labelled a frame yet."];
+  const lines: string[] = [];
+  if (teaching.frames === 0) {
+    lines.push("You have not labelled a training frame yet.");
+  } else {
+    const done =
+      `Your labels on training frames: ${plural(teaching.boxes, "box", "boxes")} and ` +
+      `${plural(teaching.missed, "missed unit")} on ${plural(teaching.frames, "frame")}.`;
+    const where = live
+      ? ` Version ${live.version_id}, live since ${live.live_since.slice(8, 10)}/${live.live_since.slice(5, 7)}, ` +
+        `was trained with ${plural(live.label_frames, "labelled frame")}.`
+      : " No live version has been trained from people's labels yet, so they wait for the first training; no date is set.";
+    lines.push(done + where);
+  }
+  if (scoring.frames > 0) {
+    lines.push(
+      `Scoring frames you labelled: ${scoring.frames}. They measure the model on this page and are never used to train it.`
+    );
+  }
+  return lines;
 }

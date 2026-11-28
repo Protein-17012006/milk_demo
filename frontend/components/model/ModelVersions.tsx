@@ -12,6 +12,7 @@ import {
   skuRows,
   statusText,
   verdictText,
+  versionLabelsText,
 } from "@/lib/model-versions";
 
 interface ModelVersionsProps {
@@ -269,7 +270,8 @@ export function ModelVersions({ load, send, isAdmin, names }: ModelVersionsProps
                   {versions.map((v) => (
                     <li key={v.version_id}>
                       <span className="font-mono text-[12px] text-[#374151]">{v.version_id}</span> ·{" "}
-                      {statusText(v.status, v.stopped_reason)} · {sinceText(v.created_at).slice(0, 5)}
+                      {statusText(v.status, v.stopped_reason)} · {sinceText(v.created_at).slice(0, 5)} ·{" "}
+                      <span data-version-labels>{versionLabelsText(v)}</span>
                     </li>
                   ))}
                 </ul>

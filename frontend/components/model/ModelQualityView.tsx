@@ -10,6 +10,7 @@ import {
   type ApiCheckLevel,
   type ApiModelHealthItem,
   type ApiModelSummary,
+  type ApiMyLabels,
   type ApiPerSkuRow,
   type ApiPeriod,
   type DayPeriod,
@@ -26,6 +27,7 @@ import {
   ciText,
   kpiCiText,
   kpiDisplay,
+  myLabelsText,
   notEnoughText,
   pct,
   periodCellText,
@@ -39,6 +41,7 @@ import { labelQueueOrder, relabelQueue } from "@/lib/audit-labeling";
 import { BADGE_COLORS, badgeLabel, reliabilityText } from "@/lib/reliability-ui";
 import { runStatus, type RunStatus } from "@/lib/model-status";
 import { AuditLabeler } from "./AuditLabeler";
+import { LabellerAgreement } from "./LabellerAgreement";
 import { LiveHealth } from "./LiveHealth";
 import { ModelVersions } from "./ModelVersions";
 
@@ -76,6 +79,24 @@ export function ModelQualityView() {
   const [healthMetric, setHealthMetric] = useState<HealthMetric>("conf_median");
   const [reloadKey, setReloadKey] = useState(0); // bumped after a save or a skip
   const [findingOldFrames, setFindingOldFrames] = useState(false);
+  // what the signed-in labeller labelled and where it is; the line is left out when it cannot be read
+  const [myLabels, setMyLabels] = useState<ApiMyLabels | null>(null);
+
+  useEffect(() => {
+    if (!allowed) return;
+    let cancelled = false;
+    api
+      .getMyLabels()
+      .then((res) => {
+        if (!cancelled) setMyLabels(res);
+      })
+      .catch(() => {
+        if (!cancelled) setMyLabels(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [allowed, api, reloadKey]);
 
   useEffect(() => {
     if (!allowed) return;
@@ -200,6 +221,14 @@ export function ModelQualityView() {
         </div>
       </header>
 
+      {myLabels && (
+        <div data-my-labels className="mt-3 flex flex-col gap-[2px] text-[12.5px] leading-[1.5] text-[#374151]">
+          {myLabelsText(myLabels).map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </div>
+      )}
+
       {(runLines.length > 0 || flagThreshold !== null) && (
         <div className="mt-3 flex flex-col gap-[3px] text-[12.5px] leading-[1.5] text-[#374151]">
           {runLines.map(({ storeId, status }) => (
@@ -228,6 +257,10 @@ export function ModelQualityView() {
         isAdmin={hasGroup("team_admin")}
         names={{ ...names, ...(summary?.sku_names ?? {}) }}
       />
+
+      {hasGroup("team_admin") && (
+        <LabellerAgreement load={api.getLabellers} setKey={api.setAnswerKey} reloadKey={reloadKey} />
+      )}
 
       {error && <p className="mt-4 rounded-[8px] bg-[#FEF2F2] px-3 py-2 text-[13px] text-[#991B1B]">{error}</p>}
 
@@ -388,7 +421,12 @@ export function ModelQualityView() {
       />
 
       {labelling && (
-        <AuditLabeler auditIds={labelling} onClose={() => setLabelling(null)} onChanged={() => setReloadKey((k) => k + 1)} />
+        <AuditLabeler
+          auditIds={labelling}
+          onClose={() => setLabelling(null)}
+          onChanged={() => setReloadKey((k) => k + 1)}
+          isAdmin={hasGroup("team_admin")}
+        />
       )}
     </div>
   );

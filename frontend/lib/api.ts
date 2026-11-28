@@ -365,6 +365,49 @@ export interface ApiModelVersion {
   stopped_reason?: string;
   decided_by?: string;
   decided_at?: string;
+  /** Written by a training run that used people's labels: how many labelled frames, from how many people. */
+  label_frames?: number;
+  labellers?: number;
+}
+
+/** Frames, judged boxes and missed marks of one labeller. */
+export interface ApiLabelTally {
+  frames: number;
+  boxes: number;
+  missed: number;
+}
+
+/** GET /model/my-labels: what the signed-in labeller labelled. teaching = training, review and comparison frames;
+ * in_live_version names the live version only when it was trained with people's labels. */
+export interface ApiMyLabels {
+  teaching: ApiLabelTally;
+  scoring: ApiLabelTally;
+  in_live_version: { version_id: string; live_since: string; label_frames: number } | null;
+}
+
+/** One labeller's agreement with the answer keys in one ISO week (GET /model/labellers, team admins only). */
+export interface ApiLabellerRow {
+  labeller: string;
+  week: string;
+  frames: number;
+  units: number;
+  agree: number;
+  agreement: number | null;
+}
+
+export interface ApiAnswerKey {
+  audit_id: string;
+  capture_timestamp?: string;
+  answer_key_by?: string;
+  answer_key_at?: string;
+  sheets_done: number;
+  sheets_pending: number;
+}
+
+export interface ApiLabellers {
+  rows: ApiLabellerRow[];
+  keys: ApiAnswerKey[];
+  check_every: number;
 }
 
 export type VersionAction = "put_live" | "discard" | "rollback";
@@ -796,5 +839,17 @@ export function createApiClient(getIdToken: TokenGetter) {
 
     getModelHealth: (days: number) =>
       requestWithAuth(`/model/health?days=${days}`, getIdToken) as Promise<{ items: ApiModelHealthItem[] }>,
+
+    getMyLabels: () => requestWithAuth("/model/my-labels", getIdToken) as Promise<ApiMyLabels>,
+
+    /** Team admins only: the backend answers 403 to anyone else. */
+    getLabellers: () => requestWithAuth("/model/labellers", getIdToken) as Promise<ApiLabellers>,
+
+    /** Team admins only: vouch for a labelled frame's answers, or take that back. */
+    setAnswerKey: (auditId: string, on: boolean) =>
+      requestWithAuth(`/model/audits/${encodeURIComponent(auditId)}/answer-key`, getIdToken, {
+        method: "PUT",
+        body: JSON.stringify({ on }),
+      }) as Promise<{ audit_id: string; answer_key: boolean }>,
   };
 }

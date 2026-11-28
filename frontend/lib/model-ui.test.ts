@@ -8,6 +8,7 @@ import {
   displayCheckText,
   kpiCiText,
   kpiDisplay,
+  myLabelsText,
   notEnoughText,
   periodCellText,
   signedText,
@@ -121,5 +122,60 @@ test("under 10 frames judged by the check, the display check gives its n instead
   assert.equal(
     displayCheckText({ agree: { value: null, ci: null, n: 7 }, false_not_visible: 1, false_visible: 0 }),
     "Display check: Not enough samples (n = 7 scoring frames)"
+  );
+});
+
+// --- "Your labels": what the signed-in labeller did and where it is (operations-loop design 5.4) ---
+
+const NO_LABELS = { frames: 0, boxes: 0, missed: 0 };
+
+test("my labels: nothing yet", () => {
+  assert.deepEqual(myLabelsText({ teaching: NO_LABELS, scoring: NO_LABELS, in_live_version: null }), [
+    "You have not labelled a frame yet.",
+  ]);
+});
+
+test("my labels: no live version was trained with labels, said plainly", () => {
+  assert.deepEqual(
+    myLabelsText({
+      teaching: { frames: 43, boxes: 618, missed: 180 },
+      scoring: { frames: 70, boxes: 774, missed: 47 },
+      in_live_version: null,
+    }),
+    [
+      "Your labels on training frames: 618 boxes and 180 missed units on 43 frames. No live version has been trained from people's labels yet, so they wait for the first training; no date is set.",
+      "Scoring frames you labelled: 70. They measure the model on this page and are never used to train it.",
+    ]
+  );
+});
+
+test("my labels: one of each reads in the singular", () => {
+  const lines = myLabelsText({
+    teaching: { frames: 1, boxes: 1, missed: 1 },
+    scoring: NO_LABELS,
+    in_live_version: null,
+  });
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^Your labels on training frames: 1 box and 1 missed unit on 1 frame\. /);
+});
+
+test("my labels: a live version was trained with labels", () => {
+  const lines = myLabelsText({
+    teaching: { frames: 43, boxes: 618, missed: 180 },
+    scoring: NO_LABELS,
+    in_live_version: { version_id: "slide-v4", live_since: "2026-12-10T09:00:00+07:00", label_frames: 60 },
+  });
+  assert.deepEqual(lines, [
+    "Your labels on training frames: 618 boxes and 180 missed units on 43 frames. Version slide-v4, live since 10/12, was trained with 60 labelled frames.",
+  ]);
+});
+
+test("my labels: only scoring frames so far", () => {
+  assert.deepEqual(
+    myLabelsText({ teaching: NO_LABELS, scoring: { frames: 2, boxes: 20, missed: 0 }, in_live_version: null }),
+    [
+      "You have not labelled a training frame yet.",
+      "Scoring frames you labelled: 2. They measure the model on this page and are never used to train it.",
+    ]
   );
 });

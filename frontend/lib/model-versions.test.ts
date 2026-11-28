@@ -10,6 +10,7 @@ import {
   skuRows,
   statusText,
   verdictText,
+  versionLabelsText,
 } from "./model-versions.ts";
 import type { ApiVerdict, ApiVersionsState } from "./api.ts";
 
@@ -115,4 +116,12 @@ test("the block looks again quickly only while a live machine is working on a fr
   assert.equal(pollDelay({ waiting: true, quiet: true, waitedMs: 20_000 }), 60_000);
   assert.equal(pollDelay({ waiting: true, quiet: false, waitedMs: 3 * 60_000 }), 60_000);
   assert.equal(pollDelay({ waiting: false, quiet: false, waitedMs: 0 }), 60_000);
+});
+
+test("a version says whether people's labels are in it", () => {
+  assert.equal(versionLabelsText({}), "No people's labels in this version.");
+  assert.equal(versionLabelsText({ label_frames: 0 }), "No people's labels in this version.");
+  assert.equal(versionLabelsText({ label_frames: 60, labellers: 3 }), "Trained with 60 labelled frames from 3 people.");
+  assert.equal(versionLabelsText({ label_frames: 1, labellers: 1 }), "Trained with 1 labelled frame from 1 person.");
+  assert.equal(versionLabelsText({ label_frames: 60 }), "Trained with 60 labelled frames.");
 });
