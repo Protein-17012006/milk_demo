@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import os
-import random
+import re
 import time
 import urllib.parse
 import uuid
@@ -602,6 +602,10 @@ def _handle_review_queue(event: dict[str, Any], s3, ddb) -> dict[str, Any]:
     return _json_response(200, {"items": items, "total": len(items)}, event)
 
 
+# CAP-<store code>-<YYYYMMDD>-<HHMMSS>[-n], as the hub names captures
+_CAPTURE_ID = re.compile(r"CAP-[A-Za-z0-9]{1,16}-\d{8}-\d{6}(?:-\d{1,3})?")
+
+
 def _handle_post_correction(event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
     body = _parse_body(event)
     store_id = body.get("store_id") or "DEMO-S01"
@@ -633,8 +637,10 @@ def _handle_post_correction(event: dict[str, Any], user: dict[str, Any], ddb) ->
             event,
         )
 
-    # With the capture known, the correction asks for its frame: the hourly rule gives it the next training slot
-    label_request = "pending" if body.get("capture_id") else None
+    # With the capture known, the correction asks for its frame: the hourly rule gives it a training slot. Only a
+    # real capture id asks (a card without a reading sends "—"): a request for anything else could never be served.
+    capture_id = body.get("capture_id")
+    label_request = "pending" if isinstance(capture_id, str) and _CAPTURE_ID.fullmatch(capture_id) else None
     correction_id = f"COR-{datetime.now(ICT).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
     corr_item = to_dynamodb_safe(
         {
@@ -1581,7 +1587,17 @@ def _whole_audit(item: dict[str, Any]) -> dict[str, Any]:
 
 # What the browser is never told about a frame: that it is a check sheet, whose it is, or that it is an answer key
 # (operations-loop design 5.4: a labeller is not told which frame has a known answer)
-_NOT_TOLD = ("check_of", "assigned_to", "answer_key", "answer_key_by", "answer_key_at")
+# picked_by and correction_id are left out for the same reason: every sampled training frame has picked_by and a
+# check sheet never does.
+_NOT_TOLD = (
+    "check_of",
+    "assigned_to",
+    "answer_key",
+    "answer_key_by",
+    "answer_key_at",
+    "picked_by",
+    "correction_id",
+)
 
 
 def _audit_view(item: dict[str, Any]) -> dict[str, Any]:
@@ -1619,7 +1635,7 @@ def _find_my_audit(ddb, audit_id: str, user: dict[str, Any]) -> dict[str, Any] |
 
 def _assign_check(ddb, user: dict[str, Any]) -> None:
     """After a labeller saved a frame: when their next frame is due to be a check (label_checks.due) and an answer
-    key suits them, puts a check sheet of one such key, drawn at random, in their queue. Never fails the save."""
+    key suits them, puts a check sheet of the newest such key in their queue. Never fails the save."""
     try:
         audits = _scan_all(ddb.Table(AUDITS_TABLE))
         email = user["email"]
@@ -1629,7 +1645,7 @@ def _assign_check(ddb, user: dict[str, Any]) -> None:
         if not keys:
             return
         now_iso = datetime.now(ICT).isoformat(timespec="seconds")
-        sheet = label_checks.sheet_for(random.choice(keys), email, now_iso, uuid.uuid4().hex[:8])
+        sheet = label_checks.sheet_for(label_checks.newest_key(keys), email, now_iso, uuid.uuid4().hex[:8])
         ddb.Table(AUDITS_TABLE).put_item(Item=to_dynamodb_safe(sheet))
     except Exception as exc:  # noqa: BLE001 - the labels are saved; a check that cannot be made is only logged
         print(json.dumps({"check_sheet_failed": repr(exc)}))
@@ -1700,6 +1716,9 @@ def _handle_model_audits(event: dict[str, Any], user: dict[str, Any], ddb) -> di
             "n_boxes": len(json.loads(a.get("ai_boxes_json") or "[]")),
             "labeled_by": a.get("labeled_by"),
             "label_rule": a.get("label_rule"),
+            # when the frame entered the queue: the labeller gets frames in this order, so a check sheet comes
+            # as the newest frame, whatever the age of its picture
+            "queue_at": a.get("sampled_at") or a.get("capture_timestamp"),
         }
         for a in chosen
     ]
@@ -1907,7 +1926,13 @@ def _handle_model_labellers(event: dict[str, Any], user: dict[str, Any], ddb) ->
     ]
     return _json_response(
         200,
-        {"rows": label_agreement.weekly(pairs), "keys": key_rows, "check_every": label_checks.CHECK_EVERY},
+        {
+            "rows": label_agreement.weekly(pairs),
+            "keys": key_rows,
+            "check_every": label_checks.CHECK_EVERY,
+            # labellers whose checks have stopped: no key is left that they did not label, mark or get already
+            "without_key": label_checks.without_key(audits),
+        },
         event,
     )
 

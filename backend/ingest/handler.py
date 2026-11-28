@@ -17,6 +17,7 @@ import heapq
 import json
 import os
 import random
+import re
 import time
 from collections import defaultdict
 from collections.abc import Mapping
@@ -691,47 +692,100 @@ def _close_requests(ddb_resource, rows: list[dict[str, Any]], status: str, **fie
         row["label_request"] = status
 
 
-def serve_label_request(s3_client, ddb_resource, camera_id: str, store_id: str, training_id: str) -> bool:
+_CAPTURE_ID = re.compile(r"CAP-[A-Za-z0-9]+-(?P<day>\d{8})-(?P<time>\d{6})(?:-\d+)?")
+
+
+def _capture_hour(capture_id: Any) -> str | None:
+    """YYYYMMDD-HH of a capture id (CAP-<code>-<YYYYMMDD>-<HHMMSS>[-n]); None when the value is not one."""
+    found = _CAPTURE_ID.fullmatch(capture_id) if isinstance(capture_id, str) else None
+    return f"{found['day']}-{found['time'][:2]}" if found else None
+
+
+def _rows_expired(capture_hour: str, hour: str) -> bool:
+    """Whether a capture of that hour is older than capture rows are kept, seen from the hour being sampled."""
+    taken = datetime.strptime(capture_hour[:8], "%Y%m%d")
+    return taken + timedelta(days=CAPTURE_TTL_DAYS) < datetime.strptime(hour[:8], "%Y%m%d")
+
+
+def _serve_one(
+    s3_client,
+    ddb_resource,
+    camera_id: str,
+    store_id: str,
+    training_id: str,
+    hour: str,
+    request: dict[str, Any],
+    requests: list[dict[str, Any]],
+) -> bool | None:
+    """One request against this camera-hour's training slot. None: go on to the next request (this one was
+    answered, dropped or left waiting). True: its frame is now the hour's training frame. False: the slot was
+    taken meanwhile, so no request is served this hour."""
+    capture_id = request["capture_id"]
+    same = [r for r in requests if r["capture_id"] == capture_id and r["label_request"] == "pending"]
+    capture_hour = _capture_hour(capture_id)
+    if capture_hour is None:
+        _close_requests(ddb_resource, same, "dropped", label_request_note="the reading has no usable frame")
+        return None
+    if capture_hour > hour:
+        # A reading of a later hour than the one being sampled (the run for hour h happens during h+1): that
+        # hour's own run serves it, after its scoring frame is drawn. Served now, the capture could be drawn again
+        # as that hour's scoring frame, and one picture would be both a training and a scoring frame.
+        return None
+    captures = ddb_resource.Table(CAPTURES_TABLE)
+    pick = from_dynamodb(captures.get_item(Key={"camera_id": camera_id, "capture_id": capture_id}).get("Item"))
+    if not pick:
+        # another camera's capture, or a row that has expired (rows live CAPTURE_TTL_DAYS, less than the frames)
+        if _rows_expired(capture_hour, hour):
+            note = "the reading is older than the captures kept"
+            _close_requests(ddb_resource, same, "dropped", label_request_note=note)
+        return None
+    if not pick.get("image_key") or pick.get("display_visible") is False:
+        _close_requests(ddb_resource, same, "dropped", label_request_note="the reading has no usable frame")
+        return None
+    audits = ddb_resource.Table(AUDITS_TABLE)
+    existing = _query_all(
+        audits,
+        KeyConditionExpression=Key("store_id").eq(store_id),
+        FilterExpression=Attr("capture_id").eq(capture_id),
+    )
+    if existing:
+        _close_requests(ddb_resource, same, "queued", label_audit_id=min(a["audit_id"] for a in existing))
+        return None
+    why = {"picked_by": "correction", "correction_id": request["correction_id"]}
+    try:
+        written = _write_frame_audit(s3_client, audits, training_id, "training", pick, camera_id, extra=why)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in ("NoSuchKey", "404"):
+            raise
+        _close_requests(ddb_resource, same, "dropped", label_request_note="the frame is no longer kept")
+        return None
+    if written:
+        _close_requests(ddb_resource, same, "queued", label_audit_id=training_id)
+    return bool(written)
+
+
+def serve_label_request(s3_client, ddb_resource, camera_id: str, store_id: str, training_id: str, hour: str) -> bool:
     """Gives this camera-hour's training frame to the oldest correction that asks for the frame of its reading
     (operations-loop design 5.4): one request an hour, so the day's number of frames does not grow. True when the
     training audit `training_id` was written from a corrected reading's capture.
 
-    A request whose capture is another camera's is left waiting. One whose reading has no frame the labeller could
-    use is dropped, with the reason on the correction. One whose frame is already an audit is answered with that
-    audit. Corrections of the same capture are answered together."""
+    A request is left waiting when its capture is another camera's, or was taken in a later hour than `hour`. It
+    is dropped, with the reason on the correction, when its reading has no frame a labeller could use, when its
+    capture id is not one, or when its capture row has expired. One whose frame is already an audit is answered
+    with that audit. Corrections of the same capture are answered together. A request that raises is logged and
+    left waiting; the next one is tried."""
     requests = pending_requests(ddb_resource, store_id)
-    captures = ddb_resource.Table(CAPTURES_TABLE)
-    audits = ddb_resource.Table(AUDITS_TABLE)
     for request in requests:
         if request["label_request"] != "pending":  # answered with an earlier request of the same capture
             continue
-        capture_id = request["capture_id"]
-        pick = from_dynamodb(captures.get_item(Key={"camera_id": camera_id, "capture_id": capture_id}).get("Item"))
-        if not pick:
-            continue
-        same = [r for r in requests if r["capture_id"] == capture_id and r["label_request"] == "pending"]
-        if not pick.get("image_key") or pick.get("display_visible") is False:
-            _close_requests(ddb_resource, same, "dropped", label_request_note="the reading has no usable frame")
-            continue
-        existing = _query_all(
-            audits,
-            KeyConditionExpression=Key("store_id").eq(store_id),
-            FilterExpression=Attr("capture_id").eq(capture_id),
-        )
-        if existing:
-            _close_requests(ddb_resource, same, "queued", label_audit_id=min(a["audit_id"] for a in existing))
-            continue
-        why = {"picked_by": "correction", "correction_id": request["correction_id"]}
         try:
-            written = _write_frame_audit(s3_client, audits, training_id, "training", pick, camera_id, extra=why)
-        except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") not in ("NoSuchKey", "404"):
-                raise
-            _close_requests(ddb_resource, same, "dropped", label_request_note="the frame is no longer kept")
+            served = _serve_one(s3_client, ddb_resource, camera_id, store_id, training_id, hour, request, requests)
+        except Exception as exc:  # noqa: BLE001 - one request that cannot be handled must not block the others
+            failed = {"label_request_failed": request.get("correction_id"), "camera_id": camera_id, "hour": hour}
+            print(json.dumps({**failed, "error": repr(exc)}))
             continue
-        if written:
-            _close_requests(ddb_resource, same, "queued", label_audit_id=training_id)
-        return bool(written)
+        if served is not None:
+            return served
     return False
 
 
@@ -748,8 +802,10 @@ def sample_frames(
     """Picks, for one camera-hour, a scoring frame (AUD-, any capture with a frame, at random) and a training frame
     (TRN-, a different capture whose worker saw the display). The training frame follows signals (operations-loop
     design 5.4): the frame of a reading someone corrected, else the frame whose count strays from its sampling
-    window, else a random one; the audit says which in picked_by. Frames outside the store's opening hours are not
-    sampled. Returns the audit ids created now (0, 1 or 2); an existing audit is left alone."""
+    window, else a random one; the audit says which in picked_by. A capture that is already a frame to label (a
+    correction's request can make it one in another hour's run) is drawn for neither: one picture is never both a
+    scoring and a training frame. Frames outside the store's opening hours are not sampled. Returns the audit ids
+    created now (0, 1 or 2); an existing audit is left alone."""
     with_frame = _frames_in_opening_hours(items, store)
     if not with_frame:
         return []
@@ -757,26 +813,44 @@ def sample_frames(
     store_id = with_frame[0]["store_id"]
     scoring_id, training_id = f"AUD-{camera_id}-{hour}", f"TRN-{camera_id}-{hour}"
     created: list[str] = []
+    audited = {
+        a.get("capture_id")
+        for a in _query_all(
+            table,
+            KeyConditionExpression=Key("store_id").eq(store_id),
+            FilterExpression=Attr("capture_id").begins_with(
+                os.path.commonprefix([it["capture_id"] for it in with_frame])
+            ),
+            ProjectionExpression="capture_id",
+        )
+    }
 
     scoring = table.get_item(Key={"store_id": store_id, "audit_id": scoring_id}).get("Item")
     if scoring:
         scoring_capture = scoring.get("capture_id")
     else:
-        pick = rng.choice(with_frame)
-        scoring_capture = pick["capture_id"]
-        if _write_frame_audit(s3_client, table, scoring_id, "scoring", pick, camera_id, candidate):
-            created.append(scoring_id)
+        scoring_capture = None
+        free = [it for it in with_frame if it["capture_id"] not in audited]
+        if free:
+            pick = rng.choice(free)
+            scoring_capture = pick["capture_id"]
+            if _write_frame_audit(s3_client, table, scoring_id, "scoring", pick, camera_id, candidate):
+                created.append(scoring_id)
 
     if not table.get_item(Key={"store_id": store_id, "audit_id": training_id}).get("Item"):
         try:
-            requested = serve_label_request(s3_client, ddb_resource, camera_id, store_id, training_id)
+            requested = serve_label_request(s3_client, ddb_resource, camera_id, store_id, training_id, hour)
         except Exception as exc:  # noqa: BLE001 - a request that cannot be served must not cost the hour its frame
             print(json.dumps({"label_request_failed": camera_id, "hour": hour, "error": repr(exc)}))
             requested = False
         if requested:
             return [*created, training_id]
         seeing = [
-            it for it in with_frame if it.get("display_visible") is not False and it["capture_id"] != scoring_capture
+            it
+            for it in with_frame
+            if it.get("display_visible") is not False
+            and it["capture_id"] != scoring_capture
+            and it["capture_id"] not in audited
         ]
         if seeing:
             # a window's median is taken over all its frames, the scoring frame included

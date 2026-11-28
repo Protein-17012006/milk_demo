@@ -29,6 +29,7 @@ _COPIED = (
     "model_version",
     "pipeline",
     "display_visible",
+    "display_score",
     "ai_boxes_json",
 )
 
@@ -86,10 +87,32 @@ def eligible_keys(audits: list[dict], email: str) -> list[dict]:
     ]
 
 
+def newest_key(keys: list[dict]) -> dict:
+    """The key whose frame was taken last. A check is made from it, not from one drawn at random: the picture
+    carries the camera's date, and a frame of last week among today's would give the check away."""
+    return max(keys, key=lambda k: (str(k.get("capture_timestamp", "")), k["audit_id"]))
+
+
+def labellers(audits: list[dict]) -> list[str]:
+    """Everyone who labelled a frame (check sheets aside), in name order."""
+    return sorted(
+        {a["labeled_by"] for a in audits if a.get("status") == "done" and a.get("labeled_by") and not is_sheet(a)}
+    )
+
+
+def without_key(audits: list[dict]) -> list[str]:
+    """The labellers no answer key is left for: their checks have stopped until a team admin marks a new key."""
+    return [who for who in labellers(audits) if not eligible_keys(audits, who)]
+
+
 def sheet_for(key: dict, email: str, now_iso: str, token: str) -> dict:
-    """The check sheet of `key` for one labeller: the key's frame and boxes, no answers yet."""
+    """The check sheet of `key` for one labeller: the key's frame and boxes, no answers yet. It carries the purpose
+    the labeller would see on the key itself (an old frame without a stored one is judged by its id, as the API
+    does), so its banner reads the same."""
+    purpose = key.get("purpose") or ("scoring" if str(key["audit_id"]).startswith("AUD-") else "training")
     return {
         **{name: key[name] for name in _COPIED if name in key},
+        "purpose": purpose,
         "audit_id": f"{SHEET_PREFIX}{token}",
         "check_of": key["audit_id"],
         "assigned_to": email,

@@ -566,6 +566,125 @@ def test_one_request_is_served_an_hour_and_the_next_waits(monkeypatch: pytest.Mo
 
 
 @mock_aws
+def test_a_request_for_a_reading_of_a_later_hour_waits_for_that_hour(monkeypatch: pytest.MonkeyPatch):
+    """The run for hour 14 happens during hour 15. A reading of hour 15 corrected before it must not become hour
+    14's training frame: hour 15's own run could then draw the same capture as its scoring frame."""
+    api, ingest = _backend(monkeypatch)
+    _two_frames_at_14(ingest)
+    _ingest(ingest, "CAM-S01-A", "150200", [("hot160", 1)], with_frame=True)
+    cid = _correct(api, "CAP-S01-20261121-150200")
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    assert _audits()[TRN_14]["capture_id"].startswith("CAP-S01-20261121-14")
+    assert _corrections()[cid]["label_request"] == "pending"
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-15"})
+    used = [audit_id for audit_id, a in _audits().items() if a["capture_id"] == "CAP-S01-20261121-150200"]
+    assert len(used) == 1  # the capture is one frame to label, never two
+    corr = _corrections()[cid]
+    assert (corr["label_request"], corr["label_audit_id"]) == ("queued", used[0])
+
+
+@mock_aws
+def test_a_frame_that_is_already_a_training_frame_is_never_drawn_for_scoring(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "150200", [("hot160", 1)], with_frame=True)
+    for t in ("160700", "161200"):
+        _ingest(ingest, "CAM-S01-A", t, [("hot160", 2)], with_frame=True)
+    _correct(api, "CAP-S01-20261121-150200")
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-16"})  # hour 15 was never sampled
+    assert _audits()["TRN-CAM-S01-A-20261121-16"]["capture_id"] == "CAP-S01-20261121-150200"
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-15"})  # ... and is sampled late
+    audits = _audits()
+    assert "AUD-CAM-S01-A-20261121-15" not in audits and "TRN-CAM-S01-A-20261121-15" not in audits
+
+
+@mock_aws
+def test_a_request_whose_capture_row_has_expired_is_dropped_with_the_reason(monkeypatch: pytest.MonkeyPatch):
+    """Capture rows live CAPTURE_TTL_DAYS (7) days, far less than the frames: an old reading cannot be served."""
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "130500", [("hot160", 1)], with_frame=True)
+    cid = _correct(api, "CAP-S01-20261121-130500")
+    _table("test-captures").delete_item(Key={"camera_id": "CAM-S01-A", "capture_id": "CAP-S01-20261121-130500"})
+    s3, ddb = ingest._aws_clients()
+    # a week later the row may still be another camera's, or not yet swept: the request waits
+    assert not ingest.serve_label_request(s3, ddb, "CAM-S01-A", "DEMO-S01", "TRN-CAM-S01-A-20261128-14", "20261128-14")
+    assert _corrections()[cid]["label_request"] == "pending"
+    assert not ingest.serve_label_request(s3, ddb, "CAM-S01-A", "DEMO-S01", "TRN-CAM-S01-A-20261129-14", "20261129-14")
+    corr = _corrections()[cid]
+    assert (corr["label_request"], corr["label_request_note"]) == (
+        "dropped",
+        "the reading is older than the captures kept",
+    )
+    assert _audits() == {}
+
+
+@mock_aws
+def test_one_request_that_fails_does_not_block_the_next(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    for t in ("130500", "131000"):
+        _ingest(ingest, "CAM-S01-A", t, [("hot160", 1)], with_frame=True)
+    _two_frames_at_14(ingest)
+    first = _correct(api, "CAP-S01-20261121-130500")
+    second = _correct(api, "CAP-S01-20261121-131000")
+    # the older request's row is damaged: its capture id is not text (DynamoDB would refuse it as a key)
+    older = min(first, second)
+    _table("test-corrections").update_item(
+        Key={"store_id": "DEMO-S01", "correction_id": older},
+        UpdateExpression="SET capture_id = :c",
+        ExpressionAttributeValues={":c": 12345},
+    )
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    corr = _corrections()
+    newer = max(first, second)
+    assert (corr[newer]["label_request"], corr[newer]["label_audit_id"]) == ("queued", TRN_14)
+    assert (corr[older]["label_request"], corr[older]["label_request_note"]) == (
+        "dropped",
+        "the reading has no usable frame",
+    )
+
+
+@mock_aws
+def test_a_request_that_raises_is_left_waiting_and_the_next_is_served(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    for t in ("130500", "131000"):
+        _ingest(ingest, "CAM-S01-A", t, [("hot160", 1)], with_frame=True)
+    _two_frames_at_14(ingest)
+    first = _correct(api, "CAP-S01-20261121-130500")
+    second = _correct(api, "CAP-S01-20261121-131000")
+    older, newer = min(first, second), max(first, second)
+    broken = _corrections()[older]["capture_id"]
+    real = ingest._write_frame_audit
+
+    def flaky(s3_client, table, audit_id, purpose, pick, camera_id, candidate=None, extra=None):
+        if purpose == "training" and pick["capture_id"] == broken:
+            raise RuntimeError("the copy failed for a reason nobody foresaw")
+        return real(s3_client, table, audit_id, purpose, pick, camera_id, candidate, extra)
+
+    monkeypatch.setattr(ingest, "_write_frame_audit", flaky)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    corr = _corrections()
+    assert corr[older]["label_request"] == "pending"
+    assert (corr[newer]["label_request"], corr[newer]["label_audit_id"]) == ("queued", TRN_14)
+
+
+@mock_aws
+def test_only_a_real_capture_id_asks_for_a_frame(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    for capture_id in ("—", "", "CAP-S01", 12345, "CAP-S01-20261121-140010; DROP", "x" * 3000):
+        body = {
+            "store_id": "DEMO-S01",
+            "capture_id": capture_id,
+            "sku_id": HOT,
+            "corrected_sku_id": CHEESE,
+            "action": "correct",
+        }
+        status, out = _call(api, "POST", "/v1/corrections", groups="field_team", body=body)
+        assert (status, out["label_request"]) == (201, None), capture_id
+    assert all("label_request" not in row for row in _table("test-corrections").scan()["Items"])
+    body = {**body, "capture_id": "CAP-S01-20261121-140010-2"}
+    assert _call(api, "POST", "/v1/corrections", groups="field_team", body=body)[1]["label_request"] == "pending"
+
+
+@mock_aws
 def test_the_frame_whose_count_jumps_is_the_training_frame(monkeypatch: pytest.MonkeyPatch):
     _, ingest = _backend(monkeypatch)
     for t, units in (("140700", 5), ("140705", 5), ("140710", 2)):  # one sampling window, one odd reading
@@ -3535,7 +3654,7 @@ def test_a_sheet_of_a_frame_that_is_no_longer_a_key_is_not_measured(monkeypatch:
         api, "PUT", f"/v1/model/audits/{key_id}/answer-key", groups="team_admin", body={"on": False}, email=ADMIN
     )
     assert off[0] == 200
-    assert _labellers(api)[1] == {"rows": [], "keys": [], "check_every": 10}
+    assert _labellers(api)[1] == {"rows": [], "keys": [], "check_every": 10, "without_key": [ADMIN, ANN]}
 
 
 # --- "Your labels" on the Model page: what a labeller did, and whether a live version was trained with it -------
@@ -3591,3 +3710,72 @@ def test_my_labels_name_the_live_version_once_it_was_trained_with_labels(monkeyp
 def test_a_viewer_has_no_labels_route(monkeypatch: pytest.MonkeyPatch):
     api, _ = _backend(monkeypatch)
     assert _my_labels(api, "viewer@client.vn", groups="datagent")[0] == 403
+
+
+# --- Review fixes: a check must read like any frame, and the admin must be told when checks stop ----------------
+
+
+@mock_aws
+def test_what_sets_a_sampled_frame_apart_from_a_check_is_not_sent_to_the_browser(monkeypatch: pytest.MonkeyPatch):
+    """Every training frame the hourly rule makes carries picked_by; a check sheet never does."""
+    api, ingest = _backend(monkeypatch)
+    _two_frames_at_14(ingest)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    assert _audits()[TRN_14]["picked_by"] == "random"
+    status, view = _call(api, "GET", f"/v1/model/audits/{TRN_14}", email=ANN)
+    assert status == 200 and not {"picked_by", "correction_id"} & set(view)
+
+
+@mock_aws
+def test_a_check_joins_the_queue_as_its_newest_frame_not_as_its_oldest(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _answer_key(api)  # the key's frame was taken at 08:07, before every frame Ann labels
+    _nine_frames(api, ANN)
+    waiting = [_frame_to_label(19), _frame_to_label(20)]
+    (sheet,) = _sheets()
+    items = {i["audit_id"]: i for i in _pending(api, ANN)["items"]}
+    assert set(items) == {sheet["audit_id"], *waiting}
+    assert items[sheet["audit_id"]]["capture_timestamp"] < min(items[w]["capture_timestamp"] for w in waiting)
+    # queue_at is when the frame entered the queue: the order the labeller gets frames in
+    assert items[waiting[0]]["queue_at"] == "2026-11-21T19:59:00+07:00"
+    assert items[sheet["audit_id"]]["queue_at"] > max(items[w]["queue_at"] for w in waiting)
+
+
+@mock_aws
+def test_a_check_of_a_scoring_frame_reads_as_one_and_is_never_scored(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    key_id = _frame_to_label(9, kind="AUD")
+    assert _label(api, key_id, ADMIN, KEY_ANSWERS, groups="team_admin")[0] == 200
+    on = _call(api, "PUT", f"/v1/model/audits/{key_id}/answer-key", groups="team_admin", body={"on": True}, email=ADMIN)
+    assert on[0] == 200
+    _nine_frames(api, ANN)
+    (sheet,) = _sheets()
+    (item,) = _pending(api, ANN)["items"]
+    assert (item["audit_id"], item["purpose"]) == (sheet["audit_id"], "scoring")
+    _, before = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
+    assert before["n_audits"] == 1
+    assert _label(api, sheet["audit_id"], ANN)[0] == 200  # Ann's answers differ from the key's
+    assert _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1] == before
+
+
+@mock_aws
+def test_the_check_is_made_from_the_newest_key_that_suits(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _answer_key(api, hour=7)
+    newest = _answer_key(api, hour=9)
+    _answer_key(api, hour=8)
+    _nine_frames(api, ANN)
+    (sheet,) = _sheets()
+    assert sheet["check_of"] == newest
+
+
+@mock_aws
+def test_the_admin_is_told_who_has_no_answer_key_left(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _answer_key(api)
+    assert _labellers(api)[1]["without_key"] == [ADMIN]  # the admin cannot be checked on a key they made
+    assert _label(api, _frame_to_label(19), BINH)[0] == 200
+    assert _labellers(api)[1]["without_key"] == [ADMIN]  # Binh can still be given the key
+    _nine_frames(api, ANN)
+    assert len(_sheets()) == 1  # Ann got the only key: none is left for her next check
+    assert _labellers(api)[1]["without_key"] == [ADMIN, ANN]

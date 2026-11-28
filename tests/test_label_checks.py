@@ -5,7 +5,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from label_checks import CHECK_EVERY, can_be_key, due, eligible_keys, is_sheet, sheet_for  # noqa: E402
+from label_checks import (  # noqa: E402
+    CHECK_EVERY,
+    can_be_key,
+    due,
+    eligible_keys,
+    is_sheet,
+    newest_key,
+    sheet_for,
+    without_key,
+)
 
 A, B, ADMIN = "a@team.vn", "b@client.vn", "admin@team.vn"
 
@@ -132,3 +141,35 @@ def test_a_sheet_copies_the_frame_and_starts_blank():
         "missed_json": "[]",
     }
     assert is_sheet(made) and not is_sheet(source)
+
+
+def test_a_sheet_of_an_old_frame_shows_the_purpose_its_id_stands_for():
+    old_scoring = {"store_id": "DEMO-S01", "audit_id": "AUD-CAM-S01-A-20261123-10", "status": "done"}
+    old_training = {"store_id": "DEMO-S01", "audit_id": "TRN-CAM-S01-A-20261124-10", "status": "done"}
+    assert sheet_for(old_scoring, A, "2026-11-28T12:00:00+07:00", "0a1b2c3d")["purpose"] == "scoring"
+    assert sheet_for(old_training, A, "2026-11-28T12:00:00+07:00", "0a1b2c3e")["purpose"] == "training"
+
+
+def test_a_sheet_keeps_the_display_score_of_its_frame():
+    assert (
+        sheet_for({**key(3), "display_score": 0.91}, A, "2026-11-28T12:00:00+07:00", "0a1b2c3d")["display_score"]
+        == 0.91
+    )
+    assert "display_score" not in sheet_for(key(3), A, "2026-11-28T12:00:00+07:00", "0a1b2c3d")
+
+
+def test_the_check_is_made_from_the_newest_key():
+    keys = [
+        {**key(3), "capture_timestamp": "2026-11-26T09:00:00+07:00"},
+        {**key(4), "capture_timestamp": "2026-11-28T07:20:00+07:00"},
+        {**key(5), "capture_timestamp": "2026-11-27T12:30:00+07:00"},
+    ]
+    assert newest_key(keys)["audit_id"] == "TRN-CAM-S01-A-20261128-04"
+
+
+def test_who_has_no_answer_key_left():
+    audits = [key(3), frame(10, A), frame(11, B), sheet("11111111", "TRN-CAM-S01-A-20261128-03", A, "done", 12)]
+    # the admin labelled and marked the only key; A was checked on it already; B can still get it
+    assert without_key(audits) == [A, ADMIN]
+    assert without_key([frame(10, A)]) == [A]  # no key at all
+    assert without_key([]) == []
