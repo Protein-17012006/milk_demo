@@ -3536,3 +3536,58 @@ def test_a_sheet_of_a_frame_that_is_no_longer_a_key_is_not_measured(monkeypatch:
     )
     assert off[0] == 200
     assert _labellers(api)[1] == {"rows": [], "keys": [], "check_every": 10}
+
+
+# --- "Your labels" on the Model page: what a labeller did, and whether a live version was trained with it -------
+
+
+def _my_labels(api, email: str, groups: str = "field_team") -> tuple[int, dict]:
+    return _call(api, "GET", "/v1/model/my-labels", groups=groups, email=email)
+
+
+@mock_aws
+def test_my_labels_counts_only_my_frames_and_never_a_check(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _answer_key(api)  # the admin: one training frame, two boxes, one missed unit
+    assert _label(api, _frame_to_label(9, kind="AUD"), ANN, KEY_ANSWERS)[0] == 200  # Ann: one scoring frame
+    _nine_frames(api, ANN)  # Ann: nine training frames of two boxes, no missed unit
+    (sheet,) = _sheets()
+    assert _label(api, sheet["audit_id"], ANN, KEY_ANSWERS)[0] == 200  # her check: two boxes and a mark, not counted
+    status, out = _my_labels(api, ANN)
+    assert status == 200
+    assert out == {
+        "teaching": {"frames": 9, "boxes": 18, "missed": 0},
+        "scoring": {"frames": 1, "boxes": 2, "missed": 1},
+        "in_live_version": None,
+    }
+    assert _my_labels(api, ADMIN, groups="team_admin")[1]["teaching"] == {"frames": 1, "boxes": 2, "missed": 1}
+    zero = {"frames": 0, "boxes": 0, "missed": 0}
+    assert _my_labels(api, BINH)[1] == {"teaching": zero, "scoring": zero, "in_live_version": None}
+
+
+@mock_aws
+def test_my_labels_name_the_live_version_once_it_was_trained_with_labels(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    versions = _table("test-model-versions")
+    versions.put_item(Item={"camera_id": "CAM-S01-A", "version_id": "#state", "live": "slide-v4", "previous": "v3"})
+    live = {
+        "camera_id": "CAM-S01-A",
+        "version_id": "slide-v4",
+        "status": "live",
+        "created_at": "2026-12-08T10:00:00+07:00",
+    }
+    versions.put_item(Item=live)
+    assert _label(api, _frame_to_label(10), ANN)[0] == 200
+    assert _my_labels(api, ANN)[1]["in_live_version"] is None  # live, but not trained with people's labels
+    versions.put_item(Item={**live, "decided_at": "2026-12-10T09:00:00+07:00", "label_frames": 60, "labellers": 3})
+    assert _my_labels(api, ANN)[1]["in_live_version"] == {
+        "version_id": "slide-v4",
+        "live_since": "2026-12-10T09:00:00+07:00",
+        "label_frames": 60,
+    }
+
+
+@mock_aws
+def test_a_viewer_has_no_labels_route(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    assert _my_labels(api, "viewer@client.vn", groups="datagent")[0] == 403

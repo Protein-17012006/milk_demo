@@ -1822,6 +1822,57 @@ def _handle_model_answer_key(audit_id: str, event: dict[str, Any], user: dict[st
     return _json_response(200, {"audit_id": audit_id, "answer_key": on}, event)
 
 
+def _label_tally(audits: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "frames": len(audits),
+        "boxes": sum(len(json.loads(a.get("verdicts_json") or "[]")) for a in audits),
+        "missed": sum(len(json.loads(a.get("missed_json") or "[]")) for a in audits),
+    }
+
+
+def _live_version_with_labels(ddb, camera_ids: list[str]) -> dict[str, Any] | None:
+    """The live release of one of these cameras that was trained with people's labels (its row carries
+    label_frames, written by the training run), or None: no live release has used a label yet."""
+    if not MODEL_VERSIONS_TABLE:
+        return None
+    table = ddb.Table(MODEL_VERSIONS_TABLE)
+    for camera_id in camera_ids:
+        state = table.get_item(Key={"camera_id": camera_id, "version_id": model_versions.STATE_ID}).get("Item") or {}
+        if not state.get("live"):
+            continue
+        row = from_dynamodb(table.get_item(Key={"camera_id": camera_id, "version_id": state["live"]}).get("Item"))
+        if row and row.get("label_frames"):
+            return {
+                "version_id": row["version_id"],
+                "live_since": row.get("decided_at") or row.get("created_at"),
+                "label_frames": row["label_frames"],
+            }
+    return None
+
+
+def _handle_model_my_labels(event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
+    """What the signed-in labeller has labelled, and whether a live release was trained with people's labels
+    (operations-loop design 5.4: a labeller sees where their labels are). teaching counts training, review and
+    comparison frames; scoring frames only measure the model and are never used to train it. Check sheets are not
+    counted: they are not labels of the store's frames."""
+    mine = [
+        a
+        for a in _scan_all(ddb.Table(AUDITS_TABLE))
+        if a.get("status") == "done" and a.get("labeled_by") == user["email"] and not label_checks.is_sheet(a)
+    ]
+    teaching = [a for a in mine if _purpose(a) in ("training", "review", "compare")]
+    cameras = sorted({a["camera_id"] for a in teaching if a.get("camera_id")})
+    return _json_response(
+        200,
+        {
+            "teaching": _label_tally(teaching),
+            "scoring": _label_tally([a for a in mine if _is_scoring(a)]),
+            "in_live_version": _live_version_with_labels(ddb, cameras),
+        },
+        event,
+    )
+
+
 def _handle_model_labellers(event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
     """For team admins only: each labeller's agreement with the answer keys on the check sheets they answered, by
     week, and the answer keys there are with how many sheets each has had. A sheet whose frame is no longer a key
@@ -2149,6 +2200,8 @@ def _route_model(method: str, route_path: str, event: dict[str, Any], user: dict
         return _handle_model_version_request(event, user, ddb)
     if method == "GET" and route_path == "/model/labellers":
         return _handle_model_labellers(event, user, ddb)
+    if method == "GET" and route_path == "/model/my-labels":
+        return _handle_model_my_labels(event, user, ddb)
     parts = route_path.strip("/").split("/")  # model, audits, <id>, skip
     if parts[:2] == ["model", "audits"]:
         if len(parts) == 2 and method == "GET":
