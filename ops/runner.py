@@ -363,7 +363,8 @@ def restart_worker_task() -> None:
 
 def night_reader_for(captures_table, camera_id: str, store_code: str) -> NightReader:
     """Reads, from the backend's captures table, the captures of this camera taken with the display away that a
-    candidate has read since its parallel run started (capture ids are CAP-<store code>-<YYYYMMDD>-<HHMMSS>)."""
+    candidate has read since its parallel run started (capture ids are CAP-<store code>-<YYYYMMDD>-<HHMMSS>), with
+    the live release's boxes of each, which the night rule holds the candidate to."""
 
     def read(version: str, since: str | None) -> list[dict]:
         day = (since or "")[:10].replace("-", "")
@@ -371,7 +372,7 @@ def night_reader_for(captures_table, camera_id: str, store_code: str) -> NightRe
         kwargs = {
             "KeyConditionExpression": Key("camera_id").eq(camera_id) & Key("capture_id").between(low, high),
             "FilterExpression": Attr("candidate_version").eq(version) & Attr("display_visible").eq(False),
-            "ProjectionExpression": "display_visible, candidate_version, candidate_detections_json",
+            "ProjectionExpression": "display_visible, candidate_version, candidate_detections_json, detections_json",
         }
         resp = captures_table.query(**kwargs)
         items = resp.get("Items", [])

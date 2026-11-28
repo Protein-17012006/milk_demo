@@ -33,13 +33,21 @@ def status(candidate, stopped=None, windows=0, late=0, errors=0, load_times=()):
     }
 
 
-def night_captures(frames, boxes, version):
-    """`frames` captures taken with the display away that `version` has read; `boxes` named boxes among them."""
+HOT = {"sku_id": "hot160", "conf": 0.9, "box": [1, 2, 3, 4]}
+
+
+def night_captures(frames, boxes, version, live=0):
+    """`frames` captures taken with the display away that `version` has read; `boxes` of them carry one named box of
+    the candidate, `live` of them (the first ones too) one named box of the live release."""
     out = []
     for n in range(frames):
-        found = [{"sku_id": "hot160", "conf": 0.9, "box": [1, 2, 3, 4]}] if n < boxes else []
         out.append(
-            {"display_visible": False, "candidate_version": version, "candidate_detections_json": json.dumps(found)}
+            {
+                "display_visible": False,
+                "candidate_version": version,
+                "candidate_detections_json": json.dumps([HOT] if n < boxes else []),
+                "detections_json": json.dumps([HOT] if n < live else []),
+            }
         )
     return out
 
@@ -116,7 +124,11 @@ def test_a_stopped_or_night_drawing_candidate_is_stopped():
     st = state(live="v1", candidate="v2")
     args = (P(live="v1", candidate="v2"), st, rows(v1="live", v2="parallel"), ["v1", "v2"])
     assert next_steps(*args, status("v2", stopped="too_slow"), None)[0] == ("stop", "v2", "too_slow")
-    assert next_steps(*args, None, 1.4)[0] == ("stop", "v2", "night boxes: 1.4 per 100 frames")
+    assert next_steps(*args, None, 1.4)[0] == (
+        "stop",
+        "v2",
+        "night boxes: 1.4 more per 100 frames than the live version",
+    )
     assert next_steps(*args, None, 0.8) == []
     assert next_steps(*args, None, NIGHT_LIMIT) == []
 
@@ -177,6 +189,21 @@ def test_night_rate_counts_only_frames_without_the_display_that_this_candidate_r
     captures += night_captures(50, boxes=50, version="v3")
     captures += [{"display_visible": False}] * 30  # the candidate never read these
     assert night_rate(captures, "v2") == 2.0
+
+
+def test_night_rate_counts_only_the_boxes_the_candidate_draws_beyond_the_live_release():
+    # 27/11 21:00-21:10: a motorbike's light on the bare floor, cabinet away; the live release drew boxes there and a
+    # test copy of it drew the same ones, which must not stop the copy
+    assert night_rate(night_captures(109, boxes=5, version="v2", live=5), "v2") == 0.0
+    assert night_rate(night_captures(100, boxes=3, version="v2", live=1), "v2") == 2.0
+    assert night_rate(night_captures(100, boxes=1, version="v2", live=4), "v2") == 0.0  # fewer than live: not below 0
+    two_for_one = {
+        "display_visible": False,
+        "candidate_version": "v2",
+        "candidate_detections_json": json.dumps([HOT, HOT]),
+        "detections_json": json.dumps([HOT]),
+    }
+    assert night_rate([two_for_one] * 100, "v2") == 100.0  # counted frame by frame
 
 
 # --- after the whole-branch review -----------------------------------------------------------------------------

@@ -190,7 +190,7 @@ Ba dòng việc (sản phẩm mới, vòng chậm, vòng nhanh) đều kết th�
 **Tín hiệu máy, chỉ để dừng sớm.** Ứng viên bị dừng, có ghi lý do, khi:
 - nó lỗi hoặc làm worker khởi động lại;
 - nó không đọc xong cửa sổ trước cửa sổ kế tiếp, ba lần liên tiếp;
-- nó vẽ box sản phẩm lúc tủ đã cất, quá 1 box trên 100 frame (ngưỡng của cổng ban đêm đã dùng cho TH).
+- nó vẽ box sản phẩm lúc tủ đã cất nhiều hơn bản live trên cùng frame, quá 1 box trên 100 frame (ngưỡng của cổng ban đêm đã dùng cho TH). Sửa ngày 28/11: bản đầu so với 0, nhưng chính bản live cũng vẽ box lúc tủ đã cất (27/11 21:05: bảy box trên nền xi măng dưới đèn xe máy; mỗi ngày từ 24/11 đều quá 1 trên 100), nên quy tắc cũ dừng mọi ứng viên ngay buổi tối đầu tiên, kể cả bản sao của live.
 
 **Người phân xử.**
 - Frame chấm điểm mỗi giờ (`AUD-`) hiện box của cả hai bản gộp lại, không ghi box nào của bản nào.

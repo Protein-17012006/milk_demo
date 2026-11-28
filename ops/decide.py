@@ -12,6 +12,7 @@ Steps:
     ("adopt", pointer)               live.json was changed by hand: the table follows the disk
     ("start_parallel", id)           put a waiting release beside the live one
     ("stop", id, reason)             take a candidate out: it stopped itself, restarts the worker, or draws at night
+                                     more than the live release does
     ("fail", request_id, message)    answer a request "no"
     ("mark_discarded", request_id, id) discard a release that is not running: only its row changes
     ("point", pointer)               write live.json for the request in hand
@@ -30,7 +31,7 @@ from model_versions import request_running
 from milk.release import Pointer
 
 NIGHT_FRAMES = 100  # frames without the display a candidate must have read before the night rule speaks
-NIGHT_LIMIT = 1.0  # named boxes per 100 such frames; more stops the candidate (the TH night gate)
+NIGHT_LIMIT = 1.0  # named boxes per 100 such frames beyond the live release's; more stops the candidate
 RESTARTS = 3
 RESTART_WINDOW_S = 15 * 60
 REQUEST_TTL_S = 30 * 60  # a request nobody began within this time is answered no, not carried out late
@@ -41,9 +42,16 @@ EXPIRED = (
 NUMBERS = ("windows", "late", "errors")
 
 
+def _named(raw) -> int:
+    found = json.loads(raw) if isinstance(raw, str) else (raw or [])
+    return sum(1 for d in found if d.get("sku_id"))
+
+
 def night_rate(captures: list[dict], version: str) -> float | None:
-    """Named boxes per 100 frames, over the captures taken with the display away that `version` has read; None
-    until there are NIGHT_FRAMES of them."""
+    """Named boxes per 100 frames that `version` draws beyond the live release on the same frame, over the captures
+    taken with the display away that `version` has read; None until there are NIGHT_FRAMES of them. The live release
+    draws boxes there too (on 27/11 21:05, seven on the bare floor in a motorbike's light), so a candidate is held to
+    the live release, not to zero."""
     frames = [
         c
         for c in captures
@@ -53,11 +61,8 @@ def night_rate(captures: list[dict], version: str) -> float | None:
     ]
     if len(frames) < NIGHT_FRAMES:
         return None
-    boxes = 0
-    for c in frames:
-        raw = c["candidate_detections_json"]
-        boxes += sum(1 for d in (json.loads(raw) if isinstance(raw, str) else raw) if d.get("sku_id"))
-    return 100.0 * boxes / len(frames)
+    more = sum(max(0, _named(c["candidate_detections_json"]) - _named(c.get("detections_json"))) for c in frames)
+    return 100.0 * more / len(frames)
 
 
 def _of_state(state: dict) -> Pointer:
@@ -89,7 +94,7 @@ def _why_stop(candidate: str, status: dict | None, night: float | None) -> str |
         if _restarting(status):
             return "worker restarts"
     if night is not None and night > NIGHT_LIMIT:
-        return f"night boxes: {night:g} per 100 frames"
+        return f"night boxes: {night:g} more per 100 frames than the live version"
     return None
 
 

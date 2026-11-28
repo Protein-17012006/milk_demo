@@ -11,7 +11,8 @@ from moto import mock_aws
 from test_release import write_release
 
 from milk import release
-from ops.runner import Runner
+from ops.decide import night_rate
+from ops.runner import Runner, night_reader_for
 
 REGION = "ap-southeast-1"
 CAMERA = "CAM-S01-A"
@@ -205,7 +206,35 @@ def test_a_candidate_that_draws_at_night_is_stopped(root, table):
         {"display_visible": False, "candidate_version": "v2", "candidate_detections_json": '[{"sku_id": "hot160"}]'}
     ] * 100
     runner = runner_for(root, table, worker, night_reader=lambda version, since: night)
-    assert runner.tick()[0] == ("stop", "v2", "night boxes: 100 per 100 frames")
+    assert runner.tick()[0] == ("stop", "v2", "night boxes: 100 more per 100 frames than the live version")
+
+
+def test_the_night_reader_brings_the_live_boxes_of_the_frames_the_candidate_read(table):
+    captures = boto3.resource("dynamodb", region_name=REGION).create_table(
+        TableName="test-captures",
+        BillingMode="PAY_PER_REQUEST",
+        KeySchema=[
+            {"AttributeName": "camera_id", "KeyType": "HASH"},
+            {"AttributeName": "capture_id", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "camera_id", "AttributeType": "S"},
+            {"AttributeName": "capture_id", "AttributeType": "S"},
+        ],
+    )
+    boxes = json.dumps([{"sku_id": "hot160", "conf": 0.5, "box": [1, 2, 3, 4]}])
+
+    def put(capture_id, visible, version):
+        item = {"camera_id": CAMERA, "capture_id": capture_id, "display_visible": visible, "candidate_version": version}
+        captures.put_item(Item={**item, "candidate_detections_json": boxes, "detections_json": boxes})
+
+    put("CAP-S01-20261128-210504", False, "v2")
+    put("CAP-S01-20261128-140504", True, "v2")  # the display was there
+    put("CAP-S01-20261128-210509", False, "v3")  # another candidate's
+    put("CAP-S01-20261127-210504", False, "v2")  # before the day the run started
+    frames = night_reader_for(captures, CAMERA, "S01")("v2", "2026-11-28T09:00:00+07:00")
+    assert [f.get("detections_json") for f in frames] == [boxes]
+    assert night_rate(frames * 100, "v2") == 0.0  # the same boxes as the live release: nothing more at night
 
 
 def test_a_release_folder_that_cannot_be_read_is_shown_as_stopped_not_retried(root, table):
