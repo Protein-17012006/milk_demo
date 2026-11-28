@@ -96,8 +96,13 @@ Số liệu và ảnh: `C:\Users\huyho\milk_store_labels\ops_loop_tools_20261127
 def test_a_correction_asks_for_the_frame_of_its_reading(monkeypatch: pytest.MonkeyPatch):
     api, ingest = _backend(monkeypatch)
     _ingest(ingest, "CAM-S01-A", "140010", [("hot160", 1)], with_frame=True)
-    body = {"store_id": "DEMO-S01", "capture_id": "CAP-S01-20261121-140010", "sku_id": HOT,
-            "corrected_sku_id": CHEESE, "action": "correct"}
+    body = {
+        "store_id": "DEMO-S01",
+        "capture_id": "CAP-S01-20261121-140010",
+        "sku_id": HOT,
+        "corrected_sku_id": CHEESE,
+        "action": "correct",
+    }
     status, out = _call(api, "POST", "/v1/corrections", groups="field_team", body=body)
     assert (status, out["label_request"]) == (201, "pending")
     (saved,) = _table("test-corrections").scan()["Items"]
@@ -117,7 +122,13 @@ def test_a_correction_without_a_capture_asks_for_no_frame(monkeypatch: pytest.Mo
 def test_a_correction_that_changes_nothing_is_refused(monkeypatch: pytest.MonkeyPatch):
     api, _ = _backend(monkeypatch)
     for body in (
-        {"store_id": "DEMO-S01", "sku_id": HOT, "corrected_sku_id": HOT, "discrepancy_category": "None", "action": "correct"},
+        {
+            "store_id": "DEMO-S01",
+            "sku_id": HOT,
+            "corrected_sku_id": HOT,
+            "discrepancy_category": "None",
+            "action": "correct",
+        },
         {"store_id": "DEMO-S01", "sku_id": HOT, "corrected_sku_id": "", "action": "correct"},
     ):
         status, out = _call(api, "POST", "/v1/corrections", groups="field_team", body=body)
@@ -153,25 +164,37 @@ def test_a_gap_of_more_than_a_minute_starts_a_new_window():
     items = [cap("140000"), cap("140010"), cap("140500"), cap("140505")]
     assert [[c["capture_id"][-6:] for c in w] for w in windows(items)] == [["140000", "140010"], ["140500", "140505"]]
 
+
 def test_the_frame_that_strays_from_its_window_has_the_jump():
     items = [cap("140000", hot160=5), cap("140005", hot160=5), cap("140010", hot160=2), cap("140015", hot160=5)]
-    assert count_jumps(items, boxes_of) == {items[0]["capture_id"]: 0, items[1]["capture_id"]: 0,
-                                           items[2]["capture_id"]: 3, items[3]["capture_id"]: 0}
+    assert count_jumps(items, boxes_of) == {
+        items[0]["capture_id"]: 0,
+        items[1]["capture_id"]: 0,
+        items[2]["capture_id"]: 3,
+        items[3]["capture_id"]: 0,
+    }
+
 
 def test_a_window_of_one_frame_has_no_jump():
     assert count_jumps([cap("140000", hot160=7)], boxes_of) == {"CAP-S01-20261121-140000": 0}
+
 
 def test_a_product_missing_from_one_frame_counts_as_zero_there():
     items = [cap("140000", hot160=3, cheese145=2), cap("140005", hot160=3), cap("140010", hot160=3, cheese145=2)]
     assert count_jumps(items, boxes_of)[items[1]["capture_id"]] == 2
 
+
 def test_the_largest_jump_is_picked():
     items = [cap("140000", hot160=5), cap("140005", hot160=5), cap("140010", hot160=2)]
     assert pick_training(items, count_jumps(items, boxes_of), random.Random(0)) == (items[2], "count_jump")
 
+
 def test_a_jump_of_one_is_not_a_signal_and_the_draw_is_the_plain_one():
     items = [cap("140000", hot160=5), cap("140005", hot160=4), cap("140010", hot160=5)]
-    assert pick_training(items, count_jumps(items, boxes_of), random.Random(7)) == (random.Random(7).choice(items), "random")
+    assert pick_training(items, count_jumps(items, boxes_of), random.Random(7)) == (
+        random.Random(7).choice(items),
+        "random",
+    )
 ```
 
 - [ ] **Step 2: Chạy, thấy trượt** (`ModuleNotFoundError: label_signals`). `python -m pytest tests/test_label_signals.py -q`.
@@ -354,32 +377,47 @@ test("the toast says what happened to the queue item and to the frame", () => {
 KEY_V = [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "original145"}]
 KEY_M = [{"sku_id": "hot160", "x": 900, "y": 500}]
 
+
 def test_the_same_answers_agree_on_every_unit():
-    assert compare(KEY_V, KEY_M, KEY_V, KEY_M) == {"units": 3, "agree": 3, "boxes": 2, "boxes_agree": 2,
-                                              "marks_key": 1, "marks_matched": 1, "marks_extra": 0}
+    assert compare(KEY_V, KEY_M, KEY_V, KEY_M) == {
+        "units": 3,
+        "agree": 3,
+        "boxes": 2,
+        "boxes_agree": 2,
+        "marks_key": 1,
+        "marks_matched": 1,
+        "marks_extra": 0,
+    }
+
 
 def test_calling_the_models_wrong_name_right_is_a_disagreement():
     mine = [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}]
     assert compare(KEY_V, KEY_M, mine, KEY_M)["boxes_agree"] == 1
 
+
 def test_another_right_name_is_a_disagreement():
     mine = [KEY_V[0], {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "hot160"}]
     assert compare(KEY_V, KEY_M, mine, KEY_M)["boxes_agree"] == 1
 
+
 def test_a_mark_within_forty_pixels_and_of_the_same_product_matches():
     assert compare(KEY_V, KEY_M, KEY_V, [{"sku_id": "hot160", "x": 925, "y": 520}])["marks_matched"] == 1
+
 
 def test_a_mark_of_another_product_at_the_same_place_does_not_match():
     out = compare(KEY_V, KEY_M, KEY_V, [{"sku_id": "original145", "x": 900, "y": 500}])
     assert (out["marks_matched"], out["marks_extra"], out["units"], out["agree"]) == (0, 1, 4, 2)
+
 
 def test_two_marks_on_one_can_match_once():
     mine = [{"sku_id": "hot160", "x": 900, "y": 500}, {"sku_id": "hot160", "x": 910, "y": 505}]
     out = compare(KEY_V, KEY_M, KEY_V, mine)
     assert (out["marks_matched"], out["marks_extra"]) == (1, 1)
 
+
 def test_a_box_left_without_a_verdict_is_a_disagreement():
     assert compare(KEY_V, KEY_M, [KEY_V[0]], KEY_M)["boxes_agree"] == 1
+
 
 def test_the_week_follows_the_store_clock():
     assert week_of("2026-11-29T23:30:00+07:00") == "2026-W48"

@@ -443,6 +443,141 @@ def test_the_training_frame_is_never_a_capture_that_hides_the_display(monkeypatc
     assert outcomes == {"no training frame", "training frame"}
 
 
+# --- The training frame follows signals (operations-loop design 5.4): a correction's request, then a count jump ---
+
+
+def _correct(api, capture_id: str) -> str:
+    """A field-team correction of a reading of that capture (Hot said, Cheese meant); returns its id."""
+    body = {
+        "store_id": "DEMO-S01",
+        "capture_id": capture_id,
+        "sku_id": HOT,
+        "corrected_sku_id": CHEESE,
+        "action": "correct",
+    }
+    status, out = _call(api, "POST", "/v1/corrections", groups="field_team", body=body)
+    assert status == 201
+    return out["correction_id"]
+
+
+def _corrections() -> dict[str, dict]:
+    return {i["correction_id"]: i for i in _table("test-corrections").scan()["Items"]}
+
+
+def _two_frames_at_14(ingest) -> None:
+    for t in ("140700", "141200"):
+        _ingest(ingest, "CAM-S01-A", t, [("hot160", 2)], with_frame=True)
+
+
+@mock_aws
+def test_a_corrected_reading_becomes_the_next_training_frame(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "130500", [("hot160", 1)], with_frame=True)
+    _two_frames_at_14(ingest)
+    cid = _correct(api, "CAP-S01-20261121-130500")
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    trn = _audits()[TRN_14]
+    assert (trn["capture_id"], trn["picked_by"], trn["correction_id"]) == ("CAP-S01-20261121-130500", "correction", cid)
+    assert trn["purpose"] == "training" and trn["status"] == "pending"
+    corr = _corrections()[cid]
+    assert (corr["label_request"], corr["label_audit_id"]) == ("queued", TRN_14)
+
+
+@mock_aws
+def test_a_request_for_a_frame_already_in_the_queue_makes_no_second_frame(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    for t in ("130500", "131000"):
+        _ingest(ingest, "CAM-S01-A", t, [("hot160", 2)], with_frame=True)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-13"})
+    trn_13 = "TRN-CAM-S01-A-20261121-13"
+    cid = _correct(api, _audits()[trn_13]["capture_id"])
+    _two_frames_at_14(ingest)
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    a = _audits()
+    assert len(a) == 4
+    assert a[TRN_14]["capture_id"].startswith("CAP-S01-20261121-14") and a[TRN_14]["picked_by"] == "random"
+    corr = _corrections()[cid]
+    assert (corr["label_request"], corr["label_audit_id"]) == ("queued", trn_13)
+
+
+@mock_aws
+def test_a_request_whose_frame_is_gone_is_dropped_and_the_hour_keeps_its_frame(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "130500", [("hot160", 1)], with_frame=True)
+    _two_frames_at_14(ingest)
+    cid = _correct(api, "CAP-S01-20261121-130500")
+    boto3.client("s3", region_name="ap-southeast-1").delete_object(  # the hub keeps frames 30 days
+        Bucket="test-hub-bucket", Key="frames/CAM-S01-A/2026-11-21/CAM-S01-A_20261121_130500.jpg"
+    )
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    a = _audits()
+    assert a[TRN_14]["capture_id"].startswith("CAP-S01-20261121-14") and a[TRN_14]["picked_by"] == "random"
+    corr = _corrections()[cid]
+    assert (corr["label_request"], corr["label_request_note"]) == ("dropped", "the frame is no longer kept")
+    assert "label_audit_id" not in corr
+
+
+@mock_aws
+def test_a_request_for_a_reading_without_a_frame_is_dropped(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "130500", [("hot160", 1)])  # the hub stored no frame for it
+    _two_frames_at_14(ingest)
+    cid = _correct(api, "CAP-S01-20261121-130500")
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    assert _audits()[TRN_14]["picked_by"] == "random"
+    corr = _corrections()[cid]
+    assert (corr["label_request"], corr["label_request_note"]) == ("dropped", "the reading has no usable frame")
+
+
+@mock_aws
+def test_two_corrections_of_one_reading_give_one_frame(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "130500", [("hot160", 1)], with_frame=True)
+    _two_frames_at_14(ingest)
+    first = _correct(api, "CAP-S01-20261121-130500")
+    second = _correct(api, "CAP-S01-20261121-130500")
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    assert set(_audits()) == {AUDIT_14, TRN_14}
+    corr = _corrections()
+    assert [(corr[c]["label_request"], corr[c]["label_audit_id"]) for c in (first, second)] == [("queued", TRN_14)] * 2
+
+
+@mock_aws
+def test_one_request_is_served_an_hour_and_the_next_waits(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    for t in ("130500", "131000"):
+        _ingest(ingest, "CAM-S01-A", t, [("hot160", 1)], with_frame=True)
+    _two_frames_at_14(ingest)
+    _correct(api, "CAP-S01-20261121-130500")
+    _correct(api, "CAP-S01-20261121-131000")
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    assert sorted(c["label_request"] for c in _corrections().values()) == ["pending", "queued"]
+    assert set(_audits()) == {AUDIT_14, TRN_14}  # the day's number of frames does not grow
+
+
+@mock_aws
+def test_the_frame_whose_count_jumps_is_the_training_frame(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    for t, units in (("140700", 5), ("140705", 5), ("140710", 2)):  # one sampling window, one odd reading
+        _ingest(ingest, "CAM-S01-A", t, [("hot160", units)], with_frame=True)
+    strayed = "CAP-S01-20261121-140710"
+    s3, ddb = ingest._aws_clients()
+    items = ingest.captures_in_hour(ddb, "CAM-S01-A", "S01", "20261121-14")
+    outcomes = set()
+    for seed in range(20):
+        for audit_id in _audits():
+            _table("test-audits").delete_item(Key={"store_id": "DEMO-S01", "audit_id": audit_id})
+        ingest.sample_frames(s3, ddb, "CAM-S01-A", items, "20261121-14", random.Random(seed), None)
+        a = _audits()
+        if a[AUDIT_14]["capture_id"] == strayed:  # the scoring frame took it: a training frame is still drawn
+            assert a[TRN_14]["capture_id"] != strayed
+            outcomes.add("scored")
+        else:
+            assert (a[TRN_14]["capture_id"], a[TRN_14]["picked_by"]) == (strayed, "count_jump")
+            outcomes.add("training")
+    assert outcomes == {"scored", "training"}
+
+
 @mock_aws
 def test_frames_outside_opening_hours_are_not_sampled(monkeypatch: pytest.MonkeyPatch):
     _, ingest = _backend(monkeypatch)

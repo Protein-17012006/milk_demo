@@ -25,8 +25,9 @@ from typing import Any
 
 import boto3
 import compare
+import label_signals
 import shelf
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from common import (
@@ -50,6 +51,8 @@ REVIEW_QUEUE_TABLE = os.environ.get("REVIEW_QUEUE_TABLE", "")
 ANALYTICS_BUCKET = os.environ.get("ANALYTICS_BUCKET", "")
 CAPTURE_TTL_DAYS = int(os.environ.get("CAPTURE_TTL_DAYS", "7"))
 AUDITS_TABLE = os.environ.get("AUDITS_TABLE", "")
+# Corrections that ask for the frame of their reading; unset, the hourly rule serves no request
+CORRECTIONS_TABLE = os.environ.get("CORRECTIONS_TABLE", "")
 MODEL_HEALTH_TABLE = os.environ.get("MODEL_HEALTH_TABLE", "")
 HEALTH_TTL_DAYS = 90
 SHELF_TABLE = os.environ.get("SHELF_TABLE", "")
@@ -543,7 +546,14 @@ def parallel_candidate(ddb_resource, camera_id: str) -> str | None:
 
 
 def _write_frame_audit(
-    s3_client, table, audit_id: str, purpose: str, pick: dict[str, Any], camera_id: str, candidate: str | None = None
+    s3_client,
+    table,
+    audit_id: str,
+    purpose: str,
+    pick: dict[str, Any],
+    camera_id: str,
+    candidate: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> str | None:
     """Copies the picked capture's frame to the analytics bucket and writes a pending audit of that purpose, with
     what the worker's display check said of the capture: display_visible, and display_score when the check had one
@@ -552,7 +562,8 @@ def _write_frame_audit(
 
     A scoring or comparison frame of a capture that `candidate` (the release running in parallel) has also read
     shows the boxes of both releases as one set (compare.merge_boxes) and keeps the candidate's id; a training
-    frame, and any frame the candidate has not read, shows the live release's boxes as always."""
+    frame, and any frame the candidate has not read, shows the live release's boxes as always. `extra` is written
+    onto the audit as it is (why a training frame was picked)."""
     both = (
         purpose in ("scoring", "compare")
         and bool(candidate)
@@ -586,6 +597,7 @@ def _write_frame_audit(
                     "ai_boxes_json": json.dumps(boxes, separators=(",", ":")),
                     "verdicts_json": "[]",
                     "missed_json": "[]",
+                    **(extra or {}),
                 }
             ),
             ConditionExpression="attribute_not_exists(audit_id)",
@@ -652,6 +664,77 @@ def sample_compare(
     return [audit_id] if written else []
 
 
+def pending_requests(ddb_resource, store_id: str) -> list[dict[str, Any]]:
+    """Corrections of the store that still ask for the frame of their reading (label_request "pending"), oldest
+    first. None when this Lambda is not told the corrections table."""
+    if not CORRECTIONS_TABLE:
+        return []
+    rows = _query_all(
+        ddb_resource.Table(CORRECTIONS_TABLE),
+        KeyConditionExpression=Key("store_id").eq(store_id),
+        FilterExpression=Attr("label_request").eq("pending"),
+    )
+    return sorted((r for r in rows if r.get("capture_id")), key=lambda r: r["correction_id"])
+
+
+def _close_requests(ddb_resource, rows: list[dict[str, Any]], status: str, **fields: str) -> None:
+    """Answers these corrections' requests: "queued" with label_audit_id, or "dropped" with label_request_note."""
+    table = ddb_resource.Table(CORRECTIONS_TABLE)
+    values = {"label_request": status, **fields}
+    for row in rows:
+        table.update_item(
+            Key={"store_id": row["store_id"], "correction_id": row["correction_id"]},
+            UpdateExpression="SET " + ", ".join(f"#{k} = :{k}" for k in values),
+            ExpressionAttributeNames={f"#{k}": k for k in values},
+            ExpressionAttributeValues={f":{k}": v for k, v in values.items()},
+        )
+        row["label_request"] = status
+
+
+def serve_label_request(s3_client, ddb_resource, camera_id: str, store_id: str, training_id: str) -> bool:
+    """Gives this camera-hour's training frame to the oldest correction that asks for the frame of its reading
+    (operations-loop design 5.4): one request an hour, so the day's number of frames does not grow. True when the
+    training audit `training_id` was written from a corrected reading's capture.
+
+    A request whose capture is another camera's is left waiting. One whose reading has no frame the labeller could
+    use is dropped, with the reason on the correction. One whose frame is already an audit is answered with that
+    audit. Corrections of the same capture are answered together."""
+    requests = pending_requests(ddb_resource, store_id)
+    captures = ddb_resource.Table(CAPTURES_TABLE)
+    audits = ddb_resource.Table(AUDITS_TABLE)
+    for request in requests:
+        if request["label_request"] != "pending":  # answered with an earlier request of the same capture
+            continue
+        capture_id = request["capture_id"]
+        pick = from_dynamodb(captures.get_item(Key={"camera_id": camera_id, "capture_id": capture_id}).get("Item"))
+        if not pick:
+            continue
+        same = [r for r in requests if r["capture_id"] == capture_id and r["label_request"] == "pending"]
+        if not pick.get("image_key") or pick.get("display_visible") is False:
+            _close_requests(ddb_resource, same, "dropped", label_request_note="the reading has no usable frame")
+            continue
+        existing = _query_all(
+            audits,
+            KeyConditionExpression=Key("store_id").eq(store_id),
+            FilterExpression=Attr("capture_id").eq(capture_id),
+        )
+        if existing:
+            _close_requests(ddb_resource, same, "queued", label_audit_id=min(a["audit_id"] for a in existing))
+            continue
+        why = {"picked_by": "correction", "correction_id": request["correction_id"]}
+        try:
+            written = _write_frame_audit(s3_client, audits, training_id, "training", pick, camera_id, extra=why)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") not in ("NoSuchKey", "404"):
+                raise
+            _close_requests(ddb_resource, same, "dropped", label_request_note="the frame is no longer kept")
+            continue
+        if written:
+            _close_requests(ddb_resource, same, "queued", label_audit_id=training_id)
+        return bool(written)
+    return False
+
+
 def sample_frames(
     s3_client,
     ddb_resource,
@@ -662,8 +745,10 @@ def sample_frames(
     store: dict[str, Any] | None,
     candidate: str | None = None,
 ) -> list[str]:
-    """Picks, for one camera-hour, a scoring frame (AUD-, any capture with a frame) and a training frame
-    (TRN-, a different capture whose worker saw the display). Frames outside the store's opening hours are not
+    """Picks, for one camera-hour, a scoring frame (AUD-, any capture with a frame, at random) and a training frame
+    (TRN-, a different capture whose worker saw the display). The training frame follows signals (operations-loop
+    design 5.4): the frame of a reading someone corrected, else the frame whose count strays from its sampling
+    window, else a random one; the audit says which in picked_by. Frames outside the store's opening hours are not
     sampled. Returns the audit ids created now (0, 1 or 2); an existing audit is left alone."""
     with_frame = _frames_in_opening_hours(items, store)
     if not with_frame:
@@ -683,12 +768,23 @@ def sample_frames(
             created.append(scoring_id)
 
     if not table.get_item(Key={"store_id": store_id, "audit_id": training_id}).get("Item"):
+        try:
+            requested = serve_label_request(s3_client, ddb_resource, camera_id, store_id, training_id)
+        except Exception as exc:  # noqa: BLE001 - a request that cannot be served must not cost the hour its frame
+            print(json.dumps({"label_request_failed": camera_id, "hour": hour, "error": repr(exc)}))
+            requested = False
+        if requested:
+            return [*created, training_id]
         seeing = [
             it for it in with_frame if it.get("display_visible") is not False and it["capture_id"] != scoring_capture
         ]
         if seeing:
-            pick = rng.choice(seeing)
-            if _write_frame_audit(s3_client, table, training_id, "training", pick, camera_id):
+            # a window's median is taken over all its frames, the scoring frame included
+            jumps = label_signals.count_jumps(with_frame, capture_boxes)
+            pick, picked_by = label_signals.pick_training(seeing, jumps, rng)
+            if _write_frame_audit(
+                s3_client, table, training_id, "training", pick, camera_id, extra={"picked_by": picked_by}
+            ):
                 created.append(training_id)
     return created
 

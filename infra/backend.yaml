@@ -731,6 +731,7 @@ Resources:
           LATEST_STOCK_TABLE: !Ref LatestStockTable
           REVIEW_QUEUE_TABLE: !Ref ReviewQueueTable
           AUDITS_TABLE: !Ref AuditsTable
+          CORRECTIONS_TABLE: !Ref CorrectionsTable
           MODEL_HEALTH_TABLE: !Ref ModelHealthTable
           SHELF_TABLE: !Ref ShelfTable
           SHELF_EVENTS_TABLE: !Ref ShelfEventsTable
