@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -156,10 +157,13 @@ def test_measure_counts_a_box_the_gallery_breaks():
 
 def test_each_day_is_read_with_a_gallery_built_without_it():
     asked = []
+    normal = _gallery()
+    mixed_up = _gallery()
+    mixed_up.labels = np.array([{"cheese145": "original145", "original145": "cheese145"}[x] for x in mixed_up.labels])
 
     def gallery_for_day(day):
         asked.append(day)
-        return _gallery(("cheese145", "original145", "hot160")) if day == "d2" else _gallery()
+        return mixed_up if day == "d2" else normal
 
     boxes = [
         _box("c1", "d1", BLUE, "cheese145", "cheese145"),
@@ -169,12 +173,18 @@ def test_each_day_is_read_with_a_gallery_built_without_it():
     r = _measure(boxes, gallery_for_day)
     assert sorted(set(asked)) == ["d1", "d2"] and asked.count("d1") == 1  # one gallery per day, built once
     assert r.days == ["d1", "d2"] and r.names == 2  # the smallest over the galleries used
+    assert (r.fixed, r.broken, r.right_without, r.right_with) == (0, 1, 3, 2)  # only the d2 box is renamed
 
 
 def test_a_frame_that_cannot_be_read_is_skipped_and_counted():
     boxes = [_box("c1", "d1", BLUE, "cheese145", "cheese145"), _box("gone", "d1", BLUE, "cheese145", "cheese145")]
     r = measure(boxes, lambda d: _gallery(), lambda cid: _image() if cid == "c1" else None, SKUS, PRODUCT)
     assert (r.n, r.skipped) == (1, 1)
+
+
+def test_decide_says_nothing_could_be_read_when_no_box_was_measured():
+    r = GroupResult("slide", 0, 0, 0, 0, 0, 0, {}, 0, [], 7)
+    assert decide(r) == (False, ["no judged box could be read: 7 skipped"])
 
 
 def result(fixed=0, broken=0, names=2, per_sku=None, n=100):
@@ -221,8 +231,6 @@ def test_binomial_matches_the_parallel_run_test():
 def test_the_command_measures_each_group_and_writes_the_result(tmp_path, capsys):
     cid = "CAP-S01-20261127-100000-1"
     (tmp_path / "f" / "2026-11-27").mkdir(parents=True)
-    import cv2
-
     cv2.imwrite(str(tmp_path / "f" / "2026-11-27" / f"{cid}.jpg"), _image())
     (tmp_path / "f" / "manifest.jsonl").write_text(json.dumps({"capture_id": cid, "audit_ids": ["AUD-X"]}) + "\n")
     box = [{"box_id": 1, "sku_id": "cheese145", "box": [0, 0, 40, 40]}]
@@ -242,3 +250,54 @@ def test_the_command_measures_each_group_and_writes_the_result(tmp_path, capsys)
     assert (g["n"], g["names"], g["enable"]) == (1, 0, False)
     assert g["reasons"] == ["cannot rename: the gallery knows 0 product names"]
     assert "DO NOT ENABLE" in capsys.readouterr().out
+
+
+def _cli_files(tmp_path, groups):
+    """Two scoring frames on two days, one judged box each, and the files the command reads."""
+    (tmp_path / "f").mkdir()
+    cids = ["CAP-S01-20261127-100000-1", "CAP-S01-20261128-100000-1"]
+    audits = []
+    for i, cid in enumerate(cids):
+        day_dir = tmp_path / "f" / f"2026-11-{27 + i}"
+        day_dir.mkdir()
+        cv2.imwrite(str(day_dir / f"{cid}.jpg"), _image())
+        box = [{"box_id": 1, "sku_id": "cheese145", "box": [0, 0, 40, 40]}]
+        audits.append(_audit(f"AUD-X-{i}", boxes=box, verdicts=[{"box_id": 1, "verdict": "correct"}], cid=cid))
+    (tmp_path / "f" / "manifest.jsonl").write_text(
+        "".join(json.dumps({"capture_id": c, "audit_ids": []}) + chr(10) for c in cids)
+    )
+    files = {"a": audits, "t": {}, "s": [], "c": {"camera": "CAM-S01-A", "groups": groups}}
+    for k, v in files.items():
+        (tmp_path / k).write_text(json.dumps(v))
+    return [
+        "--audits", str(tmp_path / "a"), "--truth", str(tmp_path / "t"), "--segments", str(tmp_path / "s"),
+        "--frames", str(tmp_path / "f"), "--camera-config", str(tmp_path / "c"), "--out", str(tmp_path / "o.json"),
+    ]  # fmt: skip
+
+
+SLIDE = {"region": [0, 0, 80, 40], "skus": ["cheese145", "original145"], "gallery": {"method": "colour"}}
+
+
+def test_each_day_gets_a_gallery_built_without_it_for_the_groups_skus_and_region(tmp_path, monkeypatch):
+    calls = []
+
+    def spy(truth, segments, frames, audits, exclude_holdout, **kw):
+        calls.append((exclude_holdout, kw))
+        return _gallery()
+
+    monkeypatch.setattr(gm, "build", spy)
+    gm.main(_cli_files(tmp_path, {"slide": SLIDE}))
+    assert len(calls) == 2
+    assert [kw["exclude_days"] for _, kw in calls] == [frozenset({"2026-11-27"}), frozenset({"2026-11-28"})]
+    for holdout, kw in calls:
+        assert holdout is True
+        assert kw["skus"] == frozenset(SLIDE["skus"]) and kw["region"] == (0, 0, 80, 40)
+    g = json.loads((tmp_path / "o.json").read_text())["groups"]["slide"]
+    assert (g["n"], g["names"], g["days"]) == (2, 2, ["2026-11-27", "2026-11-28"])
+
+
+def test_a_non_colour_group_whose_gallery_knows_two_names_stops_the_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(gm, "build", lambda *a, **kw: _gallery())
+    th = {**SLIDE, "gallery": {"method": "dinov2+colour"}}
+    with pytest.raises(SystemExit, match="not built yet"):
+        gm.main(_cli_files(tmp_path, {"th": th}))

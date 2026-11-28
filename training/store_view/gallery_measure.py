@@ -162,6 +162,8 @@ def measure(
 
 def decide(r: GroupResult) -> tuple[bool, list[str]]:
     """Whether the gallery may rename this group's boxes, and the reasons it may not (empty when it may)."""
+    if r.n == 0:
+        return False, [f"no judged box could be read: {r.skipped} skipped"]
     if r.names < MIN_NAMES:
         return False, [f"cannot rename: the gallery knows {r.names} product names"]
     why = []
