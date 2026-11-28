@@ -119,6 +119,15 @@ test("that card keeps the product's own name and photo, carries the item's key a
   assert.deepEqual([card.audit.reviewedAt, card.audit.mismatchType, card.detailFetchedAt], [null, "None", 1000]);
 });
 
+test("the card of a product not in view still shows the flagged reading, with no note on the product's place", () => {
+  // the row says the place is out of view now; the card is about one reading of 18:30, so it shows its count
+  const away = { ...(row() as object), notInView: true, notInViewInfo: { since: "2026-11-28T12:15:00+07:00" } } as never;
+  const card = cardFromQueueItem(flagged(), away, 1000);
+  assert.equal(card.notInView, false);
+  assert.equal(card.notInViewInfo, undefined);
+  assert.deepEqual([card.cvOutput.unit_count, card.cvOutput.capture_timestamp], [2, "2026-11-25T18:30:12+07:00"]);
+});
+
 test("a queue item whose product has no row still gets a card", () => {
   const card = cardFromQueueItem(flagged({ sku_id: "UNRECOGNIZED", sku_name: null, flag_reason: "Unrecognized", confidence_score: 0 }), undefined, 1000);
   assert.deepEqual([card.id, card.name, card.thumbnail], ["UNRECOGNIZED", "Unrecognized", "/images/products/placeholder.svg"]);

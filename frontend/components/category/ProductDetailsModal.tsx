@@ -139,7 +139,7 @@ export function ProductDetailsModal({
   const auditStatus = auditStatusText(product.status, audit.reviewedAt);
   const lastSeen = product.notInView
     ? product.notInViewInfo
-      ? notInViewNote(product.notInViewInfo, boxes.length, new Date())
+      ? notInViewNote(product.notInViewInfo.since, boxes.length, cvOutput.capture_timestamp, new Date())
       : "Not in view."
     : lastSeenNote(cvOutput.unit_count, boxes.length, cvOutput.capture_timestamp);
 

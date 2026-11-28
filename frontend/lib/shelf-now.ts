@@ -67,6 +67,12 @@ export function shelfNowRows(products: ShelfNowInput[]): ShelfNowRow[] {
     );
 }
 
+/** The row's data-units, which automated checks read: its units, or "" for a product not in view (the table shows
+ * "–"; its units are the last reading, not today's stock). */
+export function dataUnits(row: Pick<ShelfNowRow, "status" | "units">): string {
+  return row.status === "NOT_IN_VIEW" ? "" : String(row.units);
+}
+
 export interface ShelfNowSummary {
   products: number;
   units: number;
@@ -103,12 +109,14 @@ export function clockText(at: string, now: Date): string {
   return `${time} on ${at.slice(8, 10)}/${at.slice(5, 7)}`;
 }
 
-/** For a card of a product whose place is not in view: since when, and that its frame and boxes are from the last
- * time it was seen. Times are HH:MM, with " on DD/MM" when not of today (UTC+7). */
-export function notInViewNote(info: { since: string; lastAt: string | null }, boxes: number, now: Date): string {
-  const since = `Not in view since ${clockText(info.since, now)}.`;
-  if (boxes === 0 || !info.lastAt) return since;
-  return `${since} The frame and its ${boxes} ${boxes === 1 ? "box" : "boxes"} are from ${clockText(info.lastAt, now)}, when it was last seen.`;
+/** For a card of a product whose place is not in view: since when (the shelf state's time), and that the frame and
+ * boxes it shows are from the last time it was seen. frameAt is the capture time of the reading the card shows (ISO,
+ * UTC+7), so the note never names another time than the frame's. Times are HH:MM, with " on DD/MM" when not of
+ * today (UTC+7). */
+export function notInViewNote(since: string, boxes: number, frameAt: string | null | undefined, now: Date): string {
+  const note = `Not in view since ${clockText(since, now)}.`;
+  if (boxes === 0 || !frameAt || frameAt.length < 16) return note;
+  return `${note} The frame and its ${boxes} ${boxes === 1 ? "box" : "boxes"} are from ${clockText(frameAt, now)}, when it was last seen.`;
 }
 
 /** "Updated at 15:45" for a reading of the same UTC+7 day as now, "Updated at 15:45 on 26/11" for an older one.
@@ -132,6 +140,13 @@ export function namesText(names: string[]): string {
   if (names.length <= 1) return names[0] ?? "";
   if (names.length === 2) return `${names[0]} and ${names[1]}`;
   return `${names[0]}, ${names[1]} and ${names.length - 2} more`;
+}
+
+/** The line under the "Out of stock now" number: the products out of stock (outNames), else that there is stock.
+ * A product not in view may have run out unseen, so then the line speaks only of the products in view. */
+export function outOfStockNowText(summary: Pick<ShelfNowSummary, "out" | "notInView">, outNames: string[]): string {
+  if (summary.out > 0) return namesText(outNames);
+  return summary.notInView > 0 ? "Every product in view has stock." : "Every product on the plan has stock.";
 }
 
 /** Category lists the plan's products first; the others go in a section of their own. */

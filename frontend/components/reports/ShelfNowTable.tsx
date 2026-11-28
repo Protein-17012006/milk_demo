@@ -5,7 +5,7 @@ import Image from "next/image";
 import { Camera, Loader2 } from "lucide-react";
 import { productThumbnail } from "@/lib/product-thumbnail";
 import { BADGE_COLORS, badgePillText } from "@/lib/reliability-ui";
-import { notInViewText, stockStatusLabel, type ShelfNowRow, type StockStatus } from "@/lib/shelf-now";
+import { dataUnits, notInViewText, stockStatusLabel, type ShelfNowRow, type StockStatus } from "@/lib/shelf-now";
 
 interface ShelfNowTableProps {
   /** The plan's products at the latest reading; null until the product list has come back. */
@@ -115,7 +115,7 @@ export function ShelfNowTable({ rows, failed, notice = null, onOpenPhoto, photoR
               </div>
               <div className="ml-[48px] flex shrink-0 items-center gap-[12px] sm:ml-0">
                 <p className="whitespace-nowrap text-right">
-                  <span data-units={row.units} className="text-[17px] font-bold leading-none text-[#111827]">
+                  <span data-units={dataUnits(row)} className="text-[17px] font-bold leading-none text-[#111827]">
                     {row.status === "NOT_IN_VIEW" ? "–" : row.units}
                   </span>
                   {row.status !== "NOT_IN_VIEW" && (

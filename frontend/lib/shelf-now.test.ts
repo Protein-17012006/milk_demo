@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  dataUnits,
   frameLegend,
   namesText,
   notInViewNote,
   notInViewText,
+  outOfStockNowText,
   shelfNowRows,
   shelfNowSummary,
   splitByPlan,
@@ -125,6 +127,13 @@ test("a product not in view comes after low stock and before in stock", () => {
   assert.equal(rows[0].notInView, null);
 });
 
+test("a row not in view carries no number in data-units, for the checks that read the table", () => {
+  const [th, cheese] = shelfNowRows([p("TH", 6, "NOT_IN_VIEW"), p("Cheese", 3, "IN_STOCK")]);
+  assert.equal(dataUnits(th), ""); // its 6 is the last reading, not today's stock
+  assert.equal(dataUnits(cheese), "3");
+  assert.equal(dataUnits(shelfNowRows([p("Sour", 0, "OOS")])[0]), "0");
+});
+
 test("the summary leaves products not in view out of the units and counts them", () => {
   const rows = shelfNowRows([p("Cheese", 5, "IN_STOCK"), p("TH", 6, "NOT_IN_VIEW")]);
   assert.deepEqual(shelfNowSummary(rows), { products: 2, units: 5, out: 0, low: 0, notInView: 1 });
@@ -132,6 +141,15 @@ test("the summary leaves products not in view out of the units and counts them",
 
 test("a product not in view reads Not in view", () => {
   assert.equal(stockStatusLabel("NOT_IN_VIEW"), "Not in view");
+});
+
+test("the out-of-stock card claims stock only for the products in view", () => {
+  const summary = (out: number, notInView: number) => ({ products: 5, units: 9, out, low: 1, notInView });
+  assert.equal(outOfStockNowText(summary(0, 0), []), "Every product on the plan has stock.");
+  // a product not in view may have run out unseen
+  assert.equal(outOfStockNowText(summary(0, 1), []), "Every product in view has stock.");
+  assert.equal(outOfStockNowText(summary(1, 1), ["Slide Cheese 145g"]), "Slide Cheese 145g");
+  assert.equal(outOfStockNowText(summary(3, 0), ["A", "B", "C"]), "A, B and 1 more");
 });
 
 test("not in view says since when and what was seen last", () => {
@@ -151,21 +169,24 @@ test("not in view says since when and what was seen last", () => {
   assert.equal(notInViewText({ since: "2026-11-28T12:15:00+07:00", lastUnits: null, lastAt: null }, now), "since 12:15");
 });
 
-test("a card of a product not in view says since when and where its frame is from", () => {
+test("a card of a product not in view says since when, and when its frame was read", () => {
   const now = new Date("2026-11-28T06:20:00Z"); // 13:20 on 28/11 in UTC+7
-  const info = { since: "2026-11-28T12:15:00+07:00", lastAt: "2026-11-28T12:10:00+07:00" };
+  const since = "2026-11-28T12:15:00+07:00"; // from the shelf state
+  // the frame and its boxes are the product's latest reading: their time is the reading's capture time
   assert.equal(
-    notInViewNote(info, 8, now),
+    notInViewNote(since, 8, "2026-11-28T12:10:29+07:00", now),
     "Not in view since 12:15. The frame and its 8 boxes are from 12:10, when it was last seen.",
   );
+  // counted 0 at the last checks before the move: the reading that has boxes is older than those checks
   assert.equal(
-    notInViewNote(info, 1, now),
-    "Not in view since 12:15. The frame and its 1 box are from 12:10, when it was last seen.",
+    notInViewNote(since, 1, "2026-11-28T11:32:04+07:00", now),
+    "Not in view since 12:15. The frame and its 1 box are from 11:32, when it was last seen.",
   );
   assert.equal(
-    notInViewNote({ since: "2026-11-27T20:00:00+07:00", lastAt: "2026-11-27T19:55:00+07:00" }, 3, now),
+    notInViewNote("2026-11-27T20:00:00+07:00", 3, "2026-11-27T19:55:41+07:00", now),
     "Not in view since 20:00 on 27/11. The frame and its 3 boxes are from 19:55 on 27/11, when it was last seen.",
   );
-  assert.equal(notInViewNote({ since: info.since, lastAt: null }, 0, now), "Not in view since 12:15.");
-  assert.equal(notInViewNote(info, 0, now), "Not in view since 12:15.");
+  assert.equal(notInViewNote(since, 0, "2026-11-28T12:10:29+07:00", now), "Not in view since 12:15.");
+  assert.equal(notInViewNote(since, 3, null, now), "Not in view since 12:15.");
+  assert.equal(notInViewNote(since, 3, "—", now), "Not in view since 12:15."); // a card whose reading is not in yet
 });

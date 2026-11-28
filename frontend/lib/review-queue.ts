@@ -112,6 +112,9 @@ export function cardFromQueueItem(det: ApiReviewQueueItem, row: SkuProduct | und
   };
   return {
     ...base,
+    // where the product's place is now says nothing of this reading: the card shows its count and time
+    notInView: false,
+    notInViewInfo: undefined,
     status: det.flag_reason === "Low Confidence" ? "Low Confidence" : "Needs Review",
     detailFetchedAt: now,
     reviewQueueKey: det.queue_key,

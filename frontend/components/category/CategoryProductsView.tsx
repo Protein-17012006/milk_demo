@@ -208,9 +208,7 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
     inShelfPlan: p.in_shelf_plan === true,
     notInView: p.stock_status === "NOT_IN_VIEW",
     notInViewInfo:
-      p.stock_status === "NOT_IN_VIEW" && p.not_in_view
-        ? { since: p.not_in_view.since, lastAt: p.not_in_view.last_at }
-        : undefined,
+      p.stock_status === "NOT_IN_VIEW" && p.not_in_view ? { since: p.not_in_view.since } : undefined,
   };
 }
 

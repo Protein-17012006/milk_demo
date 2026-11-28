@@ -3,7 +3,7 @@
 import React from "react";
 import { Area, AreaChart, ResponsiveContainer } from "recharts";
 import type { ApiKpiResponse, ApiTrendPoint } from "@/lib/api";
-import { namesText, type ShelfNowSummary } from "@/lib/shelf-now";
+import { outOfStockNowText, type ShelfNowSummary } from "@/lib/shelf-now";
 import { blockedText, coverageText, ptsChange, restockDefinition } from "@/lib/shelf-ui";
 
 // Shown wherever there is no value; the cards never show a number the backend did not return.
@@ -97,7 +97,7 @@ export function KpiGrid({ summary, outNames, kpi, sparklines, days, storeName }:
         <Value tone={hasPlan && summary.out > 0 ? "alert" : undefined} unit={hasPlan ? (summary.out === 1 ? "product" : "products") : undefined}>
           {hasPlan ? summary.out : NO_VALUE}
         </Value>
-        {hasPlan && <Sub data="oos-now">{summary.out > 0 ? namesText(outNames) : "Every product on the plan has stock."}</Sub>}
+        {hasPlan && <Sub data="oos-now">{outOfStockNowText(summary, outNames)}</Sub>}
         {hasPlan && summary.low > 0 && <Sub data="low-now">Low: {summary.low}</Sub>}
         {hasPlan && summary.notInView > 0 && <Sub data="not-in-view-now">Not in view: {summary.notInView}</Sub>}
         {noPlan && <Sub data="oos-now">{NO_PLAN}</Sub>}

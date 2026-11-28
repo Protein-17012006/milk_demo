@@ -137,8 +137,9 @@ export interface SkuProduct {
   inShelfPlan: boolean;
   /** The product's place is not in the camera's view: onShelfStock is its last reading, so no total counts it. */
   notInView?: boolean;
-  /** With notInView: since when, and the time of the last reading (the frame the card shows); ISO, UTC+7. */
-  notInViewInfo?: { since: string; lastAt: string | null };
+  /** With notInView: since when its place is out of view, from the shelf state; ISO, UTC+7. The card's frame is
+   * the latest reading's, timed by cvOutput.capture_timestamp. */
+  notInViewInfo?: { since: string };
   /** Set when the card was opened from the review queue: it shows that flagged reading, not the latest one, and
    * saving a correction checks the queue item off. */
   reviewQueueKey?: string;
