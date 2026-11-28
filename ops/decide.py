@@ -32,6 +32,10 @@ from milk.release import Pointer
 
 NIGHT_FRAMES = 100  # frames without the display a candidate must have read before the night rule speaks
 NIGHT_LIMIT = 1.0  # named boxes per 100 such frames beyond the live release's; more stops the candidate
+# The backend's rule for "the shelf is in view" (backend/shelf.py PRODUCTS_MIN_BOXES / PRODUCTS_MIN_CONF), copied here
+# because ops cannot import backend/; a test pins them equal.
+LIVE_SHELF_BOXES = 3
+LIVE_SHELF_CONF = 0.8
 RESTARTS = 3
 RESTART_WINDOW_S = 15 * 60
 REQUEST_TTL_S = 30 * 60  # a request nobody began within this time is answered no, not carried out late
@@ -47,17 +51,24 @@ def _named(raw) -> int:
     return sum(1 for d in found if d.get("sku_id"))
 
 
+def _sure(raw) -> int:
+    found = json.loads(raw) if isinstance(raw, str) else (raw or [])
+    return sum(1 for d in found if d.get("sku_id") and (d.get("conf") or 0) >= LIVE_SHELF_CONF)
+
+
 def night_rate(captures: list[dict], version: str) -> float | None:
     """Named boxes per 100 frames that `version` draws beyond the live release on the same frame, over the captures
     taken with the display away that `version` has read; None until there are NIGHT_FRAMES of them. The live release
     draws boxes there too (on 27/11 21:05, seven on the bare floor in a motorbike's light), so a candidate is held to
-    the live release, not to zero."""
+    the live release, not to zero. Frames where the live release still sees the shelf (LIVE_SHELF_BOXES named boxes of
+    LIVE_SHELF_CONF anywhere, as in the backend) are not night: on 28/11 the display left the zone but not the view."""
     frames = [
         c
         for c in captures
         if c.get("display_visible") is False
         and c.get("candidate_version") == version
         and c.get("candidate_detections_json") is not None
+        and _sure(c.get("detections_json")) < LIVE_SHELF_BOXES
     ]
     if len(frames) < NIGHT_FRAMES:
         return None

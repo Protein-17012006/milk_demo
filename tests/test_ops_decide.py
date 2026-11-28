@@ -4,10 +4,16 @@ disk or the worker: next_steps only reads what it is given."""
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime
+from pathlib import Path
 
 from milk.release import Pointer as P
-from ops.decide import NIGHT_FRAMES, NIGHT_LIMIT, next_steps, night_rate
+from ops.decide import LIVE_SHELF_BOXES, LIVE_SHELF_CONF, NIGHT_FRAMES, NIGHT_LIMIT, next_steps, night_rate
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "backend"))
+import shelf  # noqa: E402
 
 
 def state(live="v1", previous=None, candidate=None, request=None, last_result=None):
@@ -260,3 +266,17 @@ def test_a_candidate_that_must_stop_is_stopped_rather_than_restarted_into():
     without = {"live": "v1", "candidate": None, "started_at": "2026-11-28T02:00:00+00:00"}
     steps = next_steps(*args, status("v2", stopped="error: FileNotFoundError"), None, worker_started=without)
     assert steps == [("stop", "v2", "error: FileNotFoundError")]
+
+
+def test_night_rate_leaves_out_frames_where_the_live_release_sees_the_shelf():
+    # 28/11 12:15: the display moved out of the zone; the live release still saw its cans there
+    shelf_frames = [
+        {**c, "detections_json": json.dumps([HOT] * 3)} for c in night_captures(100, boxes=100, version="v2")
+    ]
+    assert night_rate(shelf_frames, "v2") is None  # not night frames: fewer than NIGHT_FRAMES left
+    assert night_rate(night_captures(100, boxes=2, version="v2") + shelf_frames, "v2") == 2.0
+
+
+def test_the_night_rule_and_the_shelf_numbers_agree():
+    # the backend's rule for "the shelf is in view" (backend/shelf.py), imported by path
+    assert (LIVE_SHELF_BOXES, LIVE_SHELF_CONF) == (shelf.PRODUCTS_MIN_BOXES, shelf.PRODUCTS_MIN_CONF)
