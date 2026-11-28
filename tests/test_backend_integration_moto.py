@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import random
+import re
 import sys
 import urllib.parse
 from decimal import Decimal
@@ -3474,3 +3475,64 @@ def test_a_check_cannot_be_made_an_answer_key(monkeypatch: pytest.MonkeyPatch):
         email=second_admin,
     )
     assert (status, out["error"], out["message"]) == (400, "NOT_A_KEY_FRAME", "This frame cannot be an answer key.")
+
+
+def _labellers(api, groups: str = "team_admin", email: str = ADMIN) -> tuple[int, dict]:
+    return _call(api, "GET", "/v1/model/labellers", groups=groups, email=email)
+
+
+@mock_aws
+def test_only_an_admin_sees_the_agreement(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _answer_key(api)
+    for groups in ("field_team", "datagent"):
+        status, out = _labellers(api, groups=groups, email=ANN)
+        assert status == 403 and "rows" not in out
+    status, out = _labellers(api)
+    assert (status, out["rows"], out["check_every"]) == (200, [], 10)
+
+
+@mock_aws
+def test_a_labeller_who_follows_the_models_wrong_name_scores_lower(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    key_id = _answer_key(api)
+    _nine_frames(api, ANN)
+    (sheet,) = _sheets()
+    _, before = _labellers(api)
+    assert before["rows"] == []  # the sheet waits: nothing to measure yet
+    assert [(k["audit_id"], k["answer_key_by"], k["sheets_done"], k["sheets_pending"]) for k in before["keys"]] == [
+        (key_id, ADMIN, 0, 1)
+    ]
+    assert _label(api, sheet["audit_id"], ANN)[0] == 200  # both boxes "right", no missed unit marked
+    _, out = _labellers(api)
+    (row,) = out["rows"]
+    # the key: box 1 right, box 2 is Original, one Hot can missed. Ann agrees on box 1 only: 1 of 3 units
+    assert (row["labeller"], row["frames"], row["units"], row["agree"]) == (ANN, 1, 3, 1)
+    assert row["agreement"] == pytest.approx(1 / 3) and re.fullmatch(r"\d{4}-W\d{2}", row["week"])
+    assert [(k["sheets_done"], k["sheets_pending"]) for k in out["keys"]] == [(1, 0)]
+
+
+@mock_aws
+def test_agreement_is_measured_against_the_key_as_it_was_marked(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    key_id = _answer_key(api)
+    _nine_frames(api, ANN)
+    (sheet,) = _sheets()
+    assert _label(api, sheet["audit_id"], ANN, KEY_ANSWERS)[0] == 200  # the very answers of the key
+    assert _label(api, key_id, BINH)[0] == 200  # later someone labels the key frame again, another way
+    (row,) = _labellers(api)[1]["rows"]
+    assert (row["labeller"], row["units"], row["agree"], row["agreement"]) == (ANN, 3, 3, 1.0)
+
+
+@mock_aws
+def test_a_sheet_of_a_frame_that_is_no_longer_a_key_is_not_measured(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    key_id = _answer_key(api)
+    _nine_frames(api, ANN)
+    (sheet,) = _sheets()
+    assert _label(api, sheet["audit_id"], ANN)[0] == 200
+    off = _call(
+        api, "PUT", f"/v1/model/audits/{key_id}/answer-key", groups="team_admin", body={"on": False}, email=ADMIN
+    )
+    assert off[0] == 200
+    assert _labellers(api)[1] == {"rows": [], "keys": [], "check_every": 10}

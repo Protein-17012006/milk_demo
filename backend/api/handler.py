@@ -22,6 +22,7 @@ from typing import Any
 
 import boto3
 import compare
+import label_agreement
 import label_checks
 import model_versions
 import shelf
@@ -1821,6 +1822,45 @@ def _handle_model_answer_key(audit_id: str, event: dict[str, Any], user: dict[st
     return _json_response(200, {"audit_id": audit_id, "answer_key": on}, event)
 
 
+def _handle_model_labellers(event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
+    """For team admins only: each labeller's agreement with the answer keys on the check sheets they answered, by
+    week, and the answer keys there are with how many sheets each has had. A sheet whose frame is no longer a key
+    is left out: nobody vouches for those answers any more."""
+    denied = _require_groups(user, ADMIN_GROUPS, event)
+    if denied:
+        return denied
+    audits = _scan_all(ddb.Table(AUDITS_TABLE))
+    keys = {a["audit_id"]: a for a in audits if a.get("answer_key") is True and not label_checks.is_sheet(a)}
+    sheets = [a for a in audits if label_checks.is_sheet(a) and a.get("check_of") in keys]
+    pairs = [
+        (
+            {
+                "key_verdicts": json.loads(keys[s["check_of"]].get("key_verdicts_json") or "[]"),
+                "key_missed": json.loads(keys[s["check_of"]].get("key_missed_json") or "[]"),
+            },
+            _whole_audit(s),
+        )
+        for s in sheets
+        if s.get("status") == "done"
+    ]
+    key_rows = [
+        {
+            "audit_id": k["audit_id"],
+            "capture_timestamp": k.get("capture_timestamp"),
+            "answer_key_by": k.get("answer_key_by"),
+            "answer_key_at": k.get("answer_key_at"),
+            "sheets_done": sum(1 for s in sheets if s["check_of"] == k["audit_id"] and s.get("status") == "done"),
+            "sheets_pending": sum(1 for s in sheets if s["check_of"] == k["audit_id"] and s.get("status") == "pending"),
+        }
+        for k in sorted(keys.values(), key=lambda k: str(k.get("answer_key_at", "")), reverse=True)
+    ]
+    return _json_response(
+        200,
+        {"rows": label_agreement.weekly(pairs), "keys": key_rows, "check_every": label_checks.CHECK_EVERY},
+        event,
+    )
+
+
 def _handle_model_audit_skip(audit_id: str, event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
     audit = _find_my_audit(ddb, audit_id, user)
     if not audit:
@@ -2107,6 +2147,8 @@ def _route_model(method: str, route_path: str, event: dict[str, Any], user: dict
         return _handle_model_versions(event, ddb)
     if method == "POST" and route_path == "/model/versions/request":
         return _handle_model_version_request(event, user, ddb)
+    if method == "GET" and route_path == "/model/labellers":
+        return _handle_model_labellers(event, user, ddb)
     parts = route_path.strip("/").split("/")  # model, audits, <id>, skip
     if parts[:2] == ["model", "audits"]:
         if len(parts) == 2 and method == "GET":
