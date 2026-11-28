@@ -99,6 +99,7 @@ export function KpiGrid({ summary, outNames, kpi, sparklines, days, storeName }:
         </Value>
         {hasPlan && <Sub data="oos-now">{summary.out > 0 ? namesText(outNames) : "Every product on the plan has stock."}</Sub>}
         {hasPlan && summary.low > 0 && <Sub data="low-now">Low: {summary.low}</Sub>}
+        {hasPlan && summary.notInView > 0 && <Sub data="not-in-view-now">Not in view: {summary.notInView}</Sub>}
         {noPlan && <Sub data="oos-now">{NO_PLAN}</Sub>}
       </div>
 

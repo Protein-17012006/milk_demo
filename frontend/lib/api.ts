@@ -56,7 +56,10 @@ export interface ApiProduct {
   // On the saved shelf plan of a store, or on the suggested one; and how its stock stands by the shelf rule
   // (0 out, 1-2 low). null off the plan. Older backends leave both out.
   in_shelf_plan?: boolean;
-  stock_status?: "OOS" | "LOW" | "IN_STOCK" | null;
+  stock_status?: "OOS" | "LOW" | "IN_STOCK" | "NOT_IN_VIEW" | null;
+  // Set with NOT_IN_VIEW: the place was not in the camera's view since `since`; unit_count is then the last
+  // reading (last_units, at last_at; both null when there was none) and is not today's stock. ISO, UTC+7.
+  not_in_view?: { since: string; last_units: number | null; last_at: string | null } | null;
 }
 
 export interface ApiProductsResponse {

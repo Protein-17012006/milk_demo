@@ -29,14 +29,19 @@ export function groupLabelOf(brand: string | null, subcategory: string | null): 
   return brand || subcategory || "Other";
 }
 
+/** Units that count: a product not in view has none now, whatever its last reading was. */
+function unitsOf(p: SkuProduct): number {
+  return p.notInView ? 0 : p.onShelfStock;
+}
+
 function compareVariants(sortBy: SortOption) {
   return (a: SkuProduct, b: SkuProduct): number => {
     const byName = a.name.localeCompare(b.name);
     switch (sortBy) {
       case "On-shelf stock (high → low)":
-        return b.onShelfStock - a.onShelfStock || byName;
+        return unitsOf(b) - unitsOf(a) || byName;
       case "On-shelf stock (low → high)":
-        return a.onShelfStock - b.onShelfStock || byName;
+        return unitsOf(a) - unitsOf(b) || byName;
       case "Confidence (high → low)":
         return b.confidence - a.confidence || byName;
       case "Name (A → Z)":
@@ -74,8 +79,8 @@ export function groupProducts(products: SkuProduct[], sortBy: SortOption): Produ
   for (const [key, list] of byKey) {
     const variants = [...list].sort(compareVariants(sortBy));
     const first = variants[0];
-    const totalUnits = variants.reduce((sum, v) => sum + v.onShelfStock, 0);
-    const weighted = variants.reduce((sum, v) => sum + v.confidence * v.onShelfStock, 0);
+    const totalUnits = variants.reduce((sum, v) => sum + unitsOf(v), 0);
+    const weighted = variants.reduce((sum, v) => sum + v.confidence * unitsOf(v), 0);
     const packs = new Set(variants.map((v) => `${v.packType} ${v.packSize}`));
     groups.push({
       key,
@@ -84,7 +89,7 @@ export function groupProducts(products: SkuProduct[], sortBy: SortOption): Produ
       thumbnail: first.thumbnail,
       variants,
       totalUnits,
-      variantsOnShelf: variants.filter((v) => v.onShelfStock > 0).length,
+      variantsOnShelf: variants.filter((v) => unitsOf(v) > 0).length,
       flaggedCount: variants.filter((v) => v.cvOutput.is_flagged).length,
       confidence: totalUnits > 0 ? weighted / totalUnits : null,
       packLabel: packs.size === 1 ? [...packs][0] : "Mixed",

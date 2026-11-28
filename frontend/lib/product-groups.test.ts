@@ -154,3 +154,12 @@ test("groups sort by total stock and by confidence, ties by label", () => {
     "Vinamilk · Flavored Milk", "Vinamilk · Fresh Milk",
   ]);
 });
+
+test("a product not in view adds nothing to its group's units", () => {
+  const away = { ...seen({ id: "Slide Original 145g", ...SLIDE, packSize: "145 g" }, 6, 0.5), notInView: true };
+  const [g] = groupProducts([away, seen({ id: "Slide Cheese 145g", ...SLIDE, packSize: "145 g" }, 3, 0.5)], "On-shelf stock (high → low)");
+  assert.equal(g.totalUnits, 3);
+  assert.equal(g.variantsOnShelf, 1);
+  assert.deepEqual(g.variants.map((v) => v.name), ["Slide Cheese 145g", "Slide Original 145g"]);
+  assert.equal(g.confidence, 0.5);
+});

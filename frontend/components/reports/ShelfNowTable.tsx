@@ -5,7 +5,7 @@ import Image from "next/image";
 import { Camera, Loader2 } from "lucide-react";
 import { productThumbnail } from "@/lib/product-thumbnail";
 import { BADGE_COLORS, badgePillText } from "@/lib/reliability-ui";
-import { stockStatusLabel, type ShelfNowRow, type StockStatus } from "@/lib/shelf-now";
+import { notInViewText, stockStatusLabel, type ShelfNowRow, type StockStatus } from "@/lib/shelf-now";
 
 interface ShelfNowTableProps {
   /** The plan's products at the latest reading; null until the product list has come back. */
@@ -26,6 +26,7 @@ const STATUS_COLORS: Record<StockStatus, string> = {
   OOS: "bg-[#FEE2E2] text-[#DC2626]",
   LOW: "bg-[#FEF3C7] text-[#B45309]",
   IN_STOCK: "bg-[#E8F5E9] text-[#2E7D32]",
+  NOT_IN_VIEW: "bg-[#F3F4F6] text-[#6B7280]",
 };
 
 /** What is on the shelf now, product by product: the first thing a viewer opens the Dashboard for. */
@@ -97,6 +98,11 @@ export function ShelfNowTable({ rows, failed, notice = null, onOpenPhoto, photoR
               </div>
               <div className="min-w-0 flex-1 basis-[calc(100%-48px)] sm:basis-0">
                 <p className="line-clamp-2 text-[13px] font-semibold leading-[17px] text-[#111827]">{row.name}</p>
+                {row.notInView && (
+                  <p data-not-in-view className="mt-[2px] text-[11.5px] leading-[1.35] text-[#6B7280]">
+                    {notInViewText(row.notInView, new Date())}
+                  </p>
+                )}
                 {row.badge && (
                   <span
                     data-reliability={row.badge}
@@ -109,10 +115,15 @@ export function ShelfNowTable({ rows, failed, notice = null, onOpenPhoto, photoR
               </div>
               <div className="ml-[48px] flex shrink-0 items-center gap-[12px] sm:ml-0">
                 <p className="whitespace-nowrap text-right">
-                  <span data-units className="text-[17px] font-bold leading-none text-[#111827]">
-                    {row.units}
-                  </span>{" "}
-                  <span className="text-[12px] text-[#6B7280]">{row.units === 1 ? "unit" : "units"}</span>
+                  <span data-units={row.units} className="text-[17px] font-bold leading-none text-[#111827]">
+                    {row.status === "NOT_IN_VIEW" ? "–" : row.units}
+                  </span>
+                  {row.status !== "NOT_IN_VIEW" && (
+                    <>
+                      {" "}
+                      <span className="text-[12px] text-[#6B7280]">{row.units === 1 ? "unit" : "units"}</span>
+                    </>
+                  )}
                 </p>
                 <span
                   className={`w-[92px] shrink-0 rounded-full px-[10px] py-[3px] text-center text-[11.5px] font-semibold leading-tight ${STATUS_COLORS[row.status]}`}

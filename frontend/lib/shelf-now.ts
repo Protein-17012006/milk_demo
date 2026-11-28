@@ -6,7 +6,14 @@
 import type { ReliabilityBadge } from "./api";
 import type { Box } from "./frame-geometry";
 
-export type StockStatus = "OOS" | "LOW" | "IN_STOCK";
+export type StockStatus = "OOS" | "LOW" | "IN_STOCK" | "NOT_IN_VIEW";
+
+/** A plan product whose place is not in the camera's view: since when, and the last thing seen there. */
+export interface NotInView {
+  since: string;
+  lastUnits: number | null;
+  lastAt: string | null;
+}
 
 /** The fields of a GET /products item the table reads; an older backend leaves out the plan and the status. */
 export interface ShelfNowInput {
@@ -16,6 +23,7 @@ export interface ShelfNowInput {
   unit_count: number;
   in_shelf_plan?: boolean;
   stock_status?: StockStatus | null;
+  not_in_view?: { since: string; last_units: number | null; last_at: string | null } | null;
   reliability?: { badge: ReliabilityBadge } | null;
 }
 
@@ -26,11 +34,18 @@ export interface ShelfNowRow {
   units: number;
   status: StockStatus;
   badge: ReliabilityBadge | null;
+  /** Set when status is NOT_IN_VIEW; then units is the last reading, not today's stock. */
+  notInView: NotInView | null;
 }
 
-const ATTENTION: Record<StockStatus, number> = { OOS: 0, LOW: 1, IN_STOCK: 2 };
+const ATTENTION: Record<StockStatus, number> = { OOS: 0, LOW: 1, NOT_IN_VIEW: 2, IN_STOCK: 3 };
 
-/** Products of the shelf plan: out of stock first, then low, then in stock; fewer units first; then by name. */
+function shownUnits(r: ShelfNowRow): number {
+  return r.status === "NOT_IN_VIEW" ? 0 : r.units;
+}
+
+/** Products of the shelf plan: out of stock first, then low, then not in view, then in stock; fewer units first
+ * (a product not in view counts as none); then by name. */
 export function shelfNowRows(products: ShelfNowInput[]): ShelfNowRow[] {
   return products
     .filter((p) => p.in_shelf_plan === true && p.stock_status != null)
@@ -41,8 +56,15 @@ export function shelfNowRows(products: ShelfNowInput[]): ShelfNowRow[] {
       units: p.unit_count,
       status: p.stock_status as StockStatus,
       badge: p.reliability?.badge ?? null,
+      notInView:
+        p.stock_status === "NOT_IN_VIEW" && p.not_in_view
+          ? { since: p.not_in_view.since, lastUnits: p.not_in_view.last_units, lastAt: p.not_in_view.last_at }
+          : null,
     }))
-    .sort((a, b) => ATTENTION[a.status] - ATTENTION[b.status] || a.units - b.units || a.name.localeCompare(b.name));
+    .sort(
+      (a, b) =>
+        ATTENTION[a.status] - ATTENTION[b.status] || shownUnits(a) - shownUnits(b) || a.name.localeCompare(b.name)
+    );
 }
 
 export interface ShelfNowSummary {
@@ -50,33 +72,51 @@ export interface ShelfNowSummary {
   units: number;
   out: number;
   low: number;
+  /** Products whose place is not in view; their last readings are in no total. */
+  notInView: number;
 }
 
 export function shelfNowSummary(rows: ShelfNowRow[]): ShelfNowSummary {
   return {
     products: rows.length,
-    units: rows.reduce((sum, r) => sum + r.units, 0),
+    units: rows.reduce((sum, r) => sum + shownUnits(r), 0),
     out: rows.filter((r) => r.status === "OOS").length,
     low: rows.filter((r) => r.status === "LOW").length,
+    notInView: rows.filter((r) => r.status === "NOT_IN_VIEW").length,
   };
 }
 
-const STATUS_LABELS = { OOS: "Out of stock", LOW: "Low", IN_STOCK: "In stock" } as const;
+const STATUS_LABELS = { OOS: "Out of stock", LOW: "Low", IN_STOCK: "In stock", NOT_IN_VIEW: "Not in view" } as const;
 
-export function stockStatusLabel(status: StockStatus): "Out of stock" | "Low" | "In stock" {
+export function stockStatusLabel(status: StockStatus): "Out of stock" | "Low" | "In stock" | "Not in view" {
   return STATUS_LABELS[status];
 }
 
 const ICT_OFFSET_MS = 7 * 3_600_000;
 
+/** "15:45" for a time of the same UTC+7 day as now, "15:45 on 26/11" for an older one. Times are as the API
+ * writes them (ISO, UTC+7). */
+function clockText(at: string, now: Date): string {
+  const time = at.slice(11, 16);
+  const today = new Date(now.getTime() + ICT_OFFSET_MS).toISOString().slice(0, 10);
+  if (at.slice(0, 10) === today) return time;
+  return `${time} on ${at.slice(8, 10)}/${at.slice(5, 7)}`;
+}
+
 /** "Updated at 15:45" for a reading of the same UTC+7 day as now, "Updated at 15:45 on 26/11" for an older one.
  * asOf is a capture time as the API writes it (ISO, UTC+7). */
 export function updatedText(asOf: string | null | undefined, now: Date): string | null {
   if (!asOf || asOf.length < 16) return null;
-  const time = asOf.slice(11, 16);
-  const today = new Date(now.getTime() + ICT_OFFSET_MS).toISOString().slice(0, 10);
-  if (asOf.slice(0, 10) === today) return `Updated at ${time}`;
-  return `Updated at ${time} on ${asOf.slice(8, 10)}/${asOf.slice(5, 7)}`;
+  return `Updated at ${clockText(asOf, now)}`;
+}
+
+/** "since 12:15 · last seen 6 at 12:10", "since 12:15 · was out of stock at 12:10", or just "since 12:15" when
+ * nothing was seen there before. */
+export function notInViewText(view: NotInView, now: Date): string {
+  const since = `since ${clockText(view.since, now)}`;
+  if (view.lastUnits === null || !view.lastAt) return since;
+  const at = clockText(view.lastAt, now);
+  return view.lastUnits === 0 ? `${since} · was out of stock at ${at}` : `${since} · last seen ${view.lastUnits} at ${at}`;
 }
 
 /** "Slide Cheese 145g", "A and B", "A, B and 2 more"; "" for none. */

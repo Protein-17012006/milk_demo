@@ -118,10 +118,17 @@ export function ProductRow({ item, nested = false, columns, onOpenDetails }: Pro
 
         {/* On-Shelf Stock */}
         <div className="flex w-[140px] shrink-0 items-baseline gap-[4px] pr-[12px]">
-          <span className="text-[15px] font-semibold text-[#111827]">
-            {item.onShelfStock}
-          </span>
-          <span className="text-[12px] font-normal text-[#6B7280]">units</span>
+          {item.notInView ? (
+            <>
+              <span className="text-[15px] font-semibold text-[#111827]">–</span>
+              <span data-not-in-view className="text-[12px] font-normal text-[#6B7280]">Not in view</span>
+            </>
+          ) : (
+            <>
+              <span className="text-[15px] font-semibold text-[#111827]">{item.onShelfStock}</span>
+              <span className="text-[12px] font-normal text-[#6B7280]">units</span>
+            </>
+          )}
         </div>
 
         {/* Confidence + Progress Bar (the team) */}

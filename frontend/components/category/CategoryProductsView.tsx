@@ -206,6 +206,7 @@ function mapApiProductToSkuProduct(p: ApiProduct): SkuProduct {
     },
     reliability: p.reliability,
     inShelfPlan: p.in_shelf_plan === true,
+    notInView: p.stock_status === "NOT_IN_VIEW",
   };
 }
 
@@ -349,9 +350,9 @@ export function CategoryProductsView() {
     return [...list].sort((a, b) => {
       switch (sortBy) {
         case "On-shelf stock (high → low)":
-          return b.onShelfStock - a.onShelfStock;
+          return (b.notInView ? 0 : b.onShelfStock) - (a.notInView ? 0 : a.onShelfStock);
         case "On-shelf stock (low → high)":
-          return a.onShelfStock - b.onShelfStock;
+          return (a.notInView ? 0 : a.onShelfStock) - (b.notInView ? 0 : b.onShelfStock);
         case "Confidence (high → low)":
           return b.confidence - a.confidence;
         case "Name (A → Z)":

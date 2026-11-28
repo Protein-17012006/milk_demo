@@ -135,6 +135,8 @@ export interface SkuProduct {
   reliability?: ApiReliability;
   /** On the shelf plan of a store (saved, or suggested when none is saved); false from older backends. */
   inShelfPlan: boolean;
+  /** The product's place is not in the camera's view: onShelfStock is its last reading, so no total counts it. */
+  notInView?: boolean;
   /** Set when the card was opened from the review queue: it shows that flagged reading, not the latest one, and
    * saving a correction checks the queue item off. */
   reviewQueueKey?: string;

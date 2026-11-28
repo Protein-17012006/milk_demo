@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   frameLegend,
   namesText,
+  notInViewText,
   shelfNowRows,
   shelfNowSummary,
   splitByPlan,
@@ -13,9 +14,19 @@ import {
 const p = (
   sku_id: string,
   unit_count: number,
-  stock_status: "OOS" | "LOW" | "IN_STOCK" | null,
+  stock_status: "OOS" | "LOW" | "IN_STOCK" | "NOT_IN_VIEW" | null,
   in_shelf_plan = true
-) => ({ sku_id, sku_name: sku_id, image_url: null, unit_count, in_shelf_plan, stock_status });
+) => ({
+  sku_id,
+  sku_name: sku_id,
+  image_url: null,
+  unit_count,
+  in_shelf_plan,
+  stock_status,
+  ...(stock_status === "NOT_IN_VIEW"
+    ? { not_in_view: { since: "2026-11-28T12:15:00+07:00", last_units: unit_count, last_at: "2026-11-28T12:10:00+07:00" } }
+    : {}),
+});
 
 test("the table lists the plan's products, the ones that need attention first", () => {
   const rows = shelfNowRows([
@@ -36,13 +47,13 @@ test("the table lists the plan's products, the ones that need attention first", 
       ["Sour", 6, "IN_STOCK"],
     ]
   );
-  assert.deepEqual(shelfNowSummary(rows), { products: 5, units: 12, out: 1, low: 2 });
+  assert.deepEqual(shelfNowSummary(rows), { products: 5, units: 12, out: 1, low: 2, notInView: 0 });
 });
 
 test("no plan, or an older backend without the fields, gives no rows", () => {
   assert.deepEqual(shelfNowRows([]), []);
   assert.deepEqual(shelfNowRows([{ sku_id: "A", sku_name: "A", image_url: null, unit_count: 4 }]), []);
-  assert.deepEqual(shelfNowSummary([]), { products: 0, units: 0, out: 0, low: 0 });
+  assert.deepEqual(shelfNowSummary([]), { products: 0, units: 0, out: 0, low: 0, notInView: 0 });
 });
 
 test("a row carries the product's photo and reliability badge", () => {
@@ -101,4 +112,40 @@ test("the shelf photo's legend: one colour per product that has boxes", () => {
     ]
   );
   assert.notEqual(legend[0].color, legend[1].color);
+});
+
+test("a product not in view comes after low stock and before in stock", () => {
+  const rows = shelfNowRows([p("Cheese", 3, "IN_STOCK"), p("TH", 6, "NOT_IN_VIEW"), p("Hot", 2, "LOW"), p("Sour", 0, "OOS")]);
+  assert.deepEqual(
+    rows.map((r) => r.status),
+    ["OOS", "LOW", "NOT_IN_VIEW", "IN_STOCK"]
+  );
+  assert.deepEqual(rows[2].notInView, { since: "2026-11-28T12:15:00+07:00", lastUnits: 6, lastAt: "2026-11-28T12:10:00+07:00" });
+  assert.equal(rows[0].notInView, null);
+});
+
+test("the summary leaves products not in view out of the units and counts them", () => {
+  const rows = shelfNowRows([p("Cheese", 5, "IN_STOCK"), p("TH", 6, "NOT_IN_VIEW")]);
+  assert.deepEqual(shelfNowSummary(rows), { products: 2, units: 5, out: 0, low: 0, notInView: 1 });
+});
+
+test("a product not in view reads Not in view", () => {
+  assert.equal(stockStatusLabel("NOT_IN_VIEW"), "Not in view");
+});
+
+test("not in view says since when and what was seen last", () => {
+  const now = new Date("2026-11-28T06:20:00Z"); // 13:20 in UTC+7
+  assert.equal(
+    notInViewText({ since: "2026-11-28T12:15:00+07:00", lastUnits: 6, lastAt: "2026-11-28T12:10:00+07:00" }, now),
+    "since 12:15 · last seen 6 at 12:10"
+  );
+  assert.equal(
+    notInViewText({ since: "2026-11-28T12:15:00+07:00", lastUnits: 0, lastAt: "2026-11-28T12:10:00+07:00" }, now),
+    "since 12:15 · was out of stock at 12:10"
+  );
+  assert.equal(
+    notInViewText({ since: "2026-11-27T20:00:00+07:00", lastUnits: 3, lastAt: "2026-11-27T19:55:00+07:00" }, now),
+    "since 20:00 on 27/11 · last seen 3 at 19:55 on 27/11"
+  );
+  assert.equal(notInViewText({ since: "2026-11-28T12:15:00+07:00", lastUnits: null, lastAt: null }, now), "since 12:15");
 });
