@@ -617,6 +617,21 @@ def _handle_post_correction(event: dict[str, Any], user: dict[str, Any], ddb) ->
             )
         return _json_response(200, {"status": "Đã xác nhận", "reviewed_at": now_iso}, event)
 
+    # A correction that changes nothing is not saved (operations-loop design 5.4): Confirm is the answer then.
+    same_sku = (body.get("corrected_sku_id") or sku_id) == sku_id
+    no_category = (body.get("discrepancy_category") or "None") == "None"
+    if same_sku and no_category and body.get("corrected_unit_count") is None:
+        return _json_response(
+            400,
+            {
+                "error": "NOTHING_CHANGED",
+                "message": "Nothing was changed. Use Confirm to accept the reading as it is.",
+            },
+            event,
+        )
+
+    # With the capture known, the correction asks for its frame: the hourly rule gives it the next training slot
+    label_request = "pending" if body.get("capture_id") else None
     correction_id = f"COR-{datetime.now(ICT).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
     corr_item = to_dynamodb_safe(
         {
@@ -633,6 +648,7 @@ def _handle_post_correction(event: dict[str, Any], user: dict[str, Any], ddb) ->
             "reviewer_email": user["email"],
             "correction_date": now_iso,
             "fed_back_to_model": False,
+            **({"label_request": label_request} if label_request else {}),
         }
     )
     ddb.Table(CORRECTIONS_TABLE).put_item(Item=corr_item)
@@ -650,7 +666,16 @@ def _handle_post_correction(event: dict[str, Any], user: dict[str, Any], ddb) ->
             },
         )
 
-    return _json_response(201, {"correction_id": correction_id, "status": "Đã sửa", "correction_date": now_iso}, event)
+    return _json_response(
+        201,
+        {
+            "correction_id": correction_id,
+            "status": "Đã sửa",
+            "correction_date": now_iso,
+            "label_request": label_request,
+        },
+        event,
+    )
 
 
 def _handle_import_sku_master(event: dict[str, Any], ddb) -> dict[str, Any]:

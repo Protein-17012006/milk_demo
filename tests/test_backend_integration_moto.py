@@ -1272,6 +1272,50 @@ def test_a_correction_without_a_key_leaves_the_queue_item_waiting(monkeypatch: p
     assert item["status"] == "Chờ duyệt"
 
 
+@mock_aws
+def test_a_correction_asks_for_the_frame_of_its_reading(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _ingest(ingest, "CAM-S01-A", "140010", [("hot160", 1)], with_frame=True)
+    body = {
+        "store_id": "DEMO-S01",
+        "capture_id": "CAP-S01-20261121-140010",
+        "sku_id": HOT,
+        "corrected_sku_id": CHEESE,
+        "action": "correct",
+    }
+    status, out = _call(api, "POST", "/v1/corrections", groups="field_team", body=body)
+    assert (status, out["label_request"]) == (201, "pending")
+    (saved,) = _table("test-corrections").scan()["Items"]
+    assert saved["label_request"] == "pending"
+
+
+@mock_aws
+def test_a_correction_without_a_capture_asks_for_no_frame(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    body = {"store_id": "DEMO-S01", "sku_id": HOT, "corrected_sku_id": CHEESE, "action": "correct"}
+    status, out = _call(api, "POST", "/v1/corrections", groups="field_team", body=body)
+    (saved,) = _table("test-corrections").scan()["Items"]
+    assert (status, out["label_request"]) == (201, None) and "label_request" not in saved
+
+
+@mock_aws
+def test_a_correction_that_changes_nothing_is_refused(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    for body in (
+        {
+            "store_id": "DEMO-S01",
+            "sku_id": HOT,
+            "corrected_sku_id": HOT,
+            "discrepancy_category": "None",
+            "action": "correct",
+        },
+        {"store_id": "DEMO-S01", "sku_id": HOT, "corrected_sku_id": "", "action": "correct"},
+    ):
+        status, out = _call(api, "POST", "/v1/corrections", groups="field_team", body=body)
+        assert (status, out["error"]) == (400, "NOTHING_CHANGED")
+    assert _table("test-corrections").scan()["Items"] == []
+
+
 TH_OLD = "TH true MILK Sữa Tươi Tiệt Trùng Có Đường 180ml"
 TH_MERGED = "TH true MILK Sữa Tươi Tiệt Trùng 180ml (Có đường + Ít đường)"
 
