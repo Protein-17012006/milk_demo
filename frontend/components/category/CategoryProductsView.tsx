@@ -39,7 +39,7 @@ import { ProductDetailsModal } from "./ProductDetailsModal";
 import { ProductRow } from "./ProductRow";
 import { ProductGroupRow } from "./ProductGroupRow";
 import { ReviewBanner, ReviewQueueDialog } from "./ReviewQueue";
-import { cardFromQueueItem, queueKeyForReading } from "@/lib/review-queue";
+import { cardFromQueueItem, correctionToast, queueKeyForReading } from "@/lib/review-queue";
 import { groupProducts, type ProductGroup } from "@/lib/product-groups";
 import { displayBanner } from "@/lib/shelf-ui";
 import { splitByPlan } from "@/lib/shelf-now";
@@ -494,14 +494,15 @@ export function CategoryProductsView() {
     if (fromQueue) setReviewQueueOpen(true);
   };
 
+  /** Saves the card's correction; resolves to whether it was saved (the card says "Saved" only then). */
   const handleSaveAudit = async (
     productId: string,
     payload: { expectedLabel: string; mismatchType: string }
-  ) => {
+  ): Promise<boolean> => {
     if (liveMode) {
       if (!hasGroup("field_team", "team_admin")) {
         showToast("Your account cannot save corrections.");
-        return;
+        return false;
       }
       try {
         const api = createApiClient(getIdToken);
@@ -510,7 +511,7 @@ export function CategoryProductsView() {
         // the queue item this correction answers: the one the card was opened from, or the waiting item of the
         // very reading the card shows. With its key the backend marks it "Đã sửa".
         const queueKey = card?.reviewQueueKey ?? queueKeyForReading(liveQueue ?? [], card?.cvOutput.reading_id);
-        await api.submitCorrection({
+        const saved = await api.submitCorrection({
           store_id: card?.cvOutput.store_id || "DEMO-S01",
           queue_key: queueKey,
           reading_id: card?.cvOutput.reading_id,
@@ -521,17 +522,13 @@ export function CategoryProductsView() {
           discrepancy_category: payload.mismatchType,
           action: "correct",
         });
-        showToast(
-          queueKey
-            ? "Saved the correction. The reading is checked off in the review queue."
-            : "Saved the correction."
-        );
+        showToast(correctionToast(Boolean(queueKey), saved.label_request));
         void loadLiveData();
       } catch (err) {
         showToast(
           err instanceof Error ? err.message : "Failed to save correction"
         );
-        return;
+        return false;
       }
     }
     const reviewed = (item: SkuProduct): SkuProduct => ({
@@ -551,6 +548,34 @@ export function CategoryProductsView() {
     }
     if (!liveMode) {
       showToast("Saved the correction.");
+    }
+    return true;
+  };
+
+  // "Confirm reading" on a card opened from the review queue: nothing was changed, so its item becomes "Đã xác nhận".
+  const confirmCard = async (): Promise<boolean> => {
+    const card = viewingProduct;
+    if (!card?.reviewQueueKey) return false;
+    if (!hasGroup("field_team", "team_admin")) {
+      showToast("Your account cannot confirm readings.");
+      return false;
+    }
+    try {
+      const api = createApiClient(getIdToken);
+      await api.submitCorrection({
+        store_id: card.cvOutput.store_id || "DEMO-S01",
+        queue_key: card.reviewQueueKey,
+        reading_id: card.cvOutput.reading_id,
+        capture_id: card.cvOutput.capture_id,
+        sku_id: card.id,
+        action: "confirm",
+      });
+      showToast(`Confirmed ${card.cvOutput.sku_name ?? card.name}`);
+      void loadLiveData();
+      return true;
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not confirm this reading");
+      return false;
     }
   };
 
@@ -804,6 +829,7 @@ export function CategoryProductsView() {
         canReview={canReview}
         onClose={closeCard}
         onSaveAudit={handleSaveAudit}
+        onConfirm={liveMode && viewingProduct?.reviewQueueKey ? confirmCard : undefined}
         onRefreshDetail={() =>
           !viewingProduct
             ? Promise.resolve(null)

@@ -137,3 +137,21 @@ export function cardFromQueueItem(det: ApiReviewQueueItem, row: SkuProduct | und
     audit: { accuracy: null, expectedLabel: row ? row.id : "", mismatchType: "None", reviewedAt: null },
   };
 }
+
+/**
+ * Whether the card's form holds a correction: the label was set to another product, or a mismatch type was picked.
+ * The backend refuses a correction that changes nothing (NOTHING_CHANGED) by the same rule on what the card sends:
+ * sku_id = modelLabel, corrected_sku_id = expectedLabel, discrepancy_category = mismatchType.
+ */
+export function correctionChanged(modelLabel: string, expectedLabel: string, mismatchType: string): boolean {
+  return (expectedLabel !== "" && expectedLabel !== modelLabel) || mismatchType !== "None";
+}
+
+/** What the page says after a saved correction: whether a queue item was checked off, and where the frame goes. */
+export function correctionToast(checkedOff: boolean, labelRequest: string | null | undefined): string {
+  return (
+    "Saved the correction." +
+    (checkedOff ? " The reading is checked off in the review queue." : "") +
+    (labelRequest === "pending" ? " Its frame goes to the labelling queue within the hour." : "")
+  );
+}

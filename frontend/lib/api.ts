@@ -309,6 +309,16 @@ export interface ApiShelfPlan {
   updated_at: string | null;
 }
 
+/** POST /corrections. label_request is "pending" when the correction asks for the frame of its reading: the hourly
+ * rule then makes that frame the next training frame to label. A confirm carries neither id nor request. */
+export interface ApiCorrectionResponse {
+  status: string;
+  correction_id?: string;
+  correction_date?: string;
+  reviewed_at?: string;
+  label_request?: "pending" | null;
+}
+
 // --- Model page (GET/PUT /model/*) -------------------------------------------------------------------
 
 export type AuditStatus = "pending" | "done" | "skipped";
@@ -684,7 +694,7 @@ export function createApiClient(getIdToken: TokenGetter) {
       requestWithAuth("/corrections", getIdToken, {
         method: "POST",
         body: JSON.stringify(payload),
-      }),
+      }) as Promise<ApiCorrectionResponse>,
 
     importSkuMaster: (items: Record<string, unknown>[]) =>
       requestWithAuth("/imports/sku-master", getIdToken, {

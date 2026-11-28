@@ -1,7 +1,14 @@
 // Unit tests for the Products review queue summary (run: npm test). Expected values are worked out by hand.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cardFromQueueItem, orderForReview, queueKeyForReading, reviewSummary } from "./review-queue.ts";
+import {
+  cardFromQueueItem,
+  correctionChanged,
+  correctionToast,
+  orderForReview,
+  queueKeyForReading,
+  reviewSummary,
+} from "./review-queue.ts";
 
 const item = (status: string, flag_reason: string, capture_timestamp = "2026-11-23T22:00:00+07:00", queue_key = "k") => ({
   status,
@@ -124,4 +131,26 @@ test("a card opened from its row finds the waiting item of the very reading it s
   assert.equal(queueKeyForReading(items, "RD-OTHER"), undefined); // already checked
   assert.equal(queueKeyForReading(items, "RD-S01-20261126-154523-001"), undefined); // a newer, unflagged reading
   assert.equal(queueKeyForReading(items, "—"), undefined);
+});
+
+test("a correction counts as changed only when the label or the mismatch type moved", () => {
+  assert.equal(correctionChanged("Slide Hot & Spicy 160g", "Slide Hot & Spicy 160g", "None"), false);
+  assert.equal(correctionChanged("Slide Hot & Spicy 160g", "", "None"), false);
+  assert.equal(correctionChanged("Slide Hot & Spicy 160g", "Slide Cheese 145g", "None"), true);
+  assert.equal(correctionChanged("Slide Hot & Spicy 160g", "Slide Hot & Spicy 160g", "Count Mismatch"), true);
+  assert.equal(correctionChanged("Slide Hot & Spicy 160g", "", "Not on the shelf (false reading)"), true);
+});
+
+test("the toast says what happened to the queue item and to the frame", () => {
+  assert.equal(correctionToast(false, null), "Saved the correction.");
+  assert.equal(correctionToast(false, undefined), "Saved the correction.");
+  assert.equal(correctionToast(true, null), "Saved the correction. The reading is checked off in the review queue.");
+  assert.equal(
+    correctionToast(false, "pending"),
+    "Saved the correction. Its frame goes to the labelling queue within the hour."
+  );
+  assert.equal(
+    correctionToast(true, "pending"),
+    "Saved the correction. The reading is checked off in the review queue. Its frame goes to the labelling queue within the hour."
+  );
 });

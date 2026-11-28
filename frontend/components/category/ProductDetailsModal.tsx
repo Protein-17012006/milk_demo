@@ -10,6 +10,7 @@ import {
   type SkuProduct,
 } from "@/lib/products-ui";
 import { focusRegion } from "@/lib/frame-geometry";
+import { correctionChanged } from "@/lib/review-queue";
 import { FrameViewer } from "./FrameViewer";
 
 interface ProductDetailsModalProps {
@@ -17,10 +18,13 @@ interface ProductDetailsModalProps {
   /** The account may save corrections (field_team, team_admin); others see the reading without the form. */
   canReview: boolean;
   onClose: () => void;
+  /** Saves the correction; resolves to whether the backend took it. The card says "Saved" only then. */
   onSaveAudit?: (
     productId: string,
     payload: { expectedLabel: string; mismatchType: string }
-  ) => void;
+  ) => Promise<boolean>;
+  /** A card opened from the review queue: accepts the reading as it is; resolves to whether it was confirmed. */
+  onConfirm?: () => Promise<boolean>;
   /** Reloads GET /products/{sku} into the card; resolves to the reading id it now shows. */
   onRefreshDetail?: () => Promise<string | null>;
 }
@@ -41,6 +45,7 @@ export function ProductDetailsModal({
   canReview,
   onClose,
   onSaveAudit,
+  onConfirm,
   onRefreshDetail,
 }: ProductDetailsModalProps) {
   const [expectedLabel, setExpectedLabel] = useState(
@@ -50,6 +55,8 @@ export function ProductDetailsModal({
     () => product?.audit.mismatchType ?? "None"
   );
   const [savedNotice, setSavedNotice] = useState(false);
+  // a save or a confirm is on its way: both buttons wait for the answer
+  const [saving, setSaving] = useState(false);
   // Frame viewer: null = closed. One link refresh per opening, then a plain error.
   const [viewer, setViewer] = useState<{ notice: string | null; retried: boolean } | null>(null);
   // The frame in the card: its real size (the zoom needs it), or that it did not load.
@@ -131,13 +138,28 @@ export function ProductDetailsModal({
   const auditStatus = auditStatusText(product.status, audit.reviewedAt);
   const lastSeen = lastSeenNote(cvOutput.unit_count, boxes.length, cvOutput.capture_timestamp);
 
-  const handleSave = () => {
-    onSaveAudit?.(product.id, { expectedLabel, mismatchType });
+  // Save Correction saves a change only; a reading left as it is gets confirmed instead (operations-loop design 5.4)
+  const changed = correctionChanged(product.id, expectedLabel, mismatchType);
+
+  const handleSave = async () => {
+    if (saving || !changed || !onSaveAudit) return;
+    setSaving(true);
+    const saved = await onSaveAudit(product.id, { expectedLabel, mismatchType });
+    setSaving(false);
+    if (!saved) return; // the page said why; the card stays open with the form as it was
     setSavedNotice(true);
     setTimeout(() => {
       setSavedNotice(false);
       onClose();
     }, 550);
+  };
+
+  const handleConfirm = async () => {
+    if (saving || !onConfirm) return;
+    setSaving(true);
+    const confirmed = await onConfirm();
+    setSaving(false);
+    if (confirmed) onClose();
   };
 
   return (
@@ -522,16 +544,35 @@ export function ProductDetailsModal({
             >
               Close
             </button>
+            {canReview && !changed && product.reviewQueueKey && onConfirm && (
+              <button
+                type="button"
+                data-confirm-reading
+                disabled={saving}
+                onClick={() => void handleConfirm()}
+                className="rounded-[8px] border border-[#16A34A] bg-white px-4 py-2 text-[13px] font-semibold text-[#15803D] hover:bg-[#F0FDF4] transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {saving ? "Confirming…" : "Confirm reading"}
+              </button>
+            )}
             {canReview && (
               <button
                 type="button"
-                onClick={handleSave}
-                className="rounded-[8px] bg-[#EE730A] px-4 py-2 text-[13px] font-semibold text-white hover:bg-[#D96504] transition-colors cursor-pointer"
+                data-save-correction
+                disabled={!changed || saving}
+                onClick={() => void handleSave()}
+                className="rounded-[8px] bg-[#EE730A] px-4 py-2 text-[13px] font-semibold text-white hover:bg-[#D96504] transition-colors cursor-pointer disabled:cursor-not-allowed disabled:bg-[#F3B98A] disabled:hover:bg-[#F3B98A]"
               >
-                {savedNotice ? "Saved ✓" : "Save Correction"}
+                {savedNotice ? "Saved ✓" : saving && changed ? "Saving…" : "Save Correction"}
               </button>
             )}
           </div>
+          {canReview && !changed && (
+            <p data-nothing-changed className="w-full text-right text-[12px] leading-[1.45] text-[#6B7280]">
+              Nothing changed yet. Change the label or the mismatch type to save a correction
+              {product.reviewQueueKey && onConfirm ? ", or confirm the reading as it is." : "."}
+            </p>
+          )}
         </div>
       </div>
       {viewer && cvOutput.frame_url && (
