@@ -61,6 +61,7 @@ class Gallery:
     built_at: str
     none_threshold: float | None = None
     objects: np.ndarray | None = None  # the can each crop shows: one truth box cut from many frames is one can
+    built_from: tuple[str, ...] = ()  # sorted ids of what went in: audit ids, and "truth:<keyframe capture id>"
 
     def save(self, path: Path) -> None:
         np.savez(
@@ -71,6 +72,7 @@ class Gallery:
             built_at=np.array(self.built_at),
             none_threshold=np.array(np.nan if self.none_threshold is None else self.none_threshold),
             objects=(self.objects if self.objects is not None else self.sources).astype(str),
+            built_from=np.array(sorted(self.built_from), dtype=str),
         )
 
     @classmethod
@@ -78,7 +80,16 @@ class Gallery:
         d = np.load(path, allow_pickle=False)
         nt = float(d["none_threshold"])
         objects = d["objects"] if "objects" in d.files else None
-        return cls(d["features"], d["labels"], d["sources"], str(d["built_at"]), None if np.isnan(nt) else nt, objects)
+        built_from = tuple(str(x) for x in d["built_from"]) if "built_from" in d.files else ()
+        return cls(
+            d["features"],
+            d["labels"],
+            d["sources"],
+            str(d["built_at"]),
+            None if np.isnan(nt) else nt,
+            objects,
+            built_from,
+        )
 
     def counts(self) -> dict[str, int]:
         """Cans per label (MIN_IMAGES counts cans, not crops); crops when the gallery does not know its cans."""

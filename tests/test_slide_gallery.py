@@ -5,7 +5,17 @@ import json
 import cv2
 import numpy as np
 
-from training.store_view.slide_gallery import MIN_IMAGES, Gallery, build, colour, mean_colour, read, trn_rows
+from training.store_view.slide_gallery import (
+    LABEL_PREFIXES,
+    MIN_IMAGES,
+    Gallery,
+    build,
+    colour,
+    day_of,
+    mean_colour,
+    read,
+    trn_rows,
+)
 
 RNG = np.random.default_rng(7)
 
@@ -181,3 +191,121 @@ def test_mean_colour_is_a_unit_vector_and_none_for_nothing():
     assert abs(float(np.linalg.norm(m)) - 1.0) < 1e-6
     assert float(m @ axis(0)) > float(m @ axis(1)) > 0
     assert mean_colour([]) is None
+
+
+def test_cmp_frames_are_people_labels_and_a_disputed_box_takes_the_name_people_chose():
+    boxes = [
+        {"box_id": 1, "sku_id": "cheese145", "conf": 0.9, "box": [10, 0, 8, 8]},
+        {"box_id": 2, "sku_id": None, "conf": 0.0, "box": [20, 0, 8, 8], "needs_flavour": True},
+        {"box_id": 3, "sku_id": None, "conf": 0.0, "box": [30, 0, 8, 8], "needs_flavour": True},
+        {"box_id": 4, "sku_id": None, "conf": 0.0, "box": [40, 0, 8, 8], "needs_flavour": True},
+    ]
+    verdicts = [
+        {"box_id": 1, "verdict": "correct"},
+        {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "hot160"},
+        {"box_id": 3, "verdict": "not_product"},
+        {"box_id": 4, "verdict": "correct"},  # no usable label: skipped
+    ]
+    cmp_audit = audit("CMP-CAM-S01-A-20261127-01", "done", boxes, verdicts)
+    assert LABEL_PREFIXES == ("TRN-", "REV-", "CMP-")
+    assert trn_rows([cmp_audit]) == []  # the auto-label default is unchanged
+    assert trn_rows([cmp_audit], LABEL_PREFIXES) == [
+        ("C2", [10, 0, 8, 8], "cheese145"),
+        ("C2", [20, 0, 8, 8], "hot160"),
+        ("C2", [30, 0, 8, 8], "none"),
+    ]
+
+
+def test_a_capture_with_an_aud_audit_never_enters_even_with_a_trn_audit(tmp_path):
+    frames = tmp_path / "frames"
+    frame(frames, "2026-11-27", "C1")
+    frame(frames, "2026-11-27", "C2")
+    rows = [
+        {"capture_id": "C1", "audit_ids": ["TRN-CAM-S01-A-20261127-01", "AUD-CAM-S01-A-20261127-01"]},
+        {"capture_id": "C2", "audit_ids": ["CMP-CAM-S01-A-20261127-02"]},
+    ]
+    (frames / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    box = [{"box_id": 1, "sku_id": "cheese145", "conf": 0.9, "box": [20, 20, 30, 60]}]
+    ok = [{"box_id": 1, "verdict": "correct"}]
+    done = [
+        audit("TRN-CAM-S01-A-20261127-01", "done", box, ok, cid="C1"),
+        audit("CMP-CAM-S01-A-20261127-02", "done", box, ok, cid="C2"),
+    ]
+    g = build({}, [], frames, done, exclude_holdout=False)
+    assert sorted(set(g.sources.tolist())) == ["C2"]
+    assert g.built_from == ("CMP-CAM-S01-A-20261127-02",)
+
+
+def test_day_of_reads_the_store_day_from_the_capture_id():
+    assert day_of("CAP-S01-20261127-235959-3") == "2026-11-27"
+    assert day_of("CAP-S01-20261128-000001") == "2026-11-28"
+
+
+def test_build_leaves_out_the_excluded_days_and_records_what_it_was_built_from(tmp_path):
+    frames = tmp_path / "frames"
+    for day, cid in (
+        ("2026-11-26", "CAP-S01-20261126-100000"),
+        ("2026-11-27", "CAP-S01-20261127-100000"),
+        ("2026-11-26", "CAP-S01-20261126-090000"),
+        ("2026-11-27", "CAP-S01-20261127-090000"),
+    ):
+        frame(frames, day, cid)
+    k1, k2 = "CAP-S01-20261126-090000", "CAP-S01-20261127-090000"
+    cids = [k1, k2, "CAP-S01-20261126-100000", "CAP-S01-20261127-100000"]
+    (frames / "manifest.jsonl").write_text("".join(json.dumps({"capture_id": c, "audit_ids": []}) + "\n" for c in cids))
+    truth = {k: [{"box": [20, 20, 30, 60], "sku": "cheese145", "kind": "face"}] for k in (k1, k2)}
+    segments = [
+        {"id": f"s{i}", "kind": "day", "split": "train", "keyframe": k, "members": [k]} for i, k in enumerate((k1, k2))
+    ]
+    box = [{"box_id": 1, "sku_id": "hot160", "conf": 0.9, "box": [20, 20, 30, 60]}]
+    ok = [{"box_id": 1, "verdict": "correct"}]
+    trn = [
+        audit("TRN-A-1", "done", box, ok, cid="CAP-S01-20261126-100000"),
+        audit("REV-A-2", "done", box, ok, cid="CAP-S01-20261127-100000"),
+    ]
+    full = build(truth, segments, frames, trn, exclude_holdout=False)
+    assert full.built_from == tuple(sorted(["REV-A-2", "TRN-A-1", f"truth:{k1}", f"truth:{k2}"]))
+    g = build(truth, segments, frames, trn, exclude_holdout=False, exclude_days=frozenset({"2026-11-27"}))
+    assert g.built_from == tuple(sorted(["TRN-A-1", f"truth:{k1}"]))
+    assert sorted(set(g.sources.tolist())) == sorted([k1, "CAP-S01-20261126-100000"])
+    g.save(tmp_path / "g.npz")
+    assert Gallery.load(tmp_path / "g.npz").built_from == g.built_from
+
+
+def test_an_old_gallery_file_without_built_from_loads_as_empty(tmp_path):
+    np.savez(
+        tmp_path / "old.npz",
+        features=np.zeros((1, 144)),
+        labels=np.array(["cheese145"]),
+        sources=np.array(["C1"]),
+        built_at=np.array("x"),
+        none_threshold=np.array(np.nan),
+    )
+    assert Gallery.load(tmp_path / "old.npz").built_from == ()
+
+
+def test_a_group_gallery_keeps_its_own_names_and_only_the_none_crops_inside_its_region(tmp_path):
+    frames = tmp_path / "frames"
+    frame(frames, "2026-11-27", "CAP-S01-20261127-100000")
+    cid = "CAP-S01-20261127-100000"
+    (frames / "manifest.jsonl").write_text(json.dumps({"capture_id": cid, "audit_ids": []}) + "\n")
+    boxes = [
+        {"box_id": 1, "sku_id": "cheese145", "conf": 0.9, "box": [20, 20, 30, 60]},
+        {"box_id": 2, "sku_id": "TMP-MLK-TH-00", "conf": 0.9, "box": [60, 20, 30, 60]},
+        {"box_id": 3, "sku_id": "x", "conf": 0.9, "box": [100, 20, 30, 60]},  # centre (115, 50): in the region
+        {"box_id": 4, "sku_id": "x", "conf": 0.9, "box": [160, 20, 30, 60]},  # centre (175, 50): outside
+    ]
+    verdicts = [
+        {"box_id": 1, "verdict": "correct"},
+        {"box_id": 2, "verdict": "correct"},
+        {"box_id": 3, "verdict": "not_product"},
+        {"box_id": 4, "verdict": "not_product"},
+    ]
+    trn = [audit("TRN-A-1", "done", boxes, verdicts, cid=cid)]
+    g = build(
+        {}, [], frames, trn, exclude_holdout=False, skus=frozenset({"cheese145", "hot160"}), region=(0, 0, 150, 100)
+    )
+    assert sorted(g.labels.tolist()) == ["cheese145", "none"]
+    assert sorted(g.objects.tolist()) == [f"trn:{cid}@100,20", f"trn:{cid}@20,20"]
+    everything = build({}, [], frames, trn, exclude_holdout=False)
+    assert len(everything.labels) == 4

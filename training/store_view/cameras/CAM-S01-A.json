@@ -19,6 +19,15 @@
     "keyframes": [
      "CAP-S01-20261123-151304-2"
     ]
+   },
+   "skus": [
+    "cheese145",
+    "hot160",
+    "original145",
+    "sourcream150"
+   ],
+   "gallery": {
+    "method": "colour"
    }
   },
   "th": {
@@ -40,6 +49,12 @@
      "CAP-S01-20261124-154516-4",
      "CAP-S01-20261124-194027-2"
     ]
+   },
+   "skus": [
+    "TMP-MLK-TH-00"
+   ],
+   "gallery": {
+    "method": "dinov2+colour"
    }
   }
  }

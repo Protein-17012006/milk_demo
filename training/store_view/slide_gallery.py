@@ -43,13 +43,20 @@ AUDITS_TABLE = "milk-backend-development-audits"
 REGION_NAME = "ap-southeast-1"
 
 
-def trn_rows(audits: list[dict]) -> list[tuple[str, list[int], str]]:
-    """(capture_id, box x y w h, label) of each judged box of the done training (TRN-) and review (REV-) audits, both
-    people's labels: correct -> the box's label, wrong_sku -> the true one, not_product -> "none"; out of scope and
-    anything not judged are left out. Scoring audits (AUD-) never enter."""
+LABEL_PREFIXES = ("TRN-", "REV-", "CMP-")  # the audits whose verdicts are people's labels, as the gallery reads them
+
+
+def day_of(capture_id: str) -> str:
+    """The store day "YYYY-MM-DD" of a capture, read from its id (CAP-S01-20261127-235959-3): the ids are local Vietnam
+    time, so a frame near midnight is never put on the wrong day by a UTC timestamp."""
+    stamp = capture_id.split("-")[2]
+    return f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]}"
+
+
+def _label_rows(audits: list[dict], prefixes: tuple[str, ...]) -> list[tuple[str, str, list[int], str]]:
     out = []
     for a in audits:
-        if not str(a.get("audit_id", "")).startswith(("TRN-", "REV-")) or a.get("status") != "done":
+        if not str(a.get("audit_id", "")).startswith(prefixes) or a.get("status") != "done":
             continue
         boxes = {b["box_id"]: b for b in json.loads(a.get("ai_boxes_json") or "[]")}
         for v in json.loads(a.get("verdicts_json") or "[]"):
@@ -60,8 +67,16 @@ def trn_rows(audits: list[dict]) -> list[tuple[str, list[int], str]]:
                 v.get("verdict")
             )
             if label:
-                out.append((a["capture_id"], [int(x) for x in b["box"]], label))
+                out.append((a["audit_id"], a["capture_id"], [int(x) for x in b["box"]], label))
     return out
+
+
+def trn_rows(audits: list[dict], prefixes: tuple[str, ...] = ("TRN-", "REV-")) -> list[tuple[str, list[int], str]]:
+    """(capture_id, box x y w h, label) of each judged box of the done audits with one of the prefixes (training and
+    review by default; the gallery passes LABEL_PREFIXES, which adds comparison frames), all people's labels:
+    correct -> the box's label, wrong_sku -> the true one (on a disputed box, the name the person chose), not_product
+    -> "none"; out of scope and anything not judged are left out. Scoring audits (AUD-) never enter."""
+    return [(cid, box, label) for _, cid, box, label in _label_rows(audits, prefixes)]
 
 
 def build(
@@ -72,10 +87,15 @@ def build(
     exclude_holdout: bool,
     per_keyframe: int = 30,
     min_sim: float = 0.85,
+    exclude_days: frozenset[str] = frozenset(),
+    skus: frozenset[str] | None = None,
+    region: tuple[int, int, int, int] | None = None,
 ) -> Gallery:
     """The gallery from the hand-drawn truth (each box cut from up to per_keyframe frames of its segment whose box area
     still looks like the keyframe's) and from the done TRN and REV audits. Scoring frames never enter; with exclude_holdout,
-    held-out keyframes and held-out TRN frames do not either."""
+    held-out keyframes and held-out TRN frames do not either. A keyframe or label row of a day in exclude_days is left
+    out. With skus, only labels in skus enter, plus the "none" crops whose box centre lies inside region
+    (x0, y0, x1, y1): a product group has its own gallery."""
     import cv2
 
     from training.store_view.dataset import read_scoring_frames, spread
@@ -84,19 +104,34 @@ def build(
     scoring = read_scoring_frames(frames_dir)
     paths = {p.stem: p for p in frames_dir.glob("*/*.jpg")}
     feats, labels, sources, objects = [], [], [], []
+    built_from: set[str] = set()
 
-    def add(image, box, label, source, obj):
-        crop = crop_of(image, box)
+    def wanted(box, label) -> bool:
+        if skus is None or label in skus:
+            return True
+        if label != "none" or region is None:
+            return False
+        cx, cy = box[0] + box[2] / 2, box[1] + box[3] / 2
+        return region[0] <= cx <= region[2] and region[1] <= cy <= region[3]
+
+    def add(image, box, label, source, obj, origin):
+        crop = crop_of(image, box) if wanted(box, label) else None
         if crop is not None:
             feats.append(colour(crop))
             labels.append(label)
             sources.append(source)
             objects.append(obj)
+            built_from.add(origin)
 
     seg_of = {s["keyframe"]: s for s in segments if s.get("kind") == "day"}
     for key, rows in truth.items():
         seg = seg_of.get(key)
-        if seg is None or key not in paths or (exclude_holdout and seg.get("split") == "holdout"):
+        if (
+            seg is None
+            or key not in paths
+            or (exclude_days and day_of(key) in exclude_days)
+            or (exclude_holdout and seg.get("split") == "holdout")
+        ):
             continue
         key_grey = cv2.imread(str(paths[key]), cv2.IMREAD_GRAYSCALE)
         usable = [
@@ -110,16 +145,21 @@ def build(
                 area = (max(0, x - 8), max(0, y - 8), x + w + 8, y + h + 8)
                 if cid != key and similarity(signature(grey, area), signature(key_grey, area)) < min_sim:
                     continue
-                add(image, r["box"], r["sku"], cid, f"truth:{key}#{i}")
+                add(image, r["box"], r["sku"], cid, f"truth:{key}#{i}", f"truth:{key}")
     stamp = {a["capture_id"]: a.get("capture_timestamp", "") for a in trn}
     cache: dict[str, np.ndarray] = {}
-    for cid, box, label in trn_rows(trn):
-        if cid in scoring or cid not in paths or (exclude_holdout and stamp.get(cid) and holdout(stamp[cid])):
+    for audit_id, cid, box, label in _label_rows(trn, LABEL_PREFIXES):
+        if (
+            cid in scoring
+            or cid not in paths
+            or (exclude_days and day_of(cid) in exclude_days)
+            or (exclude_holdout and stamp.get(cid) and holdout(stamp[cid]))
+        ):
             continue
         if cid not in cache:
             cache.clear()
             cache[cid] = cv2.imread(str(paths[cid]))
-        add(cache[cid], box, label, cid, f"trn:{cid}@{box[0]},{box[1]}")
+        add(cache[cid], box, label, cid, f"trn:{cid}@{box[0]},{box[1]}", audit_id)
     return Gallery(
         np.stack(feats) if feats else np.zeros((0, 144)),
         np.array(labels, dtype=str),
@@ -127,6 +167,7 @@ def build(
         datetime.now().isoformat(timespec="seconds"),
         None,
         np.array(objects, dtype=str),
+        tuple(sorted(built_from)),
     )
 
 
