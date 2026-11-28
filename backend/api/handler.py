@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
 import urllib.parse
 import uuid
@@ -21,6 +22,7 @@ from typing import Any
 
 import boto3
 import compare
+import label_checks
 import model_versions
 import shelf
 from audit_scoring import (
@@ -1576,10 +1578,18 @@ def _whole_audit(item: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# What the browser is never told about a frame: that it is a check sheet, whose it is, or that it is an answer key
+# (operations-loop design 5.4: a labeller is not told which frame has a known answer)
+_NOT_TOLD = ("check_of", "assigned_to", "answer_key", "answer_key_by", "answer_key_at")
+
+
 def _audit_view(item: dict[str, Any]) -> dict[str, Any]:
-    """The audit as the browser gets it: no box says which release drew it."""
+    """The audit as the browser gets it: no box says which release drew it, and nothing says the frame is a check
+    sheet or an answer key."""
     out = _whole_audit(item)
     out["ai_boxes"] = compare.public_boxes(out["ai_boxes"])
+    for name in _NOT_TOLD:
+        out.pop(name, None)
     return out
 
 
@@ -1593,6 +1603,35 @@ def _scored_view(item: dict[str, Any]) -> dict[str, Any]:
 def _find_audit(ddb, audit_id: str) -> dict[str, Any] | None:
     found = [a for a in _scan_all(ddb.Table(AUDITS_TABLE)) if a.get("audit_id") == audit_id]
     return found[0] if found else None
+
+
+def _in_my_queue(audit: dict[str, Any], user: dict[str, Any]) -> bool:
+    """Every frame is everyone's, except a check sheet: that one exists for its labeller alone."""
+    return not label_checks.is_sheet(audit) or audit.get("assigned_to") == user["email"]
+
+
+def _find_my_audit(ddb, audit_id: str, user: dict[str, Any]) -> dict[str, Any] | None:
+    """The audit, unless it is another labeller's check sheet: to anyone else that sheet does not exist."""
+    audit = _find_audit(ddb, audit_id)
+    return audit if audit and _in_my_queue(audit, user) else None
+
+
+def _assign_check(ddb, user: dict[str, Any]) -> None:
+    """After a labeller saved a frame: when their next frame is due to be a check (label_checks.due) and an answer
+    key suits them, puts a check sheet of one such key, drawn at random, in their queue. Never fails the save."""
+    try:
+        audits = _scan_all(ddb.Table(AUDITS_TABLE))
+        email = user["email"]
+        if not label_checks.due(audits, email):
+            return
+        keys = label_checks.eligible_keys(audits, email)
+        if not keys:
+            return
+        now_iso = datetime.now(ICT).isoformat(timespec="seconds")
+        sheet = label_checks.sheet_for(random.choice(keys), email, now_iso, uuid.uuid4().hex[:8])
+        ddb.Table(AUDITS_TABLE).put_item(Item=to_dynamodb_safe(sheet))
+    except Exception as exc:  # noqa: BLE001 - the labels are saved; a check that cannot be made is only logged
+        print(json.dumps({"check_sheet_failed": repr(exc)}))
 
 
 def _within_days(ts: str, days: int) -> bool:
@@ -1629,14 +1668,19 @@ def _before_current_rule(audit: dict[str, Any]) -> bool:
     return audit.get("status") == "done" and _is_scoring(audit) and audit.get("label_rule") != LABEL_RULE
 
 
-def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:
+def _handle_model_audits(event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
     """Audits of the last `days` days (0: all), newest first, optionally of one status; old_rule=1 keeps only the
-    frames labelled under an older rule, for the Model page's "Relabel them". counts are always those of the range."""
+    frames labelled under an older rule, for the Model page's "Relabel them". counts are always those of the range.
+    A check sheet is listed, and counted, for its own labeller only; it reads like any frame of its purpose."""
     params = event.get("queryStringParameters") or {}
     status = params.get("status") or ""
     days = int(params.get("days") or 7)
     old_rule = params.get("old_rule") in ("1", "true")
-    audits = [a for a in _scan_all(ddb.Table(AUDITS_TABLE)) if _within_days(str(a.get("capture_timestamp", "")), days)]
+    audits = [
+        a
+        for a in _scan_all(ddb.Table(AUDITS_TABLE))
+        if _in_my_queue(a, user) and _within_days(str(a.get("capture_timestamp", "")), days)
+    ]
     counts = {s: sum(1 for a in audits if a.get("status") == s) for s in ("pending", "done", "skipped")}
     chosen = sorted(
         (a for a in audits if (not status or a.get("status") == status) and (not old_rule or _before_current_rule(a))),
@@ -1661,8 +1705,8 @@ def _handle_model_audits(event: dict[str, Any], ddb) -> dict[str, Any]:
     return _json_response(200, {"items": items, "counts": counts}, event)
 
 
-def _handle_model_audit_get(audit_id: str, event: dict[str, Any], s3, ddb) -> dict[str, Any]:
-    audit = _find_audit(ddb, audit_id)
+def _handle_model_audit_get(audit_id: str, event: dict[str, Any], user: dict[str, Any], s3, ddb) -> dict[str, Any]:
+    audit = _find_my_audit(ddb, audit_id, user)
     if not audit:
         return _json_response(404, {"error": "NOT_FOUND", "audit_id": audit_id}, event)
     view = _audit_view(audit)
@@ -1690,7 +1734,7 @@ def _set_audit(ddb, audit: dict[str, Any], values: dict[str, Any], remove: tuple
 
 
 def _handle_model_audit_put(audit_id: str, event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
-    audit = _find_audit(ddb, audit_id)
+    audit = _find_my_audit(ddb, audit_id, user)
     if not audit:
         return _json_response(404, {"error": "NOT_FOUND", "audit_id": audit_id}, event)
     body = _parse_body(event)
@@ -1734,11 +1778,51 @@ def _handle_model_audit_put(audit_id: str, event: dict[str, Any], user: dict[str
         },
         remove=("skip_reason", "skip_note"),
     )
+    if not label_checks.is_sheet(saved):  # answering a check is not a frame towards the next one
+        _assign_check(ddb, user)
     return _json_response(200, _audit_view(saved), event)
 
 
+_KEY_FIELDS = ("answer_key", "answer_key_by", "answer_key_at", "key_verdicts_json", "key_missed_json")
+
+
+def _handle_model_answer_key(audit_id: str, event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
+    """A team admin vouches for a labelled frame's answers ({"on": true}) or takes that back ({"on": false}). The
+    key keeps a copy of the answers as they are now: labelling the frame again later does not move the key."""
+    denied = _require_groups(user, ADMIN_GROUPS, event)
+    if denied:
+        return denied
+    audit = _find_my_audit(ddb, audit_id, user)
+    if not audit:
+        return _json_response(404, {"error": "NOT_FOUND", "audit_id": audit_id}, event)
+    on = _parse_body(event).get("on")
+    if not isinstance(on, bool):
+        return _json_response(400, {"error": "INVALID_BODY", "message": "on must be true or false"}, event)
+    if on:
+        reason = label_checks.can_be_key(audit)
+        if reason:
+            return _json_response(400, {"error": "NOT_A_KEY_FRAME", "message": reason}, event)
+        _set_audit(
+            ddb,
+            audit,
+            {
+                "answer_key": True,
+                "answer_key_by": user["email"],
+                "answer_key_at": datetime.now(ICT).isoformat(timespec="seconds"),
+                "key_verdicts_json": audit.get("verdicts_json") or "[]",
+                "key_missed_json": audit.get("missed_json") or "[]",
+            },
+        )
+    else:
+        ddb.Table(AUDITS_TABLE).update_item(
+            Key={"store_id": audit["store_id"], "audit_id": audit["audit_id"]},
+            UpdateExpression="REMOVE " + ", ".join(_KEY_FIELDS),
+        )
+    return _json_response(200, {"audit_id": audit_id, "answer_key": on}, event)
+
+
 def _handle_model_audit_skip(audit_id: str, event: dict[str, Any], user: dict[str, Any], ddb) -> dict[str, Any]:
-    audit = _find_audit(ddb, audit_id)
+    audit = _find_my_audit(ddb, audit_id, user)
     if not audit:
         return _json_response(404, {"error": "NOT_FOUND", "audit_id": audit_id}, event)
     body = _parse_body(event)
@@ -2026,11 +2110,13 @@ def _route_model(method: str, route_path: str, event: dict[str, Any], user: dict
     parts = route_path.strip("/").split("/")  # model, audits, <id>, skip
     if parts[:2] == ["model", "audits"]:
         if len(parts) == 2 and method == "GET":
-            return _handle_model_audits(event, ddb)
+            return _handle_model_audits(event, user, ddb)
         if len(parts) == 3 and method == "GET":
-            return _handle_model_audit_get(parts[2], event, s3, ddb)
+            return _handle_model_audit_get(parts[2], event, user, s3, ddb)
         if len(parts) == 3 and method == "PUT":
             return _handle_model_audit_put(parts[2], event, user, ddb)
+        if len(parts) == 4 and parts[3] == "answer-key" and method == "PUT":
+            return _handle_model_answer_key(parts[2], event, user, ddb)
         if len(parts) == 4 and parts[3] == "skip" and method == "POST":
             return _handle_model_audit_skip(parts[2], event, user, ddb)
     return _json_response(404, {"error": "ROUTE_NOT_FOUND", "method": method, "path": route_path}, event)

@@ -30,7 +30,14 @@ def _load_module(name: str, file_path: Path):
     return mod
 
 
-def _auth_event(method: str, path: str, groups: str = "datagent", body: dict | None = None, query: dict | None = None):
+def _auth_event(
+    method: str,
+    path: str,
+    groups: str = "datagent",
+    body: dict | None = None,
+    query: dict | None = None,
+    email: str = "tester@datagent.io",
+):
     return {
         "httpMethod": method,
         "path": path,
@@ -40,7 +47,7 @@ def _auth_event(method: str, path: str, groups: str = "datagent", body: dict | N
             "authorizer": {
                 "claims": {
                     "sub": "user-sub-001",
-                    "email": "tester@datagent.io",
+                    "email": email,
                     "cognito:groups": groups,
                 }
             }
@@ -370,8 +377,10 @@ def _one_pending_audit(ingest, counts=(("hot160", 2),)) -> None:
     ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
 
 
-def _call(api, method: str, path: str, groups: str = "field_team", body=None, query=None) -> tuple[int, dict]:
-    resp = api.lambda_handler(_auth_event(method, path, groups=groups, body=body, query=query))
+def _call(
+    api, method: str, path: str, groups: str = "field_team", body=None, query=None, email: str = "tester@datagent.io"
+) -> tuple[int, dict]:
+    resp = api.lambda_handler(_auth_event(method, path, groups=groups, body=body, query=query, email=email))
     return resp["statusCode"], json.loads(resp["body"])
 
 
@@ -3247,3 +3256,221 @@ def test_a_request_to_put_live_a_row_left_behind_is_refused(monkeypatch: pytest.
     body = {"camera_id": "CAM-S01-A", "action": "put_live", "version_id": "v3"}
     status, answer = _call(api, "POST", REQUEST, groups="team_admin", body=body)
     assert (status, answer["message"]) == (409, "Only the candidate that is running now can be put live.")
+
+
+# --- Answer keys and check sheets (operations-loop design 5.4) --------------------------------------------------
+
+ANN, BINH, ADMIN = "ann@team.vn", "binh@client.vn", "admin@team.vn"
+TWO_BOXES = [
+    {"box_id": 1, "sku_id": "hot160", "conf": 0.9, "box": [10, 20, 50, 80]},
+    {"box_id": 2, "sku_id": "cheese145", "conf": 0.9, "box": [70, 20, 50, 80]},
+]
+BOTH_RIGHT = {
+    "verdicts": [{"box_id": 1, "verdict": "correct"}, {"box_id": 2, "verdict": "correct"}],
+    "missed": [],
+    "misses_checked": True,
+}
+KEY_ANSWERS = {
+    "verdicts": [
+        {"box_id": 1, "verdict": "correct"},
+        {"box_id": 2, "verdict": "wrong_sku", "true_sku_id": "original145"},
+    ],
+    "missed": [{"sku_id": "hot160", "x": 900, "y": 500}],
+    "misses_checked": True,
+}
+
+
+def _frame_to_label(hour: int, kind: str = "TRN", day: str = "21") -> str:
+    """A pending frame of DEMO-S01's camera A with two boxes; returns its audit id."""
+    audit_id = f"{kind}-CAM-S01-A-202611{day}-{hour:02d}"
+    _table("test-audits").put_item(
+        Item={
+            "store_id": "DEMO-S01",
+            "audit_id": audit_id,
+            "purpose": "scoring" if kind == "AUD" else "training",
+            "camera_id": "CAM-S01-A",
+            "capture_id": f"CAP-S01-202611{day}-{hour:02d}0700",
+            "capture_timestamp": f"2026-11-{day}T{hour:02d}:07:00+07:00",
+            "image_key": f"audits/frames/CAM-S01-A/2026-11-{day}/f{hour:02d}.jpg",
+            "model_version": "v3",
+            "pipeline": "long",
+            "display_visible": True,
+            "status": "pending",
+            "sampled_at": f"2026-11-{day}T{hour:02d}:59:00+07:00",
+            "ai_boxes_json": json.dumps(TWO_BOXES),
+            "verdicts_json": "[]",
+            "missed_json": "[]",
+        }
+    )
+    return audit_id
+
+
+def _label(api, audit_id: str, email: str, body: dict = BOTH_RIGHT, groups: str = "field_team") -> tuple[int, dict]:
+    return _call(api, "PUT", f"/v1/model/audits/{audit_id}", groups=groups, body=body, email=email)
+
+
+def _answer_key(api, hour: int = 8, by: str = ADMIN) -> str:
+    """A training frame the admin labelled with KEY_ANSWERS and marked as an answer key; returns its audit id."""
+    key_id = _frame_to_label(hour)
+    assert _label(api, key_id, by, KEY_ANSWERS, groups="team_admin")[0] == 200
+    status, out = _call(
+        api, "PUT", f"/v1/model/audits/{key_id}/answer-key", groups="team_admin", body={"on": True}, email=by
+    )
+    assert (status, out) == (200, {"audit_id": key_id, "answer_key": True})
+    return key_id
+
+
+def _nine_frames(api, email: str, groups: str = "field_team") -> None:
+    for hour in range(10, 19):
+        frame_id = f"TRN-CAM-S01-A-20261121-{hour:02d}"
+        if frame_id not in _audits():
+            _frame_to_label(hour)
+        assert _label(api, frame_id, email, groups=groups)[0] == 200
+
+
+def _sheets() -> list[dict]:
+    return [a for a in _audits().values() if a["audit_id"].startswith("CHK-")]
+
+
+def _pending(api, email: str) -> dict:
+    status, out = _call(api, "GET", "/v1/model/audits", query={"status": "pending", "days": "0"}, email=email)
+    assert status == 200
+    return out
+
+
+@mock_aws
+def test_an_admin_marks_a_frame_as_answer_key_and_the_key_keeps_its_answers(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    key_id = _answer_key(api)
+    row = _audits()[key_id]
+    assert (row["answer_key"], row["answer_key_by"]) == (True, ADMIN) and row["answer_key_at"]
+    assert json.loads(row["key_verdicts_json"]) == KEY_ANSWERS["verdicts"]
+    assert json.loads(row["key_missed_json"]) == KEY_ANSWERS["missed"]
+    assert _label(api, key_id, ANN)[0] == 200  # someone labels the frame again, differently
+    row = _audits()[key_id]
+    assert json.loads(row["verdicts_json"]) == BOTH_RIGHT["verdicts"]
+    assert json.loads(row["key_verdicts_json"]) == KEY_ANSWERS["verdicts"]
+    status, out = _call(
+        api, "PUT", f"/v1/model/audits/{key_id}/answer-key", groups="team_admin", body={"on": False}, email=ADMIN
+    )
+    assert (status, out) == (200, {"audit_id": key_id, "answer_key": False})
+    row = _audits()[key_id]
+    assert not {"answer_key", "answer_key_by", "answer_key_at", "key_verdicts_json", "key_missed_json"} & set(row)
+
+
+@mock_aws
+def test_only_an_admin_marks_an_answer_key(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    frame_id = _frame_to_label(8)
+    assert _label(api, frame_id, ANN)[0] == 200
+    for groups in ("field_team", "datagent"):
+        status, _ = _call(
+            api, "PUT", f"/v1/model/audits/{frame_id}/answer-key", groups=groups, body={"on": True}, email=ANN
+        )
+        assert status == 403
+    assert "answer_key" not in _audits()[frame_id]
+
+
+@mock_aws
+def test_a_pending_frame_cannot_be_an_answer_key(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    frame_id = _frame_to_label(8)
+    status, out = _call(
+        api, "PUT", f"/v1/model/audits/{frame_id}/answer-key", groups="team_admin", body={"on": True}, email=ADMIN
+    )
+    assert (status, out["error"], out["message"]) == (
+        400,
+        "NOT_A_KEY_FRAME",
+        "Only a labelled frame can be an answer key.",
+    )
+    assert _call(api, "PUT", "/v1/model/audits/TRN-NOPE/answer-key", groups="team_admin", body={"on": True})[0] == 404
+
+
+@mock_aws
+def test_the_tenth_frame_is_a_check_only_in_my_queue(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    key_id = _answer_key(api)
+    for hour in range(10, 18):
+        assert _label(api, _frame_to_label(hour), ANN)[0] == 200
+    assert _sheets() == []  # eight frames: not yet
+    assert _label(api, _frame_to_label(18), ANN)[0] == 200
+    (sheet,) = _sheets()
+    assert (sheet["check_of"], sheet["assigned_to"], sheet["status"]) == (key_id, ANN, "pending")
+    mine = _pending(api, ANN)
+    assert [(i["audit_id"], i["purpose"], i["n_boxes"]) for i in mine["items"]] == [(sheet["audit_id"], "training", 2)]
+    assert mine["counts"]["pending"] == 1
+    theirs = _pending(api, BINH)
+    assert theirs["items"] == [] and theirs["counts"]["pending"] == 0
+    path = f"/v1/model/audits/{sheet['audit_id']}"
+    assert _call(api, "GET", path, email=BINH)[0] == 404
+    assert _label(api, sheet["audit_id"], BINH)[0] == 404
+    assert _call(api, "POST", f"{path}/skip", body={"reason": "blurry"}, email=BINH)[0] == 404
+    assert _audits()[sheet["audit_id"]]["status"] == "pending"
+
+
+@mock_aws
+def test_the_browser_never_learns_a_frame_is_a_check(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _answer_key(api)
+    _nine_frames(api, ANN)
+    (sheet,) = _sheets()
+    status, view = _call(api, "GET", f"/v1/model/audits/{sheet['audit_id']}", email=ANN)
+    assert status == 200
+    assert [b["box_id"] for b in view["ai_boxes"]] == [1, 2] and view["verdicts"] == [] and view["missed"] == []
+    assert view["purpose"] == "training" and view["status"] == "pending"
+    told = {"check_of", "assigned_to", "answer_key", "answer_key_by", "answer_key_at", "key_verdicts", "key_missed"}
+    assert not told & set(view)
+    status, saved = _label(api, sheet["audit_id"], ANN)
+    assert status == 200 and not told & set(saved)
+    assert _pending(api, ANN)["items"] == []  # answered: it left the queue like any frame
+
+
+@mock_aws
+def test_a_labeller_with_no_key_left_gets_no_check_and_the_save_still_works(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _answer_key(api, by=ANN)  # the only key is a frame Ann labelled and marked herself
+    _nine_frames(api, ANN, groups="team_admin")
+    assert _sheets() == []
+    _nine_frames(api, BINH)  # the same key suits someone else
+    (sheet,) = _sheets()
+    assert sheet["assigned_to"] == BINH
+
+
+@mock_aws
+def test_saving_a_check_leaves_the_key_and_the_model_numbers_alone(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    key_id = _answer_key(api)
+    scored = _frame_to_label(9, kind="AUD")
+    assert _label(api, scored, ADMIN, groups="team_admin")[0] == 200
+    _nine_frames(api, ANN)
+    (sheet,) = _sheets()
+    key_before = _audits()[key_id]
+    _, summary_before = _call(api, "GET", "/v1/model/summary", query={"days": "0"})
+    assert summary_before["n_audits"] == 1
+    assert _label(api, sheet["audit_id"], ANN)[0] == 200  # Ann calls both boxes right; the key says box 2 is wrong
+    rows = _audits()
+    assert rows[key_id] == key_before
+    done = rows[sheet["audit_id"]]
+    assert (done["status"], done["labeled_by"]) == ("done", ANN)
+    assert json.loads(done["verdicts_json"]) == BOTH_RIGHT["verdicts"]
+    assert _call(api, "GET", "/v1/model/summary", query={"days": "0"})[1] == summary_before
+    assert len(_sheets()) == 1  # answering a check is not one of the nine frames towards the next
+
+
+@mock_aws
+def test_a_check_cannot_be_made_an_answer_key(monkeypatch: pytest.MonkeyPatch):
+    api, _ = _backend(monkeypatch)
+    _answer_key(api)
+    second_admin = "lead@team.vn"
+    _nine_frames(api, second_admin, groups="team_admin")
+    (sheet,) = _sheets()
+    assert _label(api, sheet["audit_id"], second_admin, groups="team_admin")[0] == 200
+    status, out = _call(
+        api,
+        "PUT",
+        f"/v1/model/audits/{sheet['audit_id']}/answer-key",
+        groups="team_admin",
+        body={"on": True},
+        email=second_admin,
+    )
+    assert (status, out["error"], out["message"]) == (400, "NOT_A_KEY_FRAME", "This frame cannot be an answer key.")
