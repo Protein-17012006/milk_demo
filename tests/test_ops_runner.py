@@ -4,6 +4,7 @@ writes the start record a real worker writes once it has loaded what live.json n
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import boto3
 import pytest
@@ -12,7 +13,7 @@ from test_release import write_release
 
 from milk import release
 from ops.decide import night_rate
-from ops.runner import Runner, night_reader_for
+from ops.runner import ICT, Runner, night_reader_for
 
 REGION = "ap-southeast-1"
 CAMERA = "CAM-S01-A"
@@ -71,7 +72,9 @@ def row(table, version_id):
 
 
 def ask(table, action, version_id=None, request_id="r1"):
-    request = {"id": request_id, "action": action, "by": "admin@example.com", "at": "2026-11-28T09:00:00+07:00"}
+    """Writes a request stamped with the current time; returns that stamp."""
+    stamp = datetime.now(ICT).isoformat(timespec="seconds")
+    request = {"id": request_id, "action": action, "by": "admin@example.com", "at": stamp}
     if version_id:
         request["version_id"] = version_id
     table.update_item(
@@ -80,6 +83,7 @@ def ask(table, action, version_id=None, request_id="r1"):
         ExpressionAttributeNames={"#r": "request"},
         ExpressionAttributeValues={":r": request},
     )
+    return stamp
 
 
 def running_in_parallel(root, table, worker):
@@ -121,7 +125,7 @@ def test_a_new_release_is_registered_with_its_criteria_then_runs_beside_the_live
 def test_put_live_switches_the_worker_and_answers_the_request(root, table):
     worker = Worker(root)
     runner = running_in_parallel(root, table, worker)
-    ask(table, "put_live", "v2")
+    stamp = ask(table, "put_live", "v2")
     steps = runner.tick()
     assert [s[0] for s in steps] == ["point", "restart_worker", "confirm"]
     assert release.read_pointer(root) == release.Pointer(live="v2", previous="v1")
@@ -132,7 +136,7 @@ def test_put_live_switches_the_worker_and_answers_the_request(root, table):
     assert (v2["status"], v2["decided_by"], v2["decided_at"]) == (
         "live",
         "admin@example.com",
-        "2026-11-28T09:00:00+07:00",
+        stamp,
     )
     assert row(table, "v1")["status"] == "replaced"
     assert worker.restarts == 2
