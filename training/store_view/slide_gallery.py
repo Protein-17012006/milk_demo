@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -82,7 +83,7 @@ def trn_rows(audits: list[dict], prefixes: tuple[str, ...] = ("TRN-", "REV-")) -
 def build(
     truth: dict[str, list[dict]],
     segments: list[dict],
-    frames_dir: Path,
+    frames_dir: Path | Sequence[Path],
     trn: list[dict],
     exclude_holdout: bool,
     per_keyframe: int = 30,
@@ -95,14 +96,16 @@ def build(
     still looks like the keyframe's) and from the done TRN and REV audits. Scoring frames never enter; with exclude_holdout,
     held-out keyframes and held-out TRN frames do not either. A keyframe or label row of a day in exclude_days is left
     out. With skus, only labels in skus enter, plus the "none" crops whose box centre lies inside region
-    (x0, y0, x1, y1): a product group has its own gallery."""
+    (x0, y0, x1, y1): a product group has its own gallery. frames_dir may be several folders (the hand-drawn keyframes
+    and the labelled and scoring frames can live in different ones): scoring frames are the union of their manifests."""
     import cv2
 
     from training.store_view.dataset import read_scoring_frames, spread
     from training.store_view.segments import holdout, signature, similarity
 
-    scoring = read_scoring_frames(frames_dir)
-    paths = {p.stem: p for p in frames_dir.glob("*/*.jpg")}
+    folders = [frames_dir] if isinstance(frames_dir, Path) else list(frames_dir)
+    scoring = set().union(*(read_scoring_frames(f) for f in folders))
+    paths = {p.stem: p for f in folders for p in f.glob("*/*.jpg")}
     feats, labels, sources, objects = [], [], [], []
     built_from: set[str] = set()
 

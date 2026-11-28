@@ -309,3 +309,21 @@ def test_a_group_gallery_keeps_its_own_names_and_only_the_none_crops_inside_its_
     assert sorted(g.objects.tolist()) == [f"trn:{cid}@100,20", f"trn:{cid}@20,20"]
     everything = build({}, [], frames, trn, exclude_holdout=False)
     assert len(everything.labels) == 4
+
+
+def test_build_takes_several_frame_folders_and_their_scoring_frames_are_the_union(tmp_path):
+    harvest, export = tmp_path / "harvest", tmp_path / "export"
+    key, labelled, scoring = "CAP-S01-20261126-090000", "CAP-S01-20261126-100000", "CAP-S01-20261126-110000"
+    frame(harvest, "2026-11-26", key)
+    frame(export, "2026-11-26", labelled)
+    frame(export, "2026-11-26", scoring)
+    (harvest / "manifest.jsonl").write_text(json.dumps({"capture_id": key, "audit_ids": []}) + "\n")
+    (export / "manifest.jsonl").write_text(json.dumps({"capture_id": scoring, "audit_ids": ["AUD-X-1"]}) + "\n")
+    truth = {key: [{"box": [20, 20, 30, 60], "sku": "cheese145", "kind": "face"}]}
+    segments = [{"id": "s0", "kind": "day", "split": "train", "keyframe": key, "members": [key]}]
+    box = [{"box_id": 1, "sku_id": "hot160", "conf": 0.9, "box": [20, 20, 30, 60]}]
+    ok = [{"box_id": 1, "verdict": "correct"}]
+    trn = [audit("TRN-A-1", "done", box, ok, cid=labelled), audit("TRN-A-2", "done", box, ok, cid=scoring)]
+    g = build(truth, segments, [harvest, export], trn, exclude_holdout=False)
+    assert g.built_from == tuple(sorted(["TRN-A-1", f"truth:{key}"]))  # the scoring frame of the other folder is out
+    assert build(truth, segments, harvest, trn[:1], exclude_holdout=False).built_from == (f"truth:{key}",)
