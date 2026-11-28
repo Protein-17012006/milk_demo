@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   frameLegend,
   namesText,
+  notInViewNote,
   notInViewText,
   shelfNowRows,
   shelfNowSummary,
@@ -148,4 +149,23 @@ test("not in view says since when and what was seen last", () => {
     "since 20:00 on 27/11 · last seen 3 at 19:55 on 27/11"
   );
   assert.equal(notInViewText({ since: "2026-11-28T12:15:00+07:00", lastUnits: null, lastAt: null }, now), "since 12:15");
+});
+
+test("a card of a product not in view says since when and where its frame is from", () => {
+  const now = new Date("2026-11-28T06:20:00Z"); // 13:20 on 28/11 in UTC+7
+  const info = { since: "2026-11-28T12:15:00+07:00", lastAt: "2026-11-28T12:10:00+07:00" };
+  assert.equal(
+    notInViewNote(info, 8, now),
+    "Not in view since 12:15. The frame and its 8 boxes are from 12:10, when it was last seen.",
+  );
+  assert.equal(
+    notInViewNote(info, 1, now),
+    "Not in view since 12:15. The frame and its 1 box are from 12:10, when it was last seen.",
+  );
+  assert.equal(
+    notInViewNote({ since: "2026-11-27T20:00:00+07:00", lastAt: "2026-11-27T19:55:00+07:00" }, 3, now),
+    "Not in view since 20:00 on 27/11. The frame and its 3 boxes are from 19:55 on 27/11, when it was last seen.",
+  );
+  assert.equal(notInViewNote({ since: info.since, lastAt: null }, 0, now), "Not in view since 12:15.");
+  assert.equal(notInViewNote(info, 0, now), "Not in view since 12:15.");
 });

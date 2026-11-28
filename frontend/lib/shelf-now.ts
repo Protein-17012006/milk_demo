@@ -96,11 +96,19 @@ const ICT_OFFSET_MS = 7 * 3_600_000;
 
 /** "15:45" for a time of the same UTC+7 day as now, "15:45 on 26/11" for an older one. Times are as the API
  * writes them (ISO, UTC+7). */
-function clockText(at: string, now: Date): string {
+export function clockText(at: string, now: Date): string {
   const time = at.slice(11, 16);
   const today = new Date(now.getTime() + ICT_OFFSET_MS).toISOString().slice(0, 10);
   if (at.slice(0, 10) === today) return time;
   return `${time} on ${at.slice(8, 10)}/${at.slice(5, 7)}`;
+}
+
+/** For a card of a product whose place is not in view: since when, and that its frame and boxes are from the last
+ * time it was seen. Times are HH:MM, with " on DD/MM" when not of today (UTC+7). */
+export function notInViewNote(info: { since: string; lastAt: string | null }, boxes: number, now: Date): string {
+  const since = `Not in view since ${clockText(info.since, now)}.`;
+  if (boxes === 0 || !info.lastAt) return since;
+  return `${since} The frame and its ${boxes} ${boxes === 1 ? "box" : "boxes"} are from ${clockText(info.lastAt, now)}, when it was last seen.`;
 }
 
 /** "Updated at 15:45" for a reading of the same UTC+7 day as now, "Updated at 15:45 on 26/11" for an older one.

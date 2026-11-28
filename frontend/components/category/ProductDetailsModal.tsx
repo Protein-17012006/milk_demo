@@ -9,6 +9,7 @@ import {
   lastSeenNote,
   type SkuProduct,
 } from "@/lib/products-ui";
+import { notInViewNote } from "@/lib/shelf-now";
 import { focusRegion } from "@/lib/frame-geometry";
 import { correctionButton, correctionChanged } from "@/lib/review-queue";
 import { FrameViewer } from "./FrameViewer";
@@ -136,7 +137,11 @@ export function ProductDetailsModal({
   };
   const confidencePct = Math.round(cvOutput.confidence_score * 100);
   const auditStatus = auditStatusText(product.status, audit.reviewedAt);
-  const lastSeen = lastSeenNote(cvOutput.unit_count, boxes.length, cvOutput.capture_timestamp);
+  const lastSeen = product.notInView
+    ? product.notInViewInfo
+      ? notInViewNote(product.notInViewInfo, boxes.length, new Date())
+      : "Not in view."
+    : lastSeenNote(cvOutput.unit_count, boxes.length, cvOutput.capture_timestamp);
 
   // Save Correction saves a change only; a reading left as it is gets confirmed instead (operations-loop design 5.4)
   const changed = correctionChanged(product.id, expectedLabel, mismatchType);
@@ -226,10 +231,16 @@ export function ProductDetailsModal({
             <div className={PILL}>
               <p className="text-[11px] font-normal text-[#6B7280]">{canReview ? "Unit Count (Frame)" : "Units"}</p>
               <p className="mt-0.5 text-[15px] font-semibold text-[#111827]">
-                {cvOutput.unit_count}{" "}
-                <span className="text-[12px] font-normal text-[#6B7280]">
-                  {cvOutput.unit_count === 1 ? "unit" : "units"}
-                </span>
+                {product.notInView ? (
+                  "–"
+                ) : (
+                  <>
+                    {cvOutput.unit_count}{" "}
+                    <span className="text-[12px] font-normal text-[#6B7280]">
+                      {cvOutput.unit_count === 1 ? "unit" : "units"}
+                    </span>
+                  </>
+                )}
               </p>
             </div>
 
