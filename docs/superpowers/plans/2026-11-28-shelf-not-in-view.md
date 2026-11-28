@@ -60,9 +60,11 @@ def test_a_capture_away_from_the_zone_sees_the_shelf_by_three_sure_boxes():
     assert not sees_shelf(cap("CAM-S01-A", TS, {}, boxes=[{**b, "conf": 0.79} for b in sure], visible=False))
     assert not sees_shelf(cap("CAM-S01-A", TS, {}, boxes=[{**b, "sku_id": None} for b in sure], visible=False))
 
+
 def test_a_capture_the_zone_check_passes_sees_the_shelf_without_boxes():
     assert sees_shelf(cap("CAM-S01-A", TS, {}, boxes=[], visible=True))
     assert sees_shelf(cap("CAM-S01-A", TS, {}))  # older than the display check
+
 
 def test_capture_position_is_the_median_centre_of_its_sure_boxes():
     boxes = [
@@ -74,10 +76,12 @@ def test_capture_position_is_the_median_centre_of_its_sure_boxes():
     assert capture_position(cap("CAM-S01-A", TS, {}, boxes=boxes, visible=False)) == [105, 5]
     assert capture_position(cap("CAM-S01-A", TS, {}, boxes=boxes[:2], visible=False)) is None
 
+
 def test_products_position_is_the_median_of_the_captures_positions():
     # three captures centred near (100, 10), (110, 12) and (400, 50), and one without a position
     assert products_position([...]) == [110, 12]
     assert products_position([cap("CAM-S01-A", TS, {}, visible=False)]) is None
+
 
 def test_far_apart_means_more_than_500_px():
     assert not far_apart([0, 0], [300, 400])  # exactly 500
@@ -85,9 +89,11 @@ def test_far_apart_means_more_than_500_px():
     assert far_apart([1068, 246], [290, 412])  # 28/11 12:10 -> 12:15
     assert not far_apart([820, 148], [934, 527])  # 27/11 12:05, 399 px
 
+
 def test_a_check_counts_captures_that_see_products_away_from_the_zone():
     # two captures with display_visible False but 5 sure Cheese boxes each: measurable, Cheese counted 5
     ...
+
 
 def test_a_check_keeps_positions_confident_products_by_camera_and_zone_captures():
     # CAM-S01-A: two captures with sure boxes centred at x 1000 (one in the zone, one not); CAM-S01-B: no boxes
@@ -151,10 +157,14 @@ def test_the_first_position_of_a_camera_starts_its_arrangement():
     assert step_arrangements(arrangements, {"bucket": "20261128-1000", "positions": {"CAM-S01-A": [1000, 250]}}) == []
     assert arrangements == {"CAM-S01-A": {"position": [1000, 250], "since": "20261128-1000"}}
 
+
 def test_a_jump_of_more_than_500_px_is_a_new_arrangement():
     arrangements = {"CAM-S01-A": {"position": [1068, 246], "since": "20261128-0625"}}
-    assert step_arrangements(arrangements, {"bucket": "20261128-1215", "positions": {"CAM-S01-A": [290, 412]}}) == ["CAM-S01-A"]
+    assert step_arrangements(arrangements, {"bucket": "20261128-1215", "positions": {"CAM-S01-A": [290, 412]}}) == [
+        "CAM-S01-A"
+    ]
     assert arrangements["CAM-S01-A"] == {"position": [290, 412], "since": "20261128-1215"}
+
 
 def test_a_person_in_front_or_a_slow_drift_is_the_same_arrangement():
     arrangements = {"CAM-S01-A": {"position": [1000, 250], "since": "20261128-0625"}}
@@ -162,8 +172,9 @@ def test_a_person_in_front_or_a_slow_drift_is_the_same_arrangement():
         assert step_arrangements(arrangements, {"bucket": "20261128-1300", "positions": {"CAM-S01-A": pos}}) == []
     assert arrangements["CAM-S01-A"] == {"position": [1150, 283], "since": "20261128-0625"}
 
-def test_a_check_without_a_position_changes_no_arrangement():
-    ...  # positions {} -> [] and arrangements unchanged
+
+def test_a_check_without_a_position_changes_no_arrangement(): ...  # positions {} -> [] and arrangements unchanged
+
 
 def test_a_move_puts_products_not_seen_out_of_view_with_what_was_seen_last():
     # TH: level 6 last stepped at 12:10; Cheese: seen surely in the moved check; Hot: on another camera
@@ -173,26 +184,30 @@ def test_a_move_puts_products_not_seen_out_of_view_with_what_was_seen_last():
     # -> Hot (camera CAM-S01-B) unchanged
     ...
 
-def test_a_product_already_out_of_view_keeps_when_it_was_last_seen():
-    ...  # a second move keeps not_in_view_since, last_seen_units, last_seen_at of the first
 
-def test_a_product_out_of_stock_before_a_move_keeps_zero_as_last_seen():
-    ...  # state with L 0, status OOS -> last_seen_units 0, in_view False, no status OOS left
+def test_a_product_already_out_of_view_keeps_when_it_was_last_seen(): ...  # a second move keeps not_in_view_since, last_seen_units, last_seen_at of the first
+
+
+def test_a_product_out_of_stock_before_a_move_keeps_zero_as_last_seen(): ...  # state with L 0, status OOS -> last_seen_units 0, in_view False, no status OOS left
+
 
 def test_a_product_seen_again_starts_fresh_and_in_view():
     # not in view since 12:15; seen surely with 4 units at 12:30 -> {"in_view": True, "camera": "CAM-S01-A"}
     # then step_state twice with 4 -> level 4 and no event
     ...
 
-def test_see_skus_names_the_camera_that_counted_a_product_surely():
-    ...  # two cameras: the first camera in name order that saw it surely; a product not expected is left alone
+
+def test_see_skus_names_the_camera_that_counted_a_product_surely(): ...  # two cameras: the first camera in name order that saw it surely; a product not expected is left alone
+
 
 def test_in_view_and_view_of():
     assert in_view(None) and in_view({}) and in_view({"in_view": True})
     assert not in_view({"in_view": False})
-    assert view_of({"in_view": False, "not_in_view_since": "20261128-1215", "last_seen_units": 6,
-                    "last_seen_at": "20261128-1210"}) == {"since": "20261128-1215", "last_units": 6, "last_at": "20261128-1210"}
+    assert view_of(
+        {"in_view": False, "not_in_view_since": "20261128-1215", "last_seen_units": 6, "last_seen_at": "20261128-1210"}
+    ) == {"since": "20261128-1215", "last_units": 6, "last_at": "20261128-1210"}
     assert view_of({"in_view": True}) is None
+
 
 def test_a_product_not_in_view_is_left_out_of_the_hours_numbers():
     # one open check, expected [Cheese, TH], counts {Cheese: 5}, not_in_view [TH]
@@ -249,7 +264,11 @@ def test_a_moved_display_keeps_counting_what_is_in_view(monkeypatch):
     # 14:10:10 and 14:15:10 at the new place: cheese 5 only; tick at 14:22
     state = _shelf("state")
     assert {k: state["skus"][HOT][k] for k in ("in_view", "not_in_view_since", "last_seen_units", "last_seen_at")} == {
-        "in_view": False, "not_in_view_since": "20261121-1410", "last_seen_units": 3, "last_seen_at": "20261121-1405"}
+        "in_view": False,
+        "not_in_view_since": "20261121-1410",
+        "last_seen_units": 3,
+        "last_seen_at": "20261121-1405",
+    }
     assert state["skus"][CHEESE]["in_view"] is True and state["skus"][CHEESE]["L"] == 5
     assert _event_keys() == []
     check = _shelf("check#20261121-1410")
@@ -257,16 +276,19 @@ def test_a_moved_display_keeps_counting_what_is_in_view(monkeypatch):
     assert _shelf("hour#20261121-14")["skus"][HOT]["unseen_checks"] == 2
     assert state["arrangements"]["CAM-S01-A"]["since"] == "20261121-1410"
 
+
 def test_after_a_gap_the_same_place_keeps_an_out_of_stock(monkeypatch):
     # plan Cheese; 14:00 and 14:05 cheese 5 + hot 3 at x 1000; 14:10 and 14:15 hot 3 only at x 1000 (Cheese OOS at 14:10);
     # 15:30 and 15:35 hot 3 at x 1010 (a gap of more than 30 min, same place); tick at 15:42
     assert _event_keys() == [f"20261121-1410#{CHEESE}#OOS"]
     assert _shelf("state")["skus"][CHEESE]["status"] == "OOS"
 
+
 def test_moving_away_and_back_makes_no_depleted_or_restock(monkeypatch):
     # plan Cheese; 14:00, 14:05 cheese 6 at x 1000; 14:10, 14:15 cheese 2 + hot 3 at x 200 (hidden);
     # 14:20, 14:25 cheese 6 at x 1000; tick at 14:32
     assert _event_keys() == []
+
 
 def test_a_product_seen_again_after_a_move_comes_back_without_an_event(monkeypatch):
     # plan Cheese + Hot; old place 14:00, 14:05 (cheese 5, hot 3); new place 14:10, 14:15 cheese only;
@@ -275,6 +297,7 @@ def test_a_product_seen_again_after_a_move_comes_back_without_an_event(monkeypat
     assert hot["in_view"] is True and hot["L"] == 4 and not hot.get("not_in_view_since")
     assert _event_keys() == []
 
+
 def test_a_product_out_of_stock_when_the_display_moves_keeps_zero_as_last_seen(monkeypatch):
     # plan Cheese + Hot; 14:00, 14:05 cheese 5 + hot 3; 14:10, 14:15 cheese 5 only (Hot OOS at 14:10), old place;
     # 14:20, 14:25 cheese 5 at the new place; tick at 14:32
@@ -282,10 +305,14 @@ def test_a_product_out_of_stock_when_the_display_moves_keeps_zero_as_last_seen(m
     assert (hot["in_view"], hot["last_seen_units"], hot.get("status")) == (False, 0, None)
     assert _event_keys() == [f"20261121-1410#{HOT}#OOS"]
 
+
 def test_checks_outside_opening_hours_do_not_set_the_arrangement(monkeypatch):
     # opening 14:10-22:00; 14:00 and 14:05 at x 200 (closed); 14:10 and 14:15 at x 1000 (open); tick at 14:22
-    assert all(not (_shelf(f"check#20261121-{b}") or {}).get("arrangement_changed") for b in ("1400", "1405", "1410", "1415"))
+    assert all(
+        not (_shelf(f"check#20261121-{b}") or {}).get("arrangement_changed") for b in ("1400", "1405", "1410", "1415")
+    )
     assert _shelf("state")["arrangements"]["CAM-S01-A"]["since"] == "20261121-1410"
+
 
 def test_a_recompute_finds_the_same_moves_as_the_tick(monkeypatch):
     # the first scenario; tick; then ask for a recompute (as test_a_saved_plan_is_recomputed_on_the_next_tick does)
@@ -336,25 +363,30 @@ def test_a_capture_with_products_away_from_the_zone_updates_the_shelf_numbers(mo
     assert _units(api)[CHEESE] == 5
     assert _shelf("display#CAM-S01-A")["visible"] is True
 
+
 def test_no_count_down_right_after_a_move(monkeypatch):
     # plan Cheese + Hot; old place 14:00, 14:05 (cheese 5, hot 3); tick at 14:12 (state knows the old place);
     # new place 14:10 cheese only -> Hot's latest_stock row unchanged
     stock = _table("test-latest-stock").get_item(Key={"store_id": "DEMO-S01", "sku_id": HOT})["Item"]
     assert stock["recent_counts"] == [3, 3]
 
+
 def test_a_product_not_in_view_is_not_counted_down(monkeypatch):
     # as above, then 14:15 at the new place and a tick at 14:22 (Hot not in view, arrangement at the new place);
     # 14:20 at the new place without Hot -> Hot's row still [3, 3]
     ...
 
+
 def test_a_late_capture_from_the_old_place_counts_nothing_down(monkeypatch):
     # after the tick at 14:22 of the test above: a late capture 14:08:30 at the old place, cheese only -> Hot unchanged
     ...
+
 
 def test_training_frames_come_from_captures_that_see_products_away_from_the_zone(monkeypatch):
     # an hour whose captures all have display_visible False but 5 sure boxes and a frame -> a TRN- audit is written
     # (follow test_training_frames_only_come_from_captures_that_see_the_display)
     ...
+
 
 def test_a_frame_request_for_a_capture_that_sees_products_away_from_the_zone_is_served(monkeypatch):
     # follow the existing label-request tests: a correction of a reading whose capture has display_visible False and
@@ -404,14 +436,20 @@ def test_products_say_not_in_view_with_since_and_last_seen(monkeypatch):
     # plan Cheese + Hot; old place 14:00, 14:05; tick at 14:12; new place 14:10, 14:15 cheese only; tick at 14:22
     hot = next(p for p in _get(api, "/products")["items"] if p["sku_id"] == HOT)
     assert hot["stock_status"] == "NOT_IN_VIEW"
-    assert hot["not_in_view"] == {"since": "2026-11-21T14:10:00+07:00", "last_units": 3, "last_at": "2026-11-21T14:05:00+07:00"}
+    assert hot["not_in_view"] == {
+        "since": "2026-11-21T14:10:00+07:00",
+        "last_units": 3,
+        "last_at": "2026-11-21T14:05:00+07:00",
+    }
     cheese = next(p for p in _get(api, "/products")["items"] if p["sku_id"] == CHEESE)
     assert cheese["stock_status"] == "IN_STOCK" and "not_in_view" not in cheese
+
 
 def test_kpi_on_shelf_units_leave_out_products_not_in_view(monkeypatch):
     # the same scenario: Hot's latest_stock row still holds 3 (Task 4)
     assert _get(api, "/kpi")["total_on_shelf_units"] == 5
     assert _get(api, "/kpi", {"store_id": "DEMO-S01"})["total_on_shelf_units"] == 5
+
 
 def test_oos_now_does_not_count_a_product_not_in_view(monkeypatch):
     # the Hot-was-out-of-stock-then-the-display-moved scenario of Task 3 -> oos_now count 0
@@ -515,9 +553,12 @@ git commit -m "Website: a product whose place is not in view reads Not in view, 
 ```python
 def test_night_rate_leaves_out_frames_where_the_live_release_sees_the_shelf():
     # 28/11 12:15: the display moved out of the zone; the live release still saw its cans there
-    shelf_frames = [{**c, "detections_json": json.dumps([HOT] * 3)} for c in night_captures(100, boxes=100, version="v2")]
+    shelf_frames = [
+        {**c, "detections_json": json.dumps([HOT] * 3)} for c in night_captures(100, boxes=100, version="v2")
+    ]
     assert night_rate(shelf_frames, "v2") is None  # not night frames: fewer than NIGHT_FRAMES left
     assert night_rate(night_captures(100, boxes=2, version="v2") + shelf_frames, "v2") == 2.0
+
 
 def test_the_night_rule_and_the_shelf_numbers_agree():
     # the backend's rule for "the shelf is in view" (backend/shelf.py), imported by path
