@@ -15,6 +15,7 @@ import {
   toPayload,
   totalsBySku,
   verdictForKey,
+  withArrivals,
   type BoxLabel,
   type MissedPoint,
   type Verdict,
@@ -45,6 +46,8 @@ interface AuditLabelerProps {
   onChanged(): void;
   /** A team admin may vouch for the frame they just labelled: its answers become an answer key. */
   isAdmin?: boolean;
+  /** Labelling the pending queue (not relabelling old frames): frames that enter the queue meanwhile come next. */
+  followQueue?: boolean;
 }
 
 /**
@@ -53,10 +56,18 @@ interface AuditLabelerProps {
  * Faster ways to the same labels: keys 1 to 4 judge the highlighted box and move on, one button marks every box
  * left as right, and Enter saves once Save is allowed. The rule for saving is unchanged (canSave).
  */
-export function AuditLabeler({ auditIds, onClose, onChanged, isAdmin = false }: AuditLabelerProps) {
+export function AuditLabeler({
+  auditIds,
+  onClose,
+  onChanged,
+  isAdmin = false,
+  followQueue = false,
+}: AuditLabelerProps) {
   const { getIdToken } = useAuth();
   const api = useMemo(() => createApiClient(getIdToken), [getIdToken]);
   const [index, setIndex] = useState(0);
+  // the frames of this session; with followQueue, frames that entered the queue since it began are added
+  const [queue, setQueue] = useState(auditIds);
   // team admins: mark this frame's answers as an answer key once they are saved
   const [asKey, setAsKey] = useState(false);
   const [detail, setDetail] = useState<ApiAuditDetail | null>(null);
@@ -76,7 +87,7 @@ export function AuditLabeler({ auditIds, onClose, onChanged, isAdmin = false }: 
   const [reloadTick, setReloadTick] = useState(0); // bumped to fetch a fresh signed link
   const reloadedRef = useRef(false);
   const svgRef = useRef<SVGSVGElement>(null);
-  const auditId = auditIds[index];
+  const auditId = queue[index];
 
   useEffect(() => {
     if (!auditId) return;
@@ -94,7 +105,7 @@ export function AuditLabeler({ auditIds, onClose, onChanged, isAdmin = false }: 
         setMessage(null);
       })
       .catch((err) => {
-        if (!cancelled) setMessage(`Could not open ${auditId}: ${err instanceof Error ? err.message : String(err)}`);
+        if (!cancelled) setMessage(`Could not open this frame: ${err instanceof Error ? err.message : String(err)}`);
       });
     return () => {
       cancelled = true;
@@ -160,8 +171,8 @@ export function AuditLabeler({ auditIds, onClose, onChanged, isAdmin = false }: 
     setPendingPoint({ x: pt.x, y: pt.y });
   };
 
-  const goNext = () => {
-    if (index + 1 >= auditIds.length) {
+  const goNext = (length: number = queue.length) => {
+    if (index + 1 >= length) {
       onClose();
       return;
     }
@@ -195,8 +206,19 @@ export function AuditLabeler({ auditIds, onClose, onChanged, isAdmin = false }: 
           return;
         }
       }
+      // frames that entered the queue since this session began (the hourly rule's, or one put there for this
+      // labeller) come next, so the session does not end while something waits
+      let next = queue;
+      if (followQueue) {
+        try {
+          next = withArrivals(queue, index, (await api.listAudits("pending", 0)).items);
+          if (next !== queue) setQueue(next);
+        } catch {
+          // the list as it was: the save itself went through
+        }
+      }
       onChanged();
-      goNext();
+      goNext(next.length);
     } catch (err) {
       setMessage(`Not saved: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -267,7 +289,7 @@ export function AuditLabeler({ auditIds, onClose, onChanged, isAdmin = false }: 
       <div className="flex flex-wrap items-center justify-between gap-3 bg-[#111827] px-5 py-3 text-white">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px]">
           <span className="font-semibold">
-            Frame {Math.min(index + 1, auditIds.length)} of {auditIds.length}
+            Frame {Math.min(index + 1, queue.length)} of {queue.length}
           </span>
           {detail && (
             <>
@@ -280,9 +302,13 @@ export function AuditLabeler({ auditIds, onClose, onChanged, isAdmin = false }: 
                     ? "Training frame — teaches the flavour gallery, never scored"
                     : "Scoring frame — counts in the accuracy numbers"}
               </span>
-              <span className="font-mono text-[12px]">{detail.capture_id}</span>
-              <span className="text-white/70">{detail.capture_timestamp}</span>
-              <span className="text-white/70">Model {detail.model_version}</span>
+              {isAdmin && (
+                <>
+                  <span className="font-mono text-[12px]">{detail.capture_id}</span>
+                  <span className="text-white/70">{detail.capture_timestamp}</span>
+                  <span className="text-white/70">Model {detail.model_version}</span>
+                </>
+              )}
               <span>
                 {boxes.length} {boxes.length === 1 ? "box" : "boxes"}
               </span>
@@ -588,7 +614,7 @@ export function AuditLabeler({ auditIds, onClose, onChanged, isAdmin = false }: 
                 className="rounded-[8px] border border-black/15 px-3 py-2 font-medium hover:bg-black/5 disabled:opacity-40 cursor-pointer">
                 Skip…
               </button>
-              <button type="button" onClick={goNext}
+              <button type="button" onClick={() => goNext()}
                 className="rounded-[8px] px-3 py-2 text-[#6B7280] hover:bg-black/5 cursor-pointer">
                 Next
               </button>

@@ -41,18 +41,29 @@ export function nextVerdict(verdict: Verdict | null, needsFlavour = false): Verd
 
 const QUEUE_RANK: Record<string, number> = { scoring: 0, compare: 1, training: 2, review: 3 };
 
+type QueueItem = Pick<ApiAuditListItem, "audit_id" | "purpose" | "capture_timestamp"> & { queue_at?: string | null };
+
+/** When the frame entered the queue; an item from a backend that does not say stands by its capture time. */
+const queueAt = (a: QueueItem) => a.queue_at ?? a.capture_timestamp;
+
 /** The order "Label frames" opens pending frames in: scoring, then comparison, then training, then review
- * frames, each oldest first. */
-export function labelQueueOrder(
-  items: Pick<ApiAuditListItem, "audit_id" | "purpose" | "capture_timestamp">[]
-): string[] {
+ * frames, each in the order they entered the queue (queue_at), not in the order their pictures were taken. */
+export function labelQueueOrder(items: QueueItem[]): string[] {
   return [...items]
-    .sort(
-      (a, b) =>
-        (QUEUE_RANK[a.purpose] ?? 4) - (QUEUE_RANK[b.purpose] ?? 4) ||
-        a.capture_timestamp.localeCompare(b.capture_timestamp)
-    )
+    .sort((a, b) => (QUEUE_RANK[a.purpose] ?? 4) - (QUEUE_RANK[b.purpose] ?? 4) || queueAt(a).localeCompare(queueAt(b)))
     .map((a) => a.audit_id);
+}
+
+/**
+ * The labeller's list after a save, given what is pending now: frames that entered the queue since the list was
+ * made come right after the frame at `index`, in queue order, each once. With nothing new the same list is
+ * returned, so the labeller's place does not move.
+ */
+export function withArrivals(queue: string[], index: number, pendingNow: QueueItem[]): string[] {
+  const known = new Set(queue);
+  const arrived = labelQueueOrder(pendingNow.filter((a) => !known.has(a.audit_id)));
+  if (arrived.length === 0) return queue;
+  return [...queue.slice(0, index + 1), ...arrived, ...queue.slice(index + 1)];
 }
 
 /** Model units and true units per SKU (model label) for the labels given so far. */

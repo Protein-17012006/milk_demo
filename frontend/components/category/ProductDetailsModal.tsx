@@ -10,7 +10,7 @@ import {
   type SkuProduct,
 } from "@/lib/products-ui";
 import { focusRegion } from "@/lib/frame-geometry";
-import { correctionChanged } from "@/lib/review-queue";
+import { correctionButton, correctionChanged } from "@/lib/review-queue";
 import { FrameViewer } from "./FrameViewer";
 
 interface ProductDetailsModalProps {
@@ -140,9 +140,10 @@ export function ProductDetailsModal({
 
   // Save Correction saves a change only; a reading left as it is gets confirmed instead (operations-loop design 5.4)
   const changed = correctionChanged(product.id, expectedLabel, mismatchType);
+  const saveButton = correctionButton(changed, saving, savedNotice);
 
   const handleSave = async () => {
-    if (saving || !changed || !onSaveAudit) return;
+    if (saveButton.disabled || !onSaveAudit) return;
     setSaving(true);
     const saved = await onSaveAudit(product.id, { expectedLabel, mismatchType });
     setSaving(false);
@@ -559,11 +560,11 @@ export function ProductDetailsModal({
               <button
                 type="button"
                 data-save-correction
-                disabled={!changed || saving}
+                disabled={saveButton.disabled}
                 onClick={() => void handleSave()}
                 className="rounded-[8px] bg-[#EE730A] px-4 py-2 text-[13px] font-semibold text-white hover:bg-[#D96504] transition-colors cursor-pointer disabled:cursor-not-allowed disabled:bg-[#F3B98A] disabled:hover:bg-[#F3B98A]"
               >
-                {savedNotice ? "Saved ✓" : saving && changed ? "Saving…" : "Save Correction"}
+                {saveButton.text}
               </button>
             )}
           </div>

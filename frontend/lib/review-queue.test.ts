@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   cardFromQueueItem,
+  correctionButton,
   correctionChanged,
   correctionToast,
   orderForReview,
@@ -147,10 +148,18 @@ test("the toast says what happened to the queue item and to the frame", () => {
   assert.equal(correctionToast(true, null), "Saved the correction. The reading is checked off in the review queue.");
   assert.equal(
     correctionToast(false, "pending"),
-    "Saved the correction. Its frame goes to the labelling queue within the hour."
+    "Saved the correction. Its frame is in line for the labelling queue."
   );
   assert.equal(
     correctionToast(true, "pending"),
-    "Saved the correction. The reading is checked off in the review queue. Its frame goes to the labelling queue within the hour."
+    "Saved the correction. The reading is checked off in the review queue. Its frame is in line for the labelling queue."
   );
+});
+
+test("the save button is locked until something changed, while saving, and once saved", () => {
+  assert.deepEqual(correctionButton(false, false, false), { disabled: true, text: "Save Correction" });
+  assert.deepEqual(correctionButton(true, false, false), { disabled: false, text: "Save Correction" });
+  assert.deepEqual(correctionButton(true, true, false), { disabled: true, text: "Saving…" });
+  // the half second "Saved" shows before the card closes: a second click must not save the correction twice
+  assert.deepEqual(correctionButton(true, false, true), { disabled: true, text: "Saved ✓" });
 });

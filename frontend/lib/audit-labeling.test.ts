@@ -1,7 +1,15 @@
 // Unit tests for labelling one frame on the Model page (run: npm test). Expected values are worked out by hand.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canSave, labelQueueOrder, nextVerdict, relabelQueue, toPayload, totalsBySku } from "./audit-labeling.ts";
+import {
+  canSave,
+  labelQueueOrder,
+  nextVerdict,
+  relabelQueue,
+  toPayload,
+  totalsBySku,
+  withArrivals,
+} from "./audit-labeling.ts";
 import type { BoxLabel, RelabelCandidate } from "./audit-labeling.ts";
 
 const twoHot = [
@@ -210,4 +218,42 @@ test("the next box to judge follows the list and wraps round", () => {
     3: { verdict: "not_product", trueSku: null },
   };
   assert.equal(nextUnjudged(boxes, all, 1), null);
+});
+
+test("the queue follows when a frame entered it, not when its picture was taken", () => {
+  const ids = labelQueueOrder([
+    {
+      audit_id: "TRN-new",
+      purpose: "training",
+      capture_timestamp: "2026-11-28T10:07:00+07:00",
+      queue_at: "2026-11-28T10:59:00+07:00",
+    },
+    {
+      // a frame put in the queue just now whose picture is a week old
+      audit_id: "TRN-late",
+      purpose: "training",
+      capture_timestamp: "2026-11-21T08:07:00+07:00",
+      queue_at: "2026-11-28T11:30:00+07:00",
+    },
+    // an item without queue_at (an older backend): its capture time stands in
+    { audit_id: "TRN-old", purpose: "training", capture_timestamp: "2026-11-27T09:07:00+07:00" },
+  ]);
+  assert.deepEqual(ids, ["TRN-old", "TRN-new", "TRN-late"]);
+});
+
+test("frames that arrive while labelling come next, each once, in queue order", () => {
+  const item = (audit_id: string, minute: string, purpose: "scoring" | "training" = "training") => ({
+    audit_id,
+    purpose,
+    capture_timestamp: `2026-11-28T10:${minute}:00+07:00`,
+    queue_at: `2026-11-28T11:${minute}:00+07:00`,
+  });
+  const queue = ["A", "B", "C"];
+  // the labeller just saved B (index 1). C still waits; D and E arrived meanwhile, E being a scoring frame
+  const now = [item("C", "03"), item("D", "09"), item("E", "10", "scoring")];
+  assert.deepEqual(withArrivals(queue, 1, now), ["A", "B", "E", "D", "C"]);
+  // nothing new: the very same list, so the labeller's place does not move
+  assert.equal(withArrivals(queue, 1, [item("C", "03")]), queue);
+  // at the end of the list an arrival still gets its turn
+  assert.deepEqual(withArrivals(queue, 2, [item("D", "09")]), ["A", "B", "C", "D"]);
 });

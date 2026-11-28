@@ -220,10 +220,14 @@ export function displayCheckText(d: ApiDisplayCheck): string {
   return `Display check: matched the labellers on ${agree} · wrongly "not in view" ${d.false_not_visible} · wrongly "in view" ${d.false_visible}`;
 }
 
+const liveSince = (iso: string | null) =>
+  iso && iso.length >= 10 ? `live since ${iso.slice(8, 10)}/${iso.slice(5, 7)}` : "now live";
+
 /**
  * "Your labels" under the Label frames button: what the signed-in labeller labelled and where it is. The second
  * half of the first line names a live version only when one was trained with people's labels; until then it says
- * plainly that none was. Scoring frames get their own line: they measure the model and never train it.
+ * plainly that none was, and promises nothing: it does not say the labels will be used, only what is true now.
+ * Scoring frames get their own line: they measure the model and never train it.
  */
 export function myLabelsText(res: ApiMyLabels): string[] {
   const { teaching, scoring, in_live_version: live } = res;
@@ -233,12 +237,12 @@ export function myLabelsText(res: ApiMyLabels): string[] {
     lines.push("You have not labelled a training frame yet.");
   } else {
     const done =
-      `Your labels on training frames: ${plural(teaching.boxes, "box", "boxes")} and ` +
+      `Your labels on training, review and comparison frames: ${plural(teaching.boxes, "box", "boxes")} and ` +
       `${plural(teaching.missed, "missed unit")} on ${plural(teaching.frames, "frame")}.`;
     const where = live
-      ? ` Version ${live.version_id}, live since ${live.live_since.slice(8, 10)}/${live.live_since.slice(5, 7)}, ` +
+      ? ` Version ${live.version_id}, ${liveSince(live.live_since)}, ` +
         `was trained with ${plural(live.label_frames, "labelled frame")}.`
-      : " No live version has been trained from people's labels yet, so they wait for the first training; no date is set.";
+      : " No live version has been trained from people's labels yet, and no date is set for the first training.";
     lines.push(done + where);
   }
   if (scoring.frames > 0) {
@@ -247,4 +251,13 @@ export function myLabelsText(res: ApiMyLabels): string[] {
     );
   }
   return lines;
+}
+
+/** For team admins: whose checks have stopped because no answer key is left for them; null when nobody's have. */
+export function noKeyLeftText(without: string[]): string | null {
+  if (without.length === 0) return null;
+  return (
+    `${without.length === 1 ? "1 labeller has" : `${without.length} labellers have`} no answer key left, ` +
+    `so their checks have stopped: ${without.join(", ")}. Mark a new answer key to go on.`
+  );
 }

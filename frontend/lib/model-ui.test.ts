@@ -9,6 +9,7 @@ import {
   kpiCiText,
   kpiDisplay,
   myLabelsText,
+  noKeyLeftText,
   notEnoughText,
   periodCellText,
   signedText,
@@ -143,7 +144,7 @@ test("my labels: no live version was trained with labels, said plainly", () => {
       in_live_version: null,
     }),
     [
-      "Your labels on training frames: 618 boxes and 180 missed units on 43 frames. No live version has been trained from people's labels yet, so they wait for the first training; no date is set.",
+      "Your labels on training, review and comparison frames: 618 boxes and 180 missed units on 43 frames. No live version has been trained from people's labels yet, and no date is set for the first training.",
       "Scoring frames you labelled: 70. They measure the model on this page and are never used to train it.",
     ]
   );
@@ -156,7 +157,7 @@ test("my labels: one of each reads in the singular", () => {
     in_live_version: null,
   });
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /^Your labels on training frames: 1 box and 1 missed unit on 1 frame\. /);
+  assert.match(lines[0], /^Your labels on training, review and comparison frames: 1 box and 1 missed unit on 1 frame\. /);
 });
 
 test("my labels: a live version was trained with labels", () => {
@@ -166,7 +167,7 @@ test("my labels: a live version was trained with labels", () => {
     in_live_version: { version_id: "slide-v4", live_since: "2026-12-10T09:00:00+07:00", label_frames: 60 },
   });
   assert.deepEqual(lines, [
-    "Your labels on training frames: 618 boxes and 180 missed units on 43 frames. Version slide-v4, live since 10/12, was trained with 60 labelled frames.",
+    "Your labels on training, review and comparison frames: 618 boxes and 180 missed units on 43 frames. Version slide-v4, live since 10/12, was trained with 60 labelled frames.",
   ]);
 });
 
@@ -177,5 +178,28 @@ test("my labels: only scoring frames so far", () => {
       "You have not labelled a training frame yet.",
       "Scoring frames you labelled: 2. They measure the model on this page and are never used to train it.",
     ]
+  );
+});
+
+test("my labels: a live version whose row has no date still reads", () => {
+  const lines = myLabelsText({
+    teaching: { frames: 2, boxes: 9, missed: 0 },
+    scoring: NO_LABELS,
+    in_live_version: { version_id: "slide-v4", live_since: null, label_frames: 60 },
+  });
+  assert.deepEqual(lines, [
+    "Your labels on training, review and comparison frames: 9 boxes and 0 missed units on 2 frames. Version slide-v4, now live, was trained with 60 labelled frames.",
+  ]);
+});
+
+test("the admin block says whose checks have stopped", () => {
+  assert.equal(noKeyLeftText([]), null);
+  assert.equal(
+    noKeyLeftText(["ann@team.vn"]),
+    "1 labeller has no answer key left, so their checks have stopped: ann@team.vn. Mark a new answer key to go on."
+  );
+  assert.equal(
+    noKeyLeftText(["ann@team.vn", "binh@client.vn"]),
+    "2 labellers have no answer key left, so their checks have stopped: ann@team.vn, binh@client.vn. Mark a new answer key to go on."
   );
 });

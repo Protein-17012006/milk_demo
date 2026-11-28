@@ -76,6 +76,8 @@ export function ModelQualityView() {
   const [flagThreshold, setFlagThreshold] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [labelling, setLabelling] = useState<string[] | null>(null);
+  // the labeller was opened on the pending queue (not on old frames to relabel): it follows new arrivals
+  const [followQueue, setFollowQueue] = useState(false);
   const [healthMetric, setHealthMetric] = useState<HealthMetric>("conf_median");
   const [reloadKey, setReloadKey] = useState(0); // bumped after a save or a skip
   const [findingOldFrames, setFindingOldFrames] = useState(false);
@@ -169,6 +171,7 @@ export function ModelQualityView() {
       .listAudits("done", days, { oldRule: true })
       .then((res) => {
         const ids = relabelQueue(res.items);
+        setFollowQueue(false); // a relabelling session keeps to its old frames
         if (ids.length > 0) setLabelling(ids);
         else setReloadKey((k) => k + 1); // relabelled meanwhile: reload, and the note goes
       })
@@ -212,7 +215,10 @@ export function ModelQualityView() {
             type="button"
             data-label-frames
             disabled={pending.length === 0}
-            onClick={() => setLabelling(queueOrder)}
+            onClick={() => {
+              setFollowQueue(true);
+              setLabelling(queueOrder);
+            }}
             className="inline-flex items-center gap-1.5 rounded-[8px] bg-[#EE730A] px-3 py-1.5 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
           >
             <Tag className="h-4 w-4" />
@@ -426,6 +432,7 @@ export function ModelQualityView() {
           onClose={() => setLabelling(null)}
           onChanged={() => setReloadKey((k) => k + 1)}
           isAdmin={hasGroup("team_admin")}
+          followQueue={followQueue}
         />
       )}
     </div>

@@ -18,7 +18,7 @@ hoang đổi được mọi điều dưới đây. Điều 4 đổi câu chữ c
 2. **Yêu cầu frame được phục vụ bằng suất frame dạy của giờ kế tiếp,** mỗi camera mỗi giờ một yêu cầu, cũ nhất trước. Nhờ vậy số frame mỗi ngày không tăng, đúng spec. Frame của reading có thể thuộc một giờ trước đó; audit vẫn mang id của giờ đang lấy mẫu (`TRN-<camera>-<giờ>`).
 3. **Số của tín hiệu "đếm nhảy":** hai capture cách nhau quá 60 giây thuộc hai cửa sổ; độ nhảy của một capture là chênh lệch lớn nhất, trên mọi sản phẩm, giữa số đếm của nó và trung vị của cửa sổ; dưới 2 đơn vị thì không coi là tín hiệu.
 4. **Đáp án do một `team_admin` đánh dấu, không lấy từ "hai người chấm giống nhau".** Lý do: ngày 28/11, 7 trong 9 box "Cheese" Claude xem bằng mắt là lon Original mà người chấm đã bấm "đúng" theo tên model gợi ý, và cùng một lon được hai frame cách nhau 5 phút gọi hai tên. Hai người cùng bấm theo gợi ý thì vẫn khớp nhau, nên "khớp nhau" không phải là đáp án. Đáp án vẽ tay (`truth.json`) chỉ có cho 23–25/11 và không nằm trong bảng audits, nên cũng không dùng trực tiếp được.
-5. **Tờ kiểm là dòng riêng trong bảng audits, id `CHK-<8 ký tự>`,** chép ảnh và box của frame đáp án, gán cho đúng một người. Code đọc nhãn để train chỉ nhận `TRN-`, `REV-`, `CMP-`, và các con số trên trang Model chỉ nhận `AUD-`, nên tờ kiểm không lọt vào đâu cả. Giao diện gán nhãn không in id, nên người gán không thấy khác biệt.
+5. **Tờ kiểm là dòng riêng trong bảng audits, id `CHK-<8 ký tự>`,** chép ảnh và box của frame đáp án, gán cho đúng một người. Code đọc nhãn để train chỉ nhận `TRN-` và `REV-` (kho ảnh của phần 2, chưa bật, nhận thêm `CMP-`), và các con số trên trang Model chỉ nhận `AUD-`, nên tờ kiểm không lọt vào đâu cả. *Sửa sau bản soát 28/11:* câu "giao diện không in id nên người gán không thấy khác biệt" trong bản đầu là chưa đủ. Xem mục "Sau bản soát ngày 28/11" bên dưới.
 6. **Nhịp kiểm:** sau 9 frame một người lưu thì frame kế là tờ kiểm (1 trong 10, số của spec). Không có đáp án phù hợp thì không có tờ kiểm, và lần lưu vẫn thành công.
 7. **Cách tính độ khớp:** đơn vị là từng box của frame, từng điểm sót của đáp án, và từng điểm sót thừa của người gán. Box khớp khi cùng verdict và, với "sai tên", cùng tên đúng. Điểm sót khớp khi cùng sản phẩm và cách điểm của đáp án không quá 40 px (nắp lon ở CAM-S01-A rộng 60–80 px trên frame 2560×1440).
 8. **Chưa làm ở phần này: giữ nhãn của người có độ khớp thấp chờ người thứ hai.** Spec nói ngưỡng do người làm đề xuất sau vài tuần có số, và nơi dùng nhãn (tập train) thuộc phần 4. Phần này chỉ đo và hiển thị.
@@ -30,6 +30,17 @@ hoang đổi được mọi điều dưới đây. Điều 4 đổi câu chữ c
 - Biến điểm sót trên frame dạy thành box để train (phần 4; xem đề xuất B3 dưới đây).
 - Mọi thay đổi luật gán nhãn (đề xuất B1, B2).
 - Deploy: Task 8 chỉ chạy khi hoang duyệt, và sau khi phần 1 đóng.
+
+## Sau bản soát ngày 28/11
+
+Một người soát độc lập đọc cả nhánh sau Task 7. Không có lỗi nghiêm trọng; bốn lỗi quan trọng đã sửa trên nhánh, mỗi lỗi có test trượt trước:
+
+- **Một capture không bao giờ vừa là frame dạy vừa là frame chấm điểm.** Yêu cầu frame của một reading thuộc giờ muộn hơn giờ đang lấy mẫu phải chờ lượt của chính giờ đó. Lượt rút frame chấm điểm và frame dạy bỏ qua capture đã là một frame gán nhãn.
+- **Yêu cầu không phục vụ được thì được đóng, kèm lý do.** Chỉ một capture id đúng dạng mới sinh yêu cầu (thẻ không có reading gửi "—"). Dòng capture hết hạn sau 7 ngày (`CAPTURE_TTL_DAYS`), sớm hơn hạn giữ ảnh, nên yêu cầu cho reading cũ hơn thế bị đóng với ghi chú. Một yêu cầu gây lỗi không chặn các yêu cầu sau. Câu báo đổi thành "Its frame is in line for the labelling queue."
+- **Tờ kiểm đọc như mọi frame.** Hàng chờ xếp theo lúc frame vào hàng (`queue_at`), không theo lúc chụp, nên tờ kiểm đến như frame mới nhất. Sau mỗi lần lưu, màn gán nhãn lấy thêm các frame vừa vào hàng, nên tờ kiểm xuất hiện ngay trong phiên. Tiêu đề chỉ hiện capture id, giờ chụp và tên model cho `team_admin`. Câu báo lỗi không in id. `picked_by` và `correction_id` không gửi về trình duyệt. Tờ kiểm được dựng từ đáp án có ảnh chụp mới nhất.
+- **Khi một người hết đáp án, `team_admin` được báo.** Mỗi đáp án chỉ kiểm một người một lần. Khối độ khớp nêu tên những người không còn đáp án nào, và câu giải thích nói rõ điều kiện đó.
+
+**Giới hạn còn lại, đã biết:** ảnh của camera in sẵn ngày giờ, nên một frame đáp án cũ vẫn có thể bị nhận ra giữa các frame hôm nay. Muốn "1 trong 10" giữ được, `team_admin` phải đánh dấu đáp án mới đều đặn, khoảng một đáp án cho mỗi mười frame mỗi người gán. `team_admin` cũng gán nhãn thì có thể nhận ra tờ kiểm của chính mình qua danh sách đáp án.
 
 ## Đề xuất bổ sung từ phát hiện ngày 28/11 — chưa duyệt, chưa có task
 

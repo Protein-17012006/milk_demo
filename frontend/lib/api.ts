@@ -382,7 +382,7 @@ export interface ApiLabelTally {
 export interface ApiMyLabels {
   teaching: ApiLabelTally;
   scoring: ApiLabelTally;
-  in_live_version: { version_id: string; live_since: string; label_frames: number } | null;
+  in_live_version: { version_id: string; live_since: string | null; label_frames: number } | null;
 }
 
 /** One labeller's agreement with the answer keys in one ISO week (GET /model/labellers, team admins only). */
@@ -408,6 +408,8 @@ export interface ApiLabellers {
   rows: ApiLabellerRow[];
   keys: ApiAnswerKey[];
   check_every: number;
+  /** Labellers no answer key is left for: their checks have stopped. */
+  without_key?: string[];
 }
 
 export type VersionAction = "put_live" | "discard" | "rollback";
@@ -451,6 +453,8 @@ export interface ApiAuditListItem {
   n_boxes: number;
   labeled_by?: string | null;
   label_rule?: string | null; // the rule it was labelled under ("B" now, "A" before 25/11); null before rules, or not labelled yet
+  /** When the frame entered the labelling queue: the order frames are labelled in. */
+  queue_at?: string | null;
 }
 
 export interface ApiAuditListResponse {

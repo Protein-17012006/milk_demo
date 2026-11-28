@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import type { ApiLabellers } from "@/lib/api";
-import { pct } from "@/lib/model-ui";
+import { noKeyLeftText, pct } from "@/lib/model-ui";
 
 interface LabellerAgreementProps {
   /** GET /model/labellers: the backend answers team admins only. */
@@ -65,11 +65,20 @@ export function LabellerAgreement({ load, setKey, reloadKey }: LabellerAgreement
     >
       <h2 className="text-[14px] font-semibold">Labeller agreement</h2>
       <p className="mt-1 text-[12.5px] leading-[1.5] text-[#6B7280]">
-        Agreement with the answer keys on check frames: after every {(data?.check_every ?? 10) - 1} frames a labeller
-        saves, the next one is a check. Labellers are not told which frames are checks. Only team admins see this
-        block.
+        Agreement with the answer keys on check frames. After every {(data?.check_every ?? 10) - 1} frames a labeller
+        saves, a check frame is put in their queue, as long as an answer key is left that they did not label, mark
+        or get before. Labellers are not told which frames are checks. Only team admins see this block.
       </p>
       {error && <p className="mt-2 rounded-[8px] bg-[#FEF2F2] px-3 py-2 text-[12.5px] text-[#991B1B]">{error}</p>}
+      {data && data.keys.length > 0 && noKeyLeftText(data.without_key ?? []) && (
+        <p
+          data-no-key-left
+          role="status"
+          className="mt-2 rounded-[8px] border border-[#FDE68A] bg-[#FFFBEB] px-3 py-2 text-[12.5px] text-[#92400E]"
+        >
+          {noKeyLeftText(data.without_key ?? [])}
+        </p>
+      )}
 
       {data && data.rows.length === 0 && (
         <p data-no-agreement className="mt-3 text-[12.5px] text-[#374151]">

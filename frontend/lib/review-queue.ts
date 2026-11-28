@@ -147,11 +147,23 @@ export function correctionChanged(modelLabel: string, expectedLabel: string, mis
   return (expectedLabel !== "" && expectedLabel !== modelLabel) || mismatchType !== "None";
 }
 
-/** What the page says after a saved correction: whether a queue item was checked off, and where the frame goes. */
+/** What the page says after a saved correction: whether a queue item was checked off, and where the frame goes.
+ * The frame is asked for, not promised: the hourly rule serves one request an hour, and drops one whose
+ * frame can no longer be read. */
 export function correctionToast(checkedOff: boolean, labelRequest: string | null | undefined): string {
   return (
     "Saved the correction." +
     (checkedOff ? " The reading is checked off in the review queue." : "") +
-    (labelRequest === "pending" ? " Its frame goes to the labelling queue within the hour." : "")
+    (labelRequest === "pending" ? " Its frame is in line for the labelling queue." : "")
   );
+}
+
+/**
+ * The card's Save Correction button: locked until the form holds a change, while the save is on its way, and for
+ * the moment "Saved" shows before the card closes (a second click then must not save the correction twice).
+ */
+export function correctionButton(changed: boolean, saving: boolean, saved: boolean): { disabled: boolean; text: string } {
+  if (saved) return { disabled: true, text: "Saved ✓" };
+  if (saving && changed) return { disabled: true, text: "Saving…" };
+  return { disabled: !changed || saving, text: "Save Correction" };
 }
