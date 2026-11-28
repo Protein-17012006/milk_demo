@@ -1915,7 +1915,8 @@ def test_a_hidden_capture_with_rows_changes_no_stock_and_queues_nothing(monkeypa
     api, ingest = _backend(monkeypatch)
     _ingest(ingest, "CAM-S01-A", "140000", [("cheese145", 5)])
     boxes = [("cheese145", 9), ("hot160", 1)]
-    _ingest(ingest, "CAM-S01-A", "140500", boxes, flagged=("hot160",), display_visible=False)
+    phantom = [{"sku_id": "cheese145", "conf": 0.5, "box": [10, 20, 50, 80]}]  # low confidence: not "products in frame"
+    _ingest(ingest, "CAM-S01-A", "140500", boxes, detections=phantom, flagged=("hot160",), display_visible=False)
     units = _units(api)
     assert (units[CHEESE], units[HOT]) == (5, 0)
     stock = _table("test-latest-stock").get_item(Key={"store_id": "DEMO-S01", "sku_id": CHEESE})["Item"]
@@ -3932,3 +3933,107 @@ def test_the_admin_is_told_who_has_no_answer_key_left(monkeypatch: pytest.Monkey
     _nine_frames(api, ANN)
     assert len(_sheets()) == 1  # Ann got the only key: none is left for her next check
     assert _labellers(api)[1]["without_key"] == [ADMIN, ANN]
+
+
+# --- Products in frame keep the numbers going; nothing is counted down after a move or while not in view ---
+
+
+def _hot_row() -> dict:
+    return _table("test-latest-stock").get_item(Key={"store_id": "DEMO-S01", "sku_id": HOT})["Item"]
+
+
+def _cheese_and_hot_at_the_old_place(ingest) -> None:
+    both = [("cheese145", 5), ("hot160", 3)]
+    _seen(ingest, "140010", OLD_PLACE, both)
+    _seen(ingest, "140510", OLD_PLACE, both)
+
+
+def _moved_and_ticked(ingest) -> None:
+    """The tick knows the old place, the display moves, and the next tick finds Hot not in view at the new place."""
+    _cheese_and_hot_at_the_old_place(ingest)
+    _tick(ingest, now="2026-11-21T14:12:00+07:00")
+    _seen(ingest, "141010", NEW_PLACE, [("cheese145", 5)])
+    _seen(ingest, "141510", NEW_PLACE, [("cheese145", 5)])
+    _tick(ingest, now="2026-11-21T14:22:00+07:00")
+
+
+@mock_aws
+def test_a_capture_with_products_away_from_the_zone_updates_the_shelf_numbers(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _seen(ingest, "140010", NEW_PLACE, [("cheese145", 5)])  # the zone check fails, five sure boxes elsewhere
+    assert _units(api)[CHEESE] == 5
+    assert _shelf("display#CAM-S01-A")["visible"] is True
+
+
+@mock_aws
+def test_no_count_down_right_after_a_move(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE, HOT))
+    _cheese_and_hot_at_the_old_place(ingest)
+    _tick(ingest, now="2026-11-21T14:12:00+07:00")  # the state knows the old place
+    _seen(ingest, "141010", NEW_PLACE, [("cheese145", 5)])  # moved, and the next tick has not seen it yet
+    assert _hot_row()["recent_counts"] == [3, 3]
+    cheese = _table("test-latest-stock").get_item(Key={"store_id": "DEMO-S01", "sku_id": CHEESE})["Item"]
+    assert cheese["recent_counts"] == [5, 5, 5]  # what is in view is still counted
+
+
+@mock_aws
+def test_a_product_not_in_view_is_not_counted_down(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE, HOT))
+    _moved_and_ticked(ingest)  # Hot is not in view, the arrangement is at the new place
+    assert _shelf("state")["skus"][HOT]["in_view"] is False
+    _seen(ingest, "142010", NEW_PLACE, [("cheese145", 5)])
+    assert _hot_row()["recent_counts"] == [3, 3]
+    assert _hot_row()["capture_id"] == "CAP-S01-20261121-140510"
+    cheese = _table("test-latest-stock").get_item(Key={"store_id": "DEMO-S01", "sku_id": CHEESE})["Item"]
+    assert cheese["capture_id"] == "CAP-S01-20261121-142010"  # what is in view is counted
+
+
+@mock_aws
+def test_a_late_capture_from_the_old_place_counts_nothing_down(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE, HOT))
+    _moved_and_ticked(ingest)  # the arrangement is at the new place
+    _seen(ingest, "140830", OLD_PLACE, [("cheese145", 5)])  # a late capture of the old place, without Hot
+    assert _hot_row()["recent_counts"] == [3, 3]
+
+
+@mock_aws
+def test_training_frames_come_from_captures_that_see_products_away_from_the_zone(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    five = [("cheese145", 5)]
+    for t in ("140700", "141200"):
+        _ingest(
+            ingest,
+            "CAM-S01-A",
+            t,
+            five,
+            detections=_sure_at(NEW_PLACE, five),
+            with_frame=True,
+            display_visible=False,
+        )
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    a = _audits()
+    assert set(a) == {AUDIT_14, TRN_14}
+
+
+@mock_aws
+def test_a_frame_request_for_a_capture_that_sees_products_away_from_the_zone_is_served(monkeypatch: pytest.MonkeyPatch):
+    api, ingest = _backend(monkeypatch)
+    five = [("hot160", 5)]
+    _ingest(
+        ingest,
+        "CAM-S01-A",
+        "130500",
+        five,
+        detections=_sure_at(NEW_PLACE, five),
+        with_frame=True,
+        display_visible=False,
+    )
+    _two_frames_at_14(ingest)
+    cid = _correct(api, "CAP-S01-20261121-130500")
+    ingest.lambda_handler({"action": "sample_audits", "hour": "20261121-14"})
+    trn = _audits()[TRN_14]
+    assert (trn["capture_id"], trn["picked_by"], trn["correction_id"]) == ("CAP-S01-20261121-130500", "correction", cid)
+    assert _corrections()[cid]["label_request"] == "queued"

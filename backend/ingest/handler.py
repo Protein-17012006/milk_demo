@@ -194,7 +194,7 @@ def ingest_capture(
     # Step 4: Update latest_stock (per store_id + sku_id) with lower-median smoothing of last 3 captures. A capture
     # that cannot see the display is kept above but says nothing about the shelf: latest_stock and the review queue
     # stay as the last capture that saw the display left them.
-    sees_display = shelf.sees_display(record)
+    sees_display = shelf.sees_shelf(capture_item)
     seen_skus: set[str] = set()
     for row in mapped_rows if sees_display else []:
         sku_key = row["sku_id"] or UNRECOGNIZED
@@ -264,7 +264,14 @@ def ingest_capture(
             )
 
     if sees_display:
-        _count_down_missing(stock_tbl, store_id, camera_id, capture_ts, seen_skus)
+        # Nothing is counted down right after a move (this capture's place is far from the arrangement the tick
+        # last saw) or for a product the tick marked not in view: its place is outside the frame, not empty.
+        state = _shelf_state(ddb_resource, store_id)
+        position = shelf.capture_position(capture_item)
+        arranged = ((state.get("arrangements") or {}).get(camera_id) or {}).get("position")
+        if not (position and arranged and shelf.far_apart(position, arranged)):
+            away = frozenset(sku for sku, s in (state.get("skus") or {}).items() if not shelf.in_view(s))
+            _count_down_missing(stock_tbl, store_id, camera_id, capture_ts, seen_skus, away)
 
     # Step 6: Whether the camera sees the display, for the website (after the shelf numbers: a retry of this
     # message is skipped as a duplicate, so a failure here must not cost the capture its stock update)
@@ -350,13 +357,33 @@ def _record_display(table, store_id: str, camera_id: str, capture_ts: str, visib
                 raise
 
 
-def _count_down_missing(stock_tbl, store_id: str, camera_id: str, capture_ts: str, seen_skus: set[str]) -> None:
+def _shelf_state(ddb_resource, store_id: str) -> dict[str, Any]:
+    """The shelf table's state item of the store (the tick's per-product status and the camera arrangements);
+    {} when there is no shelf table or no item yet. A failed read costs the capture nothing but this check."""
+    if not SHELF_TABLE:
+        return {}
+    try:
+        item = ddb_resource.Table(SHELF_TABLE).get_item(Key={"store_id": store_id, "key": "state"}).get("Item")
+    except ClientError as exc:
+        print(json.dumps({"shelf_state_unreadable": store_id, "error": repr(exc)}))
+        return {}
+    return from_dynamodb(item) if item else {}
+
+
+def _count_down_missing(
+    stock_tbl,
+    store_id: str,
+    camera_id: str,
+    capture_ts: str,
+    seen_skus: set[str],
+    skip: frozenset[str] = frozenset(),
+) -> None:
     """A SKU that this camera showed before but this capture does not is counted as 0 in the smoothing window,
     so it leaves latest_stock after the usual smoothing instead of staying "on shelf" for good.
 
     Only rows last written by this camera from an older capture change: another camera of the store may watch
     other shelves, and SQS can deliver an older result after a newer one. The other fields keep the last
-    reading that saw the SKU (when, which frame, which boxes)."""
+    reading that saw the SKU (when, which frame, which boxes). A SKU in `skip` (not in view) is left alone."""
     resp = stock_tbl.query(KeyConditionExpression=Key("store_id").eq(store_id))
     items = resp.get("Items", [])
     while "LastEvaluatedKey" in resp:
@@ -366,7 +393,7 @@ def _count_down_missing(stock_tbl, store_id: str, camera_id: str, capture_ts: st
         items.extend(resp.get("Items", []))
 
     for item in from_dynamodb(items):
-        if item["sku_id"] in seen_skus or item.get("camera_id") != camera_id:
+        if item["sku_id"] in seen_skus or item["sku_id"] in skip or item.get("camera_id") != camera_id:
             continue
         if str(item.get("capture_timestamp", "")) >= capture_ts:
             continue
@@ -739,7 +766,7 @@ def _serve_one(
             note = "the reading is older than the captures kept"
             _close_requests(ddb_resource, same, "dropped", label_request_note=note)
         return None
-    if not pick.get("image_key") or pick.get("display_visible") is False:
+    if not pick.get("image_key") or not shelf.sees_shelf(pick):
         _close_requests(ddb_resource, same, "dropped", label_request_note="the reading has no usable frame")
         return None
     audits = ddb_resource.Table(AUDITS_TABLE)
@@ -800,7 +827,7 @@ def sample_frames(
     candidate: str | None = None,
 ) -> list[str]:
     """Picks, for one camera-hour, a scoring frame (AUD-, any capture with a frame, at random) and a training frame
-    (TRN-, a different capture whose worker saw the display). The training frame follows signals (operations-loop
+    (TRN-, a different capture that sees the shelf: the zone check passed or sure boxes are anywhere in the frame). The training frame follows signals (operations-loop
     design 5.4): the frame of a reading someone corrected, else the frame whose count strays from its sampling
     window, else a random one; the audit says which in picked_by. A capture that is already a frame to label (a
     correction's request can make it one in another hour's run) is drawn for neither: one picture is never both a
@@ -848,9 +875,7 @@ def sample_frames(
         seeing = [
             it
             for it in with_frame
-            if it.get("display_visible") is not False
-            and it["capture_id"] != scoring_capture
-            and it["capture_id"] not in audited
+            if shelf.sees_shelf(it) and it["capture_id"] != scoring_capture and it["capture_id"] not in audited
         ]
         if seeing:
             # a window's median is taken over all its frames, the scoring frame included
