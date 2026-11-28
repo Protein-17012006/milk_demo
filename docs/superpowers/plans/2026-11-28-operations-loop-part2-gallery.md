@@ -230,6 +230,8 @@ Không viết code mới. Đây là phép đo spec gọi là "việc đầu tiê
   Kết quả cần thấy: một bảng cho mỗi nhóm hàng gồm n, đúng khi không có kho, đúng khi có kho, sửa đúng, làm sai, không chắc, từng vị, p, quyết định.
 - [ ] **Step 4: Ghi số vào ledger và báo hoang** cả hai cách, cho từng nhóm. Nhóm sữa có thể ra "không đổi tên được". **Nếu không nhóm nào đạt thì phần 2 dừng ở đây** (spec 5.7: "có số đo…"). Khi đó, nhãn của người chỉ có tác dụng ở vòng chậm. Task 5–8 không làm, và câu tương ứng trên website thuộc phần 3.
 
+**Kết quả ngày 28/11 (Task 4):** Slide: 608 box đã chấm, 23–28/11. Gọi đúng 570 khi không có kho, 559 khi có kho; kho sửa đúng 29, làm sai 40, p = 0,228. Original 83 → 91/111, Hot 48 → 51/53, Cheese 171 → 156/173, Sour Cream 268 → 261/271. Không bật. TH: 109 box, không đổi tên được (kho biết 0 tên). Không bật. Phần 2 dừng ở đây; Task 5–8 chưa làm.
+
 ### Task 5: Worker đặt tên bằng kho của bản live
 
 **Files:**
@@ -243,6 +245,11 @@ Không viết code mới. Đây là phép đo spec gọi là "việc đầu tiê
   - `namer = load_namer(os.environ)` được gọi một lần lúc khởi động. Lúc này môi trường đã là của bản live, vì có `config.use_live_release`.
   - Hàm `candidate.hold` nhận thêm `raw` (Task 6 dùng).
   - `persist_record` ghi `"unsure": true` chỉ cho box có `unsure`.
+
+**Mang theo từ Task 1–4 (ghi ngày 28/11):**
+- `counter.normalise` dựng lại `Detection` theo vị trí (counter.py:53) nên làm mất `unsure`; phải giữ `unsure` qua bước đó.
+- `load_namer` chỉ nêu tên file khi file không có; file npz hỏng cũng phải làm worker dừng và nêu tên file. Test cả hai trường hợp.
+- `read()` gọi `gallery.counts()` cho mỗi box; trong vòng lặp của worker phải tính một lần cho mỗi kho.
 
 - [ ] **Step 1: Viết các test hỏng.**
 
@@ -307,6 +314,13 @@ def test_a_candidate_with_its_own_detector_still_runs_its_pipeline_then_its_gall
   - `ops.gallery_nightly main --root R --camera C --store-code S`. Nó chạy `export`, gọi `.venv` bằng tiến trình con cho lệnh `nightly`, đọc `R.json`, gọi `next_action`. Khi được `propose`, nó gọi `make_release --kind gallery --from-release <live> --set MILK_SLIDE_GALLERY=<npz>`. Mọi bước được ghi vào `logs\gallery-<ngày>.log`.
   - Task `milk-gallery` chạy dưới SYSTEM, mỗi ngày lúc 23:20, bằng `.venv-ops` và profile `milk` (giống `register-ops-task.ps1`).
 
+**Mang theo từ Task 1–4 (ghi ngày 28/11):**
+- `export` ghi manifest sau khi tải frame xong, nên một lần chạy hỏng giữa chừng để lại manifest cũ. Job đêm phải dừng và không dựng gì khi `export` lỗi.
+- `build()` chỉ dựa vào manifest để biết frame chấm điểm. Thêm vào tập loại trừ các capture có audit `AUD-` trong danh sách audit nó nhận, hoặc ghi manifest trước khi tải.
+- Xuất thêm `model_version` của mỗi audit và báo các detector có trong mỗi nhóm (hoặc chỉ lấy box của detector Slide đang live), để phép đo sau một lần đổi detector không trộn hai detector.
+- In ra các tên nhãn bị bộ lọc `skus` của nhóm bỏ qua: nếu không, một vị Slide mới sẽ không bao giờ vào kho mà không ai biết.
+- `export` quét cả bảng audits: ổn với cỡ hiện nay, cần xem lại khi bảng lớn.
+
 - [ ] **Step 1: Viết các test hỏng.**
 
 ```python
@@ -322,6 +336,10 @@ def test_a_proposed_gallery_becomes_a_gallery_release_that_points_at_the_npz(tmp
 - [ ] **Step 5: Commit** `Ops: a nightly job builds a gallery from new labels, measures it and offers it to the Model page`
 
 ### Task 8: Lên live, và kho đầu tiên đi qua cửa (cần hoang OK)
+
+**Mang theo từ Task 1–4 (ghi ngày 28/11):**
+- Trên HUYHOANG, worktree `C:\Users\huyho\Datagent\milk_demo_part2` đang giữ nhánh `feat/ops-loop-part2`: chạy `git worktree remove` trước khi checkout nhánh này trong clone live.
+- Thư mục `C:\Users\huyho\Datagent\gallery` (audit và frame đã xuất ngày 28/11) dùng lại được cho job đêm.
 
 - [ ] **Step 1: Xin hoang OK** với danh sách thay đổi:
   - code của worker (Task 1, 5, 6);

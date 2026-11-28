@@ -63,6 +63,9 @@ class GroupResult:
     names: int  # product names with at least MIN_IMAGES cans, the smallest over the galleries used
     days: list[str] = field(default_factory=list)
     skipped: int = 0  # boxes whose frame image could not be read
+    p: float = 1.0  # two-sided binomial p of fixed against broken
+    fixed_boxes: list[dict] = field(default_factory=list)  # {capture_id, box, live, gallery, truth}, for a check by eye
+    broken_boxes: list[dict] = field(default_factory=list)
 
 
 def binomial_two_sided(k: int, n: int) -> float:
@@ -122,6 +125,8 @@ def measure(
     n = rw = rwith = fixed = broken = unsure = skipped = 0
     per: dict[str, list[int]] = {}
     days: set[str] = set()
+    fixed_boxes: list[dict] = []
+    broken_boxes: list[dict] = []
     for cid in sorted(by_frame):
         image = image_of(cid)
         if image is None:
@@ -139,6 +144,15 @@ def measure(
             rwith += with_
             fixed += with_ and not without
             broken += without and not with_
+            if with_ != without:
+                listed = {
+                    "capture_id": b.capture_id,
+                    "box": list(b.box),
+                    "live": b.live,
+                    "gallery": det.sku_id,
+                    "truth": b.truth,
+                }
+                (fixed_boxes if with_ else broken_boxes).append(listed)
             unsure += det.unsure
             row = per.setdefault(b.truth, [0, 0, 0])
             row[0] += 1
@@ -157,6 +171,9 @@ def measure(
         min(names, default=0),
         sorted(days),
         skipped,
+        binomial_two_sided(min(fixed, broken), fixed + broken),
+        fixed_boxes,
+        broken_boxes,
     )
 
 

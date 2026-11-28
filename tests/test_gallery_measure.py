@@ -155,6 +155,20 @@ def test_measure_counts_a_box_the_gallery_breaks():
     assert (r.fixed, r.broken, r.right_without, r.right_with) == (1, 1, 1, 1)  # c1 broken, c2 fixed
 
 
+def test_measure_lists_the_fixed_and_the_broken_boxes_and_the_p_value():
+    mixed_up = _gallery()
+    mixed_up.labels = np.array([{"cheese145": "original145", "original145": "cheese145"}[x] for x in mixed_up.labels])
+    boxes = [_box("c1", "d1", BLUE, "cheese145", "cheese145"), _box("c2", "d1", BLUE, "cheese145", "original145")]
+    r = _measure(boxes, lambda day: mixed_up)
+    assert r.fixed_boxes == [
+        {"capture_id": "c2", "box": list(BLUE), "live": "cheese145", "gallery": "original145", "truth": "original145"}
+    ]
+    assert r.broken_boxes == [
+        {"capture_id": "c1", "box": list(BLUE), "live": "cheese145", "gallery": "original145", "truth": "cheese145"}
+    ]
+    assert r.p == gm.binomial_two_sided(1, 2)
+
+
 def test_each_day_is_read_with_a_gallery_built_without_it():
     asked = []
     normal = _gallery()
@@ -205,6 +219,9 @@ def test_decide_refuses_when_a_product_with_ten_boxes_falls_more_than_five_point
     assert ok is False and any("cheese145" in w for w in why)
     small = {"cheese145": (9, 9, 0)}  # under ten boxes: not judged on its own
     assert decide(result(fixed=12, broken=2, per_sku=small))[0] is True
+    at_ten = {"cheese145": (10, 10, 5)}  # exactly ten boxes, five of ten lost: judged on its own
+    ok, why = decide(result(fixed=12, broken=2, per_sku=at_ten))
+    assert ok is False and any("cheese145" in w for w in why)
     edge = {"cheese145": (20, 10, 9)}  # exactly five points down: allowed
     assert decide(result(fixed=12, broken=2, per_sku=edge))[0] is True
 
@@ -249,6 +266,7 @@ def test_the_command_measures_each_group_and_writes_the_result(tmp_path, capsys)
     g = got["groups"]["slide"]
     assert (g["n"], g["names"], g["enable"]) == (1, 0, False)
     assert g["reasons"] == ["cannot rename: the gallery knows 0 product names"]
+    assert g["p"] == 1.0 and g["fixed_boxes"] == [] and g["broken_boxes"] == []
     assert "DO NOT ENABLE" in capsys.readouterr().out
 
 

@@ -317,13 +317,36 @@ def test_build_takes_several_frame_folders_and_their_scoring_frames_are_the_unio
     frame(harvest, "2026-11-26", key)
     frame(export, "2026-11-26", labelled)
     frame(export, "2026-11-26", scoring)
-    (harvest / "manifest.jsonl").write_text(json.dumps({"capture_id": key, "audit_ids": []}) + "\n")
+    other = "CAP-S01-20261126-120000"
+    frame(harvest, "2026-11-26", other)
+    rows = [{"capture_id": key, "audit_ids": []}, {"capture_id": other, "audit_ids": ["AUD-H-1", "TRN-H-1"]}]
+    (harvest / "manifest.jsonl").write_text("".join(json.dumps(r) + chr(10) for r in rows))
     (export / "manifest.jsonl").write_text(json.dumps({"capture_id": scoring, "audit_ids": ["AUD-X-1"]}) + "\n")
     truth = {key: [{"box": [20, 20, 30, 60], "sku": "cheese145", "kind": "face"}]}
     segments = [{"id": "s0", "kind": "day", "split": "train", "keyframe": key, "members": [key]}]
     box = [{"box_id": 1, "sku_id": "hot160", "conf": 0.9, "box": [20, 20, 30, 60]}]
     ok = [{"box_id": 1, "verdict": "correct"}]
-    trn = [audit("TRN-A-1", "done", box, ok, cid=labelled), audit("TRN-A-2", "done", box, ok, cid=scoring)]
+    trn = [
+        audit("TRN-A-1", "done", box, ok, cid=labelled),
+        audit("TRN-A-2", "done", box, ok, cid=scoring),
+        audit("TRN-H-1", "done", box, ok, cid=other),
+    ]
     g = build(truth, segments, [harvest, export], trn, exclude_holdout=False)
     assert g.built_from == tuple(sorted(["TRN-A-1", f"truth:{key}"]))  # the scoring frame of the other folder is out
     assert build(truth, segments, harvest, trn[:1], exclude_holdout=False).built_from == (f"truth:{key}",)
+
+
+def test_a_day_held_out_also_drops_the_members_of_a_kept_truth_segment_that_fall_on_that_day(tmp_path):
+    frames = tmp_path / "frames"
+    key, member = "CAP-S01-20261127-235000", "CAP-S01-20261128-001000"
+    frame(frames, "2026-11-27", key)
+    frame(frames, "2026-11-28", member)
+    (frames / "manifest.jsonl").write_text(
+        "".join(json.dumps({"capture_id": c, "audit_ids": []}) + "\n" for c in (key, member))
+    )
+    truth = {key: [{"box": [20, 20, 30, 60], "sku": "cheese145", "kind": "face"}]}
+    segments = [{"id": "s0", "kind": "day", "split": "train", "keyframe": key, "members": [key, member]}]
+    full = build(truth, segments, frames, [], exclude_holdout=False, min_sim=-1.0)
+    assert member in set(full.sources.tolist())
+    g = build(truth, segments, frames, [], exclude_holdout=False, exclude_days=frozenset({"2026-11-28"}), min_sim=-1.0)
+    assert set(g.sources.tolist()) == {key}

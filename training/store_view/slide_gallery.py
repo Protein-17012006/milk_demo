@@ -140,7 +140,12 @@ def build(
         usable = [
             (i, r) for i, r in enumerate(rows) if r.get("kind") != "ignore" and r.get("sku") not in (None, "unknown")
         ]
-        for cid in spread([c for c in seg["members"] if c not in scoring and c in paths], per_keyframe):
+        members = [
+            c
+            for c in seg["members"]
+            if c not in scoring and c in paths and not (exclude_days and day_of(c) in exclude_days)
+        ]
+        for cid in spread(members, per_keyframe):
             image = cv2.imread(str(paths[cid]))
             grey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             for i, r in usable:
