@@ -89,7 +89,8 @@ def test_what_can_be_an_answer_key():
     assert can_be_key(frame(1, ADMIN)) is None
     assert can_be_key(frame(1, ADMIN, status="pending")) == "Only a labelled frame can be an answer key."
     assert (
-        can_be_key(frame(1, ADMIN, candidate_version="v-next")) == "A frame that shows two versions cannot be an answer key."
+        can_be_key(frame(1, ADMIN, candidate_version="v-next"))
+        == "A frame that shows two versions cannot be an answer key."
     )
     assert can_be_key(sheet("11111111", "x", A, "done", 1)) == "This frame cannot be an answer key."
 
