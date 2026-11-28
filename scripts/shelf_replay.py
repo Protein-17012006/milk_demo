@@ -67,27 +67,28 @@ def fetch(handler, ddb, store_id: str, first_day: str, last_day: str):
 def run_pass(handler, shelf, store: dict, by_bucket: dict, plan_of, rule: str) -> dict:
     """Build every check and apply it in bucket order. rule is "new" (the code as it is) or "old"."""
     saved = shelf.sees_shelf, shelf.ARRANGEMENT_JUMP_PX
-    if rule == "old":
+    if rule == "old":  # both patches stay on for the whole pass: checks are built and applied under the old rule
         shelf.sees_shelf, shelf.ARRANGEMENT_JUMP_PX = shelf.sees_display, float("inf")
     try:
         checks = {b: shelf.build_check(b, caps) for b, caps in sorted(by_bucket.items()) if caps}
-    finally:
-        shelf.sees_shelf, shelf.ARRANGEMENT_JUMP_PX = saved
-    plan = plan_of(checks)
-    skus_state, since, arrangements, last_measured = {}, {}, {}, None
-    events, moves, views = [], [], []
-    for bucket in sorted(checks):
-        check = checks[bucket]
-        before = {cam: list(a["position"]) for cam, a in arrangements.items()}
-        got, last_measured = handler._apply_check(check, store, plan, skus_state, last_measured, since, arrangements)
-        events += [{**e, "bucket": bucket} for e in got]
-        if check.get("arrangement_changed"):
+        plan = plan_of(checks)
+        skus_state, since, arrangements, last_measured = {}, {}, {}, None
+        events, moves, views = [], [], []
+        for bucket in sorted(checks):
+            check = checks[bucket]
+            before = {cam: list(a["position"]) for cam, a in arrangements.items()}
+            got, last_measured = handler._apply_check(
+                check, store, plan, skus_state, last_measured, since, arrangements
+            )
+            events += [{**e, "bucket": bucket} for e in got]
             for cam, pos in sorted((check.get("positions") or {}).items()):
-                if cam in before and math.hypot(before[cam][0] - pos[0], before[cam][1] - pos[1]) > 0:
+                if cam in before and shelf.far_apart(before[cam], pos):
                     a = before[cam]
                     moves.append((bucket, cam, math.hypot(a[0] - pos[0], a[1] - pos[1]), a, pos))
-        if "not_in_view" in check:  # only an open, measured check says who is in view
-            views.append((bucket, set(check["not_in_view"])))
+            if "not_in_view" in check:  # only an open, measured check says who is in view
+                views.append((bucket, set(check["not_in_view"])))
+    finally:
+        shelf.sees_shelf, shelf.ARRANGEMENT_JUMP_PX = saved
     return {"checks": checks, "events": events, "moves": moves, "views": views, "plan": plan}
 
 
@@ -117,6 +118,20 @@ def intervals(run: dict) -> list[tuple[str, str, str | None]]:
 
 def fmt_osa(t: dict) -> str:
     return "n/a" if t["osa"] is None else f"{t['osa'] * 100:.1f}% ({t['available']}/{t['checks']})"
+
+
+def describe(run: dict, event: dict) -> str:
+    """One event with the counts of its product in the check before and in the check that made it."""
+    buckets = sorted(run["checks"])
+    i = buckets.index(event["bucket"])
+    sku = event["sku_id"]
+    prev = run["checks"][buckets[i - 1]] if i else {}
+    cur = run["checks"][event["bucket"]]
+    return (
+        f"{event['bucket']} {sku[:24]} {event['type']} level {event['level_before']}->{event['level_after']}; "
+        f"counts at {buckets[i - 1] if i else '-'}: {(prev.get('counts') or {}).get(sku, 0)}, "
+        f"at {event['bucket']}: {(cur.get('counts') or {}).get(sku, 0)}"
+    )
 
 
 def count_events(run: dict, day: str, kind: str) -> int:
@@ -178,10 +193,15 @@ def main() -> None:
             print(f"  events {t}: old {count_events(old, day, t)} -> new {count_events(new, day, t)}")
         if not types:
             print("  events: none (old or new)")
-        old_keys = {e["event_key"] for e in old["events"]}
-        for e in new["events"]:
-            if e["bucket"].startswith(day) and is_night(e["bucket"]) and e["event_key"] not in old_keys:
-                print(f"  NEW night event {e['event_key']} {e['level_before']}->{e['level_after']}")
+        old_keys = {e["event_key"]: e for e in old["events"]}
+        new_keys = {e["event_key"]: e for e in new["events"]}
+        for tag, left, right, run in (("only new", new_keys, old_keys, new), ("only old", old_keys, new_keys, old)):
+            for key in sorted(left.keys() - right.keys()):
+                if left[key]["bucket"].startswith(day):
+                    print(
+                        f"  event {tag}: {describe(run, left[key])}"
+                        + ("  [NIGHT]" if is_night(left[key]["bucket"]) else "")
+                    )
         for r, name in ((old, "old"), (new, "new")):
             at_1215 = [e["event_key"] for e in r["events"] if e["bucket"] == f"{day}-1215"]
             if at_1215:
