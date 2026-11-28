@@ -1359,6 +1359,12 @@ def _display_moves(ingest) -> None:
     _seen(ingest, "141510", NEW_PLACE, [("cheese145", 5)])
 
 
+def _view(sku: str) -> dict:
+    """What the shelf state says of a product's place: in view or not, since when, and what was seen there last."""
+    state = _shelf("state")["skus"][sku]
+    return {k: state.get(k) for k in ("in_view", "not_in_view_since", "last_seen_units", "last_seen_at")}
+
+
 @mock_aws
 def test_a_moved_display_keeps_counting_what_is_in_view(monkeypatch: pytest.MonkeyPatch):
     _, ingest = _backend(monkeypatch)
@@ -1460,6 +1466,37 @@ def test_checks_outside_opening_hours_do_not_set_the_arrangement(monkeypatch: py
 
 
 @mock_aws
+def test_a_move_across_a_break_is_found_at_the_first_measured_check_after_it(monkeypatch: pytest.MonkeyPatch):
+    # The shelf goes unmeasured for more than GAP_MINUTES (the hub off, then a sheet over it) and the display is
+    # moved meanwhile: the first measured check after the break is compared with the last one before it
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE, HOT))
+    both = [("cheese145", 5), ("hot160", 3)]
+    _seen(ingest, "140010", OLD_PLACE, both)
+    _seen(ingest, "140510", OLD_PLACE, both)
+    _ingest(ingest, "CAM-S01-A", "143010", [], display_visible=False)  # nothing in view: not measured
+    _ingest(ingest, "CAM-S01-A", "143510", [], display_visible=False)
+    _seen(ingest, "150010", NEW_PLACE, [("cheese145", 5)])
+    _seen(ingest, "150510", NEW_PLACE, [("cheese145", 5)])
+    _tick(ingest, now="2026-11-21T15:12:00+07:00")
+    for bucket in ("1405", "1430", "1435"):
+        assert not _shelf(f"check#20261121-{bucket}").get("arrangement_changed")
+    assert _shelf("check#20261121-1430")["measurable"] is False
+    check = _shelf("check#20261121-1500")
+    assert check["arrangement_changed"] is True and check["not_in_view"] == [HOT]
+    assert _view(HOT) == {
+        "in_view": False,
+        "not_in_view_since": "20261121-1500",
+        "last_seen_units": 3,
+        "last_seen_at": "20261121-1405",
+    }
+    state = _shelf("state")
+    assert state["skus"][CHEESE]["in_view"] is True and state["skus"][CHEESE]["L"] == 5
+    assert state["arrangements"]["CAM-S01-A"]["since"] == "20261121-1500"
+    assert _event_keys() == []
+
+
+@mock_aws
 def test_a_recompute_finds_the_same_moves_as_the_tick(monkeypatch: pytest.MonkeyPatch):
     _, ingest = _backend(monkeypatch)
     _shelf_plan(expected=(CHEESE, HOT))
@@ -1476,6 +1513,37 @@ def test_a_recompute_finds_the_same_moves_as_the_tick(monkeypatch: pytest.Monkey
     assert _event_keys() == events == []
     assert _shelf("check#20261121-1410")["arrangement_changed"] is True
     assert _shelf("state")["arrangements"]["CAM-S01-A"]["since"] == "20261121-1410"
+
+
+@mock_aws
+def test_a_recompute_finds_a_move_in_checks_older_than_the_captures_kept(monkeypatch: pytest.MonkeyPatch):
+    # spec 7.9: checks whose captures are gone are replayed from their stored check# items, which keep where the
+    # cans stood (positions) and which products each camera saw surely (confident_by_camera)
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE, HOT))
+    _display_moves(ingest)
+    _tick(ingest)
+    fields = ("positions", "confident_by_camera", "captures_zone")
+    stored = {k: _shelf("check#20261121-1410")[k] for k in fields}
+    captures = _table("test-captures")
+    for item in captures.scan()["Items"]:  # nine days on, the captures of 21/11 have expired
+        captures.delete_item(Key={"camera_id": item["camera_id"], "capture_id": item["capture_id"]})
+    _shelf_plan(expected=(CHEESE, HOT), shelf_recompute_requested_at="2026-11-30T14:20:00+07:00")
+    _tick(ingest, now="2026-11-30T14:22:00+07:00")
+    store = _table("test-store-list").get_item(Key={"store_id": "DEMO-S01"})["Item"]
+    assert "shelf_recompute_requested_at" not in store
+    replayed = _shelf("check#20261121-1410")
+    assert replayed["arrangement_changed"] is True and replayed["not_in_view"] == [HOT]
+    assert {k: replayed[k] for k in fields} == stored
+    assert _view(HOT) == {
+        "in_view": False,
+        "not_in_view_since": "20261121-1410",
+        "last_seen_units": 3,
+        "last_seen_at": "20261121-1405",
+    }
+    cheese = _shelf("state")["skus"][CHEESE]
+    assert cheese["in_view"] is True and cheese["L"] == 5  # seen surely at the new place: counted on
+    assert _event_keys() == []
 
 
 PLAN_PATH = "/v1/stores/DEMO-S01/shelf-plan"
@@ -1729,6 +1797,70 @@ def test_oos_now_does_not_count_a_product_not_in_view(monkeypatch: pytest.Monkey
     _tick(ingest, now="2026-11-21T14:32:00+07:00")
     assert _kpi(api)["oos_now"]["count"] == 0
     assert _products(api)[HOT]["stock_status"] == "NOT_IN_VIEW"
+
+
+def _stored_check(bucket: str, counts: dict[str, int], x: int) -> None:
+    """A measured check# item as the tick stores it: CAM-S01-A's cans stood at x, each product counted seen surely."""
+    sure = sorted(counts)
+    _put_shelf(
+        f"check#{bucket}",
+        bucket=bucket,
+        counts=counts,
+        captures=1,
+        captures_visible=1,
+        cameras=["CAM-S01-A"],
+        confident_skus=sure,
+        confident_by_camera={"CAM-S01-A": sure},
+        positions={"CAM-S01-A": [x, 60]},
+        captures_zone=int(x == OLD_PLACE),
+        measurable=True,
+    )
+
+
+@mock_aws
+def test_a_recompute_long_after_a_move_keeps_a_product_not_in_view(monkeypatch: pytest.MonkeyPatch):
+    # A plan saved more than RECOMPUTE_DAYS after a move, Hot's tray still out of frame: the move is older than every
+    # check replayed, so Hot stays not in view as stored (as `since` is kept). Started again in view, its empty place
+    # would read Out of stock (spec 3).
+    api, ingest = _backend(monkeypatch)
+    _hot_not_in_view(api, ingest, monkeypatch)  # the display moves on 21/11 at 14:10
+    for minute in ("1400", "1405", "1410"):
+        _stored_check(f"20261207-{minute}", {CHEESE: 5}, NEW_PLACE)  # 16 days on, Cheese is still all there is
+    _shelf_plan(expected=(CHEESE, HOT), shelf_recompute_requested_at="2026-12-07T14:20:00+07:00")
+    _tick(ingest, now="2026-12-07T14:22:00+07:00")  # replays 22/11 to 07/12
+    assert _view(HOT) == {
+        "in_view": False,
+        "not_in_view_since": "20261121-1410",
+        "last_seen_units": 3,
+        "last_seen_at": "20261121-1405",
+    }
+    assert "status" not in _shelf("state")["skus"][HOT]
+    assert _shelf("check#20261207-1410")["not_in_view"] == [HOT]
+    assert _event_keys() == []
+    _at(api, monkeypatch, "2026-12-07T14:22:00+07:00")
+    assert _products(api)[HOT]["stock_status"] == "NOT_IN_VIEW"
+    assert _kpi(api)["oos_now"]["count"] == 0
+    _shelf_plan(expected=(CHEESE,), shelf_recompute_requested_at="2026-12-07T14:21:00+07:00")
+    _tick(ingest, now="2026-12-07T14:23:00+07:00")
+    assert HOT not in _shelf("state")["skus"]  # taken off the plan: nothing of it is carried
+
+
+@mock_aws
+def test_a_product_kept_not_in_view_by_a_recompute_comes_back_when_seen_surely(monkeypatch: pytest.MonkeyPatch):
+    # what a recompute carries is the usual not-in-view state: a sure sighting in a measured check brings Hot back,
+    # fresh and with no event
+    api, ingest = _backend(monkeypatch)
+    _hot_not_in_view(api, ingest, monkeypatch)
+    _stored_check("20261207-1400", {CHEESE: 5}, NEW_PLACE)
+    _stored_check("20261207-1405", {CHEESE: 5, HOT: 4}, NEW_PLACE)
+    _stored_check("20261207-1410", {CHEESE: 5, HOT: 4}, NEW_PLACE)
+    _shelf_plan(expected=(CHEESE, HOT), shelf_recompute_requested_at="2026-12-07T14:20:00+07:00")
+    _tick(ingest, now="2026-12-07T14:22:00+07:00")
+    assert _shelf("check#20261207-1400")["not_in_view"] == [HOT]
+    assert _shelf("check#20261207-1405")["not_in_view"] == []
+    hot = _shelf("state")["skus"][HOT]
+    assert hot["in_view"] is True and hot["L"] == 4 and "not_in_view_since" not in hot
+    assert _event_keys() == []
 
 
 @mock_aws

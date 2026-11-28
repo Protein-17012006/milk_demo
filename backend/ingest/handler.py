@@ -1303,7 +1303,9 @@ def shelf_tick(s3_client, ddb_resource, now_utc: datetime) -> dict[str, Any]:
 
 def shelf_recompute(s3_client, ddb_resource, store_id: str, days: int, now_utc: datetime) -> dict[str, Any]:
     """Rebuild a store's last `days` days with its current shelf plan: checks from captures still kept, older
-    checks as stored, then state, events and rollups replayed from scratch.
+    checks as stored, then state, events and rollups replayed from scratch. Two things carry over from the old
+    state: when SKUs that started before these days started (since), and the plan's products that are not in view
+    since before these days, as stored (the move that put them out of view is in none of the checks replayed).
 
     An event that comes back with the same key keeps the photo keys it had, with no S3 call. A missing photo is
     copied from the checks being replayed, and only for events newer than the hub keeps frames (CAPTURE_TTL_DAYS):
@@ -1353,7 +1355,14 @@ def shelf_recompute(s3_client, ddb_resource, store_id: str, days: int, now_utc: 
         suggest_from = shelf.bucket_of((now_utc - timedelta(days=shelf.SUGGEST_DAYS)).isoformat())
         expected = sorted({s for b, c in checks.items() if b >= suggest_from for s in c.get("confident_skus") or []})
 
-    skus_state: dict[str, Any] = {}
+    # A product not in view since before these days stays so, as stored: no check replayed holds its move, and the
+    # arrangements start empty, so started in view its empty place would read out of stock (spec 3). It comes back
+    # in view the usual way, seen surely in a measured check.
+    skus_state: dict[str, Any] = {
+        sku: state
+        for sku, state in (old_state.get("skus") or {}).items()
+        if sku in expected and not shelf.in_view(state) and state.get("not_in_view_since", first) < first
+    }
     arrangements: dict[str, dict] = {}
     last_measured: str | None = None
     hours: set[str] = set()
