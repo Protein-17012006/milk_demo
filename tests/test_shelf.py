@@ -18,15 +18,20 @@ from shelf import (  # noqa: E402
     expected_at,
     far_apart,
     gap_between,
+    in_view,
     is_open,
     merge,
+    move_skus,
     open_buckets,
     products_position,
     rollup,
+    see_skus,
     sees_shelf,
+    step_arrangements,
     step_state,
     totals,
     valid_hours,
+    view_of,
 )
 
 TS = "2026-11-21T14:00:10+07:00"
@@ -189,7 +194,7 @@ def test_restock_after_out_of_stock_carries_its_open_minutes():
 # --- Task 3: rollups and period totals ---
 
 
-def _sku(checks=0, available=0, units_sum=0, oos_started=0, restock_units=0, restock_events=0) -> dict:
+def _sku(checks=0, available=0, units_sum=0, oos_started=0, restock_units=0, restock_events=0, unseen_checks=0) -> dict:
     return {
         "checks": checks,
         "available": available,
@@ -197,6 +202,7 @@ def _sku(checks=0, available=0, units_sum=0, oos_started=0, restock_units=0, res
         "oos_started": oos_started,
         "restock_units": restock_units,
         "restock_events": restock_events,
+        "unseen_checks": unseen_checks,
     }
 
 
@@ -488,3 +494,166 @@ def test_a_check_keeps_positions_confident_products_by_camera_and_zone_captures(
     assert check["confident_by_camera"].get("CAM-S01-B", []) == []
     assert check["confident_skus"] == [cheese]
     assert check["captures_zone"] == 2  # the in-zone capture and camera B's (visible=True)
+
+
+# --- Shelf not in view: arrangements and products not in view ---
+
+CAM_A, CAM_B = "CAM-S01-A", "CAM-S01-B"
+
+
+def _moved_check(counts: dict, sure_a: list[str], sure_b: list[str] | None = None) -> dict:
+    by_camera = {CAM_A: sorted(sure_a)}
+    if sure_b is not None:
+        by_camera[CAM_B] = sorted(sure_b)
+    return {"bucket": "20261128-1215", "counts": counts, "confident_by_camera": by_camera}
+
+
+def test_the_first_position_of_a_camera_starts_its_arrangement():
+    arrangements = {}
+    check = {"bucket": "20261128-1000", "positions": {CAM_A: [1000, 250]}}
+    assert step_arrangements(arrangements, check) == []
+    assert arrangements == {CAM_A: {"position": [1000, 250], "since": "20261128-1000"}}
+
+
+def test_a_jump_of_more_than_500_px_is_a_new_arrangement():
+    arrangements = {CAM_A: {"position": [1068, 246], "since": "20261128-0625"}}
+    check = {"bucket": "20261128-1215", "positions": {CAM_A: [290, 412]}}
+    assert step_arrangements(arrangements, check) == [CAM_A]
+    assert arrangements[CAM_A] == {"position": [290, 412], "since": "20261128-1215"}
+
+
+def test_a_person_in_front_or_a_slow_drift_is_the_same_arrangement():
+    arrangements = {CAM_A: {"position": [1000, 250], "since": "20261128-0625"}}
+    for pos in ([1180, 250], [820, 148], [934, 527], [1150, 283]):  # up to 399 px from the previous position
+        assert step_arrangements(arrangements, {"bucket": "20261128-1300", "positions": {CAM_A: pos}}) == []
+    assert arrangements[CAM_A] == {"position": [1150, 283], "since": "20261128-0625"}
+
+
+def test_a_check_without_a_position_changes_no_arrangement():
+    arrangements = {CAM_A: {"position": [1000, 250], "since": "20261128-0625"}}
+    assert step_arrangements(arrangements, {"bucket": "20261128-1300", "positions": {}}) == []
+    assert arrangements == {CAM_A: {"position": [1000, 250], "since": "20261128-0625"}}
+
+
+def test_a_move_puts_products_not_seen_out_of_view_with_what_was_seen_last():
+    state = {
+        "TH": {"L": 6, "status": "IN_STOCK", "prev": 6, "prev_bucket": "20261128-1210", "camera": CAM_A},
+        "Cheese": {"L": 4, "status": "IN_STOCK", "prev": 4, "prev_bucket": "20261128-1210", "camera": CAM_A},
+        "Hot": {"L": 3, "status": "LOW", "prev": 3, "prev_bucket": "20261128-1210", "camera": CAM_B},
+    }
+    hot_before = dict(state["Hot"])
+    move_skus(state, [CAM_A], _moved_check({"Cheese": 5}, ["Cheese"], ["Hot"]))
+    assert state["TH"] == {
+        "in_view": False,
+        "not_in_view_since": "20261128-1215",
+        "last_seen_units": 6,
+        "last_seen_at": "20261128-1210",
+        "camera": CAM_A,
+    }
+    assert state["Cheese"] == {"in_view": True, "camera": CAM_A}  # its level is gone: it starts again
+    assert state["Hot"] == hot_before
+
+
+def test_a_product_with_no_camera_yet_moves_with_the_cameras():
+    state = {"TH": {"L": None, "prev": 2, "prev_bucket": "20261128-1210"}}
+    move_skus(state, [CAM_A], _moved_check({}, []))
+    assert state["TH"]["in_view"] is False and state["TH"]["last_seen_units"] == 2  # no level yet: the last units
+
+
+def test_a_product_already_out_of_view_keeps_when_it_was_last_seen():
+    state = {"TH": {"L": 6, "prev": 6, "prev_bucket": "20261128-1210", "camera": CAM_A}}
+    move_skus(state, [CAM_A], _moved_check({}, []))
+    first = dict(state["TH"])
+    second = _moved_check({}, [])
+    second["bucket"] = "20261128-1500"
+    move_skus(state, [CAM_A], second)
+    assert state["TH"] == first
+    assert (first["not_in_view_since"], first["last_seen_units"], first["last_seen_at"]) == (
+        "20261128-1215",
+        6,
+        "20261128-1210",
+    )
+
+
+def test_a_product_out_of_stock_before_a_move_keeps_zero_as_last_seen():
+    state = {
+        "TH": {
+            "L": 0,
+            "status": "OOS",
+            "since": "20261128-1100",
+            "prev": 0,
+            "prev_bucket": "20261128-1210",
+            "camera": CAM_A,
+        }
+    }
+    move_skus(state, [CAM_A], _moved_check({}, []))
+    assert state["TH"]["last_seen_units"] == 0 and state["TH"]["in_view"] is False
+    assert "status" not in state["TH"]
+
+
+def test_a_product_seen_again_starts_fresh_and_in_view():
+    state = {
+        "TH": {
+            "in_view": False,
+            "not_in_view_since": "20261128-1215",
+            "last_seen_units": 6,
+            "last_seen_at": "20261128-1210",
+            "camera": CAM_A,
+        }
+    }
+    check = {"bucket": "20261128-1230", "counts": {"TH": 4}, "confident_by_camera": {CAM_A: ["TH"]}}
+    see_skus(state, check, ["TH"])
+    assert state["TH"] == {"in_view": True, "camera": CAM_A}
+    s, event = step_state(state["TH"], 4, "20261128-1230")
+    s, event2 = step_state(s, 4, "20261128-1235")
+    assert s["L"] == 4 and event is None and event2 is None
+
+
+def test_see_skus_names_the_camera_that_counted_a_product_surely():
+    state = {"Cheese": {"L": 4, "camera": CAM_B}, "Hot": {"in_view": False, "camera": CAM_B}}
+    check = {
+        "bucket": "20261128-1230",
+        "counts": {"Cheese": 5, "Hot": 2, "Plain": 3, "Other": 1},
+        "confident_by_camera": {CAM_B: ["Cheese", "Hot", "Plain"], CAM_A: ["Cheese", "Other"]},
+    }
+    see_skus(state, check, ["Cheese", "Hot", "Plain"])  # Other is not expected
+    assert state["Cheese"] == {"L": 4, "camera": CAM_A}  # the first camera in name order that saw it surely
+    assert state["Hot"] == {"in_view": True, "camera": CAM_B}
+    assert state["Plain"] == {"camera": CAM_B}
+    assert "Other" not in state
+
+
+def test_see_skus_ignores_a_product_counted_zero():
+    state = {}
+    check = {"bucket": "20261128-1230", "counts": {"Cheese": 0}, "confident_by_camera": {CAM_A: ["Cheese"]}}
+    see_skus(state, check, ["Cheese"])
+    assert state == {}
+
+
+def test_in_view_and_view_of():
+    assert in_view(None) and in_view({}) and in_view({"in_view": True})
+    assert not in_view({"in_view": False})
+    off = {
+        "in_view": False,
+        "not_in_view_since": "20261128-1215",
+        "last_seen_units": 6,
+        "last_seen_at": "20261128-1210",
+    }
+    assert view_of(off) == {"since": "20261128-1215", "last_units": 6, "last_at": "20261128-1210"}
+    assert view_of({"in_view": True}) is None
+
+
+def test_a_product_not_in_view_is_left_out_of_the_hours_numbers():
+    check = {
+        "bucket": "20261128-1300",
+        "counts": {"Cheese": 5},
+        "open": True,
+        "expected": ["Cheese", "TH"],
+        "not_in_view": ["TH"],
+        "confident_skus": [],
+    }
+    r = rollup([check], [])
+    assert r["skus"]["Cheese"] == _sku(checks=1, available=1, units_sum=5)
+    assert r["skus"]["TH"] == _sku(unseen_checks=1)
+    assert r["max_total"] == 5 and r["checks"] == 1
+    assert merge([r, r])["skus"]["TH"]["unseen_checks"] == 2

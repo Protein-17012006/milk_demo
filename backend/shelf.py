@@ -145,7 +145,7 @@ def _frame_boxes(capture: dict) -> dict[str, list]:
 
 
 def build_check(bucket: str, captures: list[dict]) -> dict[str, Any]:
-    """One check of a store, from the captures that see the display: per SKU, the lower median of each camera's
+    """One check of a store, from the captures that see the shelf: per SKU, the lower median of each camera's
     captures (a SKU missing from a capture counts 0 there), summed over cameras. Unrecognized rows are left out.
     confident_skus: SKUs with one box at CONFIDENT or more; confident_by_camera has them per camera.
     positions: per camera, where the cans stood (products_position of its captures that see the shelf).
@@ -153,7 +153,7 @@ def build_check(bucket: str, captures: list[dict]) -> dict[str, Any]:
 
     A capture sees the shelf when the zone check passes or sure boxes show the cans elsewhere (sees_shelf).
     The check is measurable when at least half of its captures see the shelf; otherwise it says why. image_key
-    and source_bucket are the frame of the first capture (by capture_id) that sees the display and has one, for
+    and source_bucket are the frame of the first capture (by capture_id) that sees the shelf and has one, for
     event photos; frame_boxes are each product's boxes in that very frame ({} without a frame), so a photo of an
     event can show where its product stood. They change no count."""
     seeing = [item for item in captures if sees_shelf(item)]
@@ -305,7 +305,95 @@ def step_state(
     return s, event
 
 
-SKU_FIELDS = ("checks", "available", "units_sum", "oos_started", "restock_units", "restock_events")
+def in_view(state: dict | None) -> bool:
+    """False only for a product marked not in view (its place is outside the frame since a move)."""
+    return (state or {}).get("in_view") is not False
+
+
+def view_of(state: dict | None) -> dict | None:
+    """When a product is not in view: since when, and the level and check it was last seen at. Else None."""
+    if in_view(state):
+        return None
+    s = state or {}
+    return {
+        "since": s.get("not_in_view_since"),
+        "last_units": s.get("last_seen_units"),
+        "last_at": s.get("last_seen_at"),
+    }
+
+
+def step_arrangements(arrangements: dict[str, dict], check: dict) -> list[str]:
+    """Follow where each camera's cans stand. A jump of more than ARRANGEMENT_JUMP_PX from the last position is a new
+    arrangement (since = this check); smaller moves (a person in front, a slow drift) only update the position.
+    arrangements is changed in place; returns the cameras whose arrangement changed, in name order."""
+    changed = []
+    for camera, pos in sorted((check.get("positions") or {}).items()):
+        current = arrangements.get(camera)
+        if current is None:
+            arrangements[camera] = {"position": pos, "since": check["bucket"]}
+        elif far_apart(current["position"], pos):
+            arrangements[camera] = {"position": pos, "since": check["bucket"]}
+            changed.append(camera)
+        else:
+            current["position"] = pos
+    return changed
+
+
+def _seen_by(check: dict, camera: str, sku: str) -> bool:
+    return (
+        sku in (check.get("confident_by_camera") or {}).get(camera, [])
+        and int((check.get("counts") or {}).get(sku, 0)) > 0
+    )
+
+
+def move_skus(skus_state: dict[str, dict], cameras: list[str], check: dict) -> None:
+    """A move on these cameras: the level of their products no longer means anything, so their state starts again.
+    A product seen surely in this check starts fresh and in view; one already not in view keeps what was last seen;
+    any other is marked not in view, with the level (or the last check's units) it had. skus_state is changed in place."""
+    for sku, state in list(skus_state.items()):
+        if state.get("camera") is not None and state["camera"] not in cameras:
+            continue
+        seen_on = next((c for c in sorted(cameras) if _seen_by(check, c, sku)), None)
+        if seen_on is not None:
+            skus_state[sku] = {"in_view": True, "camera": seen_on}
+        elif not in_view(state):
+            skus_state[sku] = {
+                "in_view": False,
+                "not_in_view_since": state.get("not_in_view_since"),
+                "last_seen_units": state.get("last_seen_units"),
+                "last_seen_at": state.get("last_seen_at"),
+                "camera": state.get("camera"),
+            }
+        else:
+            level = state.get("L")
+            skus_state[sku] = {
+                "in_view": False,
+                "not_in_view_since": check["bucket"],
+                "last_seen_units": level if level is not None else state.get("prev"),
+                "last_seen_at": state.get("prev_bucket"),
+                "camera": state.get("camera"),
+            }
+
+
+def see_skus(skus_state: dict[str, dict], check: dict, expected: list[str]) -> None:
+    """Name the camera that counted each expected product surely (first camera in name order). A product that was not
+    in view comes back fresh and in view; one with a state keeps it and gets its camera; a new one gets {"camera"}."""
+    claimed: set[str] = set()
+    for camera in sorted(check.get("confident_by_camera") or {}):
+        for sku in expected:
+            if sku in claimed or not _seen_by(check, camera, sku):
+                continue
+            claimed.add(sku)
+            state = skus_state.get(sku)
+            if state is None:
+                skus_state[sku] = {"camera": camera}
+            elif not in_view(state):
+                skus_state[sku] = {"in_view": True, "camera": camera}
+            else:
+                state["camera"] = camera
+
+
+SKU_FIELDS = ("checks", "available", "units_sum", "oos_started", "restock_units", "restock_events", "unseen_checks")
 
 
 def _blank() -> dict[str, int]:
@@ -325,8 +413,8 @@ def _result(
 
 
 def rollup(checks: list[dict], events: list[dict]) -> dict[str, Any]:
-    """Sum of one hour: counted checks (open, measurable, with expected SKUs) per SKU, the store's largest total in
-    one check, SKUs seen confidently in any check, and the hour's OOS and RESTOCKED events. An expected SKU missing
+    """Sum of one hour: counted checks (open, measurable, with expected SKUs) per SKU (a SKU in the check's
+    not_in_view only adds unseen_checks, and is left out of the check's total), the store's largest total in one check, SKUs seen confidently in any check, and the hour's OOS and RESTOCKED events. An expected SKU missing
     from a check's counts is a check without stock. unmeasured_checks: open checks with expected SKUs that could not
     be measured; checks stored before measurable existed were measured."""
     skus: dict[str, dict[str, int]] = defaultdict(_blank)
@@ -341,7 +429,11 @@ def rollup(checks: list[dict], events: list[dict]) -> dict[str, Any]:
             continue
         counted += 1
         total = 0
+        not_in_view = set(check.get("not_in_view") or [])
         for sku in expected:
+            if sku in not_in_view:
+                skus[sku]["unseen_checks"] += 1
+                continue
             units = int((check.get("counts") or {}).get(sku, 0))
             row = skus[sku]
             row["checks"] += 1
