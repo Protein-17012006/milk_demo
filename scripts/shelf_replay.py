@@ -6,7 +6,8 @@ store list, the latest-stock rows and the captures from DynamoDB, and writes not
 
 Both passes run the same captures through shelf.build_check and ingest.handler._apply_check, in bucket order, with
 the store's saved shelf plan. The old rule is emulated in process: shelf.sees_shelf is replaced by shelf.sees_display
-and shelf.ARRANGEMENT_JUMP_PX by infinity while its checks are built, then both are put back.
+and shelf.ARRANGEMENT_JUMP_PX by infinity for the whole old pass, then both are put back. An arrangement change is
+a check _apply_check marked arrangement_changed (open and measured), as the tick records it.
 """
 
 from __future__ import annotations
@@ -81,10 +82,11 @@ def run_pass(handler, shelf, store: dict, by_bucket: dict, plan_of, rule: str) -
                 check, store, plan, skus_state, last_measured, since, arrangements
             )
             events += [{**e, "bucket": bucket} for e in got]
-            for cam, pos in sorted((check.get("positions") or {}).items()):
-                if cam in before and shelf.far_apart(before[cam], pos):
-                    a = before[cam]
-                    moves.append((bucket, cam, math.hypot(a[0] - pos[0], a[1] - pos[1]), a, pos))
+            if check.get("arrangement_changed"):  # the cameras _apply_check gave a new arrangement at this check
+                for cam, now in sorted(arrangements.items()):
+                    if cam in before and now["since"] == bucket:
+                        a, pos = before[cam], now["position"]
+                        moves.append((bucket, cam, math.hypot(a[0] - pos[0], a[1] - pos[1]), a, pos))
             if "not_in_view" in check:  # only an open, measured check says who is in view
                 views.append((bucket, set(check["not_in_view"])))
     finally:
