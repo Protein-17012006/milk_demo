@@ -1324,6 +1324,159 @@ def test_the_tick_after_a_tick_remembers_what_started(monkeypatch: pytest.Monkey
     assert _event_keys() == [f"20261121-1410#{CHEESE}#OOS"]
 
 
+def _sure_at(x: int, counts: list[tuple[str, int]]) -> list[dict]:
+    """Sure boxes (conf 0.9) of each (model label, units), side by side from x, as the worker sends detections."""
+    boxes, k = [], 0
+    for label, units in counts:
+        for _ in range(units):
+            boxes.append({"sku_id": label, "conf": 0.9, "box": [x + 60 * k, 20, 50, 80]})
+            k += 1
+    return boxes
+
+
+OLD_PLACE, NEW_PLACE = 1000, 200
+
+
+def _seen(ingest, hhmmss: str, x: int, counts: list[tuple[str, int]]) -> None:
+    """One capture of CAM-S01-A with its boxes at x; the zone check passes at the old place only."""
+    _ingest(
+        ingest,
+        "CAM-S01-A",
+        hhmmss,
+        counts,
+        detections=_sure_at(x, counts),
+        display_visible=x == OLD_PLACE,
+    )
+
+
+def _display_moves(ingest) -> None:
+    """Cheese 5 and hot 3 at the old place at 14:00 and 14:05; cheese only at the new place at 14:10 and 14:15."""
+    both = [("cheese145", 5), ("hot160", 3)]
+    _seen(ingest, "140010", OLD_PLACE, both)
+    _seen(ingest, "140510", OLD_PLACE, both)
+    _seen(ingest, "141010", NEW_PLACE, [("cheese145", 5)])
+    _seen(ingest, "141510", NEW_PLACE, [("cheese145", 5)])
+
+
+@mock_aws
+def test_a_moved_display_keeps_counting_what_is_in_view(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE, HOT))
+    _display_moves(ingest)
+    _tick(ingest)
+    state = _shelf("state")
+    assert {k: state["skus"][HOT][k] for k in ("in_view", "not_in_view_since", "last_seen_units", "last_seen_at")} == {
+        "in_view": False,
+        "not_in_view_since": "20261121-1410",
+        "last_seen_units": 3,
+        "last_seen_at": "20261121-1405",
+    }
+    assert state["skus"][CHEESE]["in_view"] is True and state["skus"][CHEESE]["L"] == 5
+    assert _event_keys() == []
+    check = _shelf("check#20261121-1410")
+    assert check["arrangement_changed"] is True and check["not_in_view"] == [HOT]
+    assert _shelf("hour#20261121-14")["skus"][HOT]["unseen_checks"] == 2
+    assert state["arrangements"]["CAM-S01-A"]["since"] == "20261121-1410"
+
+
+@mock_aws
+def test_after_a_gap_the_same_place_keeps_an_out_of_stock(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE,))
+    both = [("cheese145", 5), ("hot160", 3)]
+    hot = [("hot160", 3)]
+    _seen(ingest, "140010", OLD_PLACE, both)
+    _seen(ingest, "140510", OLD_PLACE, both)
+    _seen(ingest, "141010", OLD_PLACE, hot)
+    _seen(ingest, "141510", OLD_PLACE, hot)
+    _seen(ingest, "153010", OLD_PLACE + 10, hot)
+    _seen(ingest, "153510", OLD_PLACE + 10, hot)
+    _tick(ingest, now="2026-11-21T15:42:00+07:00")
+    assert _event_keys() == [f"20261121-1410#{CHEESE}#OOS"]
+    assert _shelf("state")["skus"][CHEESE]["status"] == "OOS"
+
+
+@mock_aws
+def test_moving_away_and_back_makes_no_depleted_or_restock(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE,))
+    _seen(ingest, "140010", OLD_PLACE, [("cheese145", 6)])
+    _seen(ingest, "140510", OLD_PLACE, [("cheese145", 6)])
+    _seen(ingest, "141010", NEW_PLACE, [("cheese145", 2), ("hot160", 3)])
+    _seen(ingest, "141510", NEW_PLACE, [("cheese145", 2), ("hot160", 3)])
+    _seen(ingest, "142010", OLD_PLACE, [("cheese145", 6)])
+    _seen(ingest, "142510", OLD_PLACE, [("cheese145", 6)])
+    _tick(ingest, now="2026-11-21T14:32:00+07:00")
+    assert _event_keys() == []
+
+
+@mock_aws
+def test_a_product_seen_again_after_a_move_comes_back_without_an_event(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE, HOT))
+    _display_moves(ingest)
+    both = [("cheese145", 5), ("hot160", 4)]
+    _seen(ingest, "142010", NEW_PLACE, both)
+    _seen(ingest, "142510", NEW_PLACE, both)
+    _tick(ingest, now="2026-11-21T14:32:00+07:00")
+    hot = _shelf("state")["skus"][HOT]
+    assert hot["in_view"] is True and hot["L"] == 4 and not hot.get("not_in_view_since")
+    assert _event_keys() == []
+
+
+@mock_aws
+def test_a_product_out_of_stock_when_the_display_moves_keeps_zero_as_last_seen(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE, HOT))
+    both = [("cheese145", 5), ("hot160", 3)]
+    cheese = [("cheese145", 5)]
+    _seen(ingest, "140010", OLD_PLACE, both)
+    _seen(ingest, "140510", OLD_PLACE, both)
+    _seen(ingest, "141010", OLD_PLACE, cheese)
+    _seen(ingest, "141510", OLD_PLACE, cheese)
+    _seen(ingest, "142010", NEW_PLACE, cheese)
+    _seen(ingest, "142510", NEW_PLACE, cheese)
+    _tick(ingest, now="2026-11-21T14:32:00+07:00")
+    hot = _shelf("state")["skus"][HOT]
+    assert (hot["in_view"], hot["last_seen_units"], hot.get("status")) == (False, 0, None)
+    assert _event_keys() == [f"20261121-1410#{HOT}#OOS"]
+
+
+@mock_aws
+def test_checks_outside_opening_hours_do_not_set_the_arrangement(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan(open_time="14:10", close_time="22:00", expected=(CHEESE,))
+    cheese = [("cheese145", 5)]
+    _seen(ingest, "140010", NEW_PLACE, cheese)
+    _seen(ingest, "140510", NEW_PLACE, cheese)
+    _seen(ingest, "141010", OLD_PLACE, cheese)
+    _seen(ingest, "141510", OLD_PLACE, cheese)
+    _tick(ingest)
+    assert all(
+        not (_shelf(f"check#20261121-{b}") or {}).get("arrangement_changed") for b in ("1400", "1405", "1410", "1415")
+    )
+    assert _shelf("state")["arrangements"]["CAM-S01-A"]["since"] == "20261121-1410"
+
+
+@mock_aws
+def test_a_recompute_finds_the_same_moves_as_the_tick(monkeypatch: pytest.MonkeyPatch):
+    _, ingest = _backend(monkeypatch)
+    _shelf_plan(expected=(CHEESE, HOT))
+    _display_moves(ingest)
+    _tick(ingest)
+    view_keys = ("in_view", "not_in_view_since", "last_seen_units", "last_seen_at")
+    before = {k: _shelf("state")["skus"][HOT][k] for k in view_keys}
+    events = _event_keys()
+    _shelf_plan(expected=(CHEESE, HOT), shelf_recompute_requested_at="2026-11-21T14:22:30+07:00")
+    _tick(ingest)
+    store = _table("test-store-list").get_item(Key={"store_id": "DEMO-S01"})["Item"]
+    assert "shelf_recompute_requested_at" not in store
+    assert {k: _shelf("state")["skus"][HOT][k] for k in view_keys} == before
+    assert _event_keys() == events == []
+    assert _shelf("check#20261121-1410")["arrangement_changed"] is True
+    assert _shelf("state")["arrangements"]["CAM-S01-A"]["since"] == "20261121-1410"
+
+
 PLAN_PATH = "/v1/stores/DEMO-S01/shelf-plan"
 
 

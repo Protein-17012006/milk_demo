@@ -998,19 +998,38 @@ def _plan_joined(store: dict[str, Any]) -> dict[str, str]:
 
 
 def _apply_check(
-    check: dict, store: dict, plan: list[str], skus_state: dict, last_measured: str | None, since: dict[str, str]
+    check: dict,
+    store: dict,
+    plan: list[str],
+    skus_state: dict,
+    last_measured: str | None,
+    since: dict[str, str],
+    arrangements: dict[str, dict],
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Mark the check open or not and record the SKUs it was counted against: the plan's SKUs that have started
-    (shelf.expected_at; since is updated). An open, measured check with such SKUs steps the state of each, with the
-    gap since the last measured check if there is one; any other check leaves the state alone. Returns the events
-    and the last measured bucket. Checks stored before measurable existed were measured."""
+    (shelf.expected_at; since is updated). An open, measured check follows where each camera's cans stand
+    (arrangements, changed in place): a move marks the products not seen at the new place as not in view
+    (check["arrangement_changed"]), and check["not_in_view"] lists the expected products that are not in view.
+    Each expected product that is in view steps its state, with the gap since the last measured check if there is
+    one; any other check leaves the state and the arrangements alone. Returns the events and the last measured
+    bucket. Checks stored before measurable existed were measured."""
     check["open"] = shelf.is_open(check["bucket"], store.get("open_time"), store.get("close_time"))
     expected = check["expected"] = shelf.expected_at(check, plan, since, _plan_joined(store))
-    if not (check["open"] and check.get("measurable", True) and expected):
+    if not (check["open"] and check.get("measurable", True)):
+        return [], last_measured
+    moved = shelf.step_arrangements(arrangements, check)
+    if moved:
+        shelf.move_skus(skus_state, moved, check)
+        check["arrangement_changed"] = True
+    shelf.see_skus(skus_state, check, expected)
+    check["not_in_view"] = [sku for sku in expected if not shelf.in_view(skus_state.get(sku))]
+    if not expected:
         return [], last_measured
     gap = shelf.gap_between(last_measured, check["bucket"])
     events = []
     for sku in expected:
+        if sku in check["not_in_view"]:
+            continue
         state, event = shelf.step_state(skus_state.get(sku), int(check["counts"].get(sku, 0)), check["bucket"], gap)
         skus_state[sku] = state
         if event is not None:
@@ -1199,6 +1218,7 @@ def _shelf_store_tick(s3_client, ddb_resource, store: dict[str, Any], now_utc: d
     expected = _expected_skus(ddb_resource, store, now_utc)
     skus_state = dict((state_item or {}).get("skus") or {})
     since = dict((state_item or {}).get("since") or {})
+    arrangements = dict((state_item or {}).get("arrangements") or {})
     last_measured = (state_item or {}).get("last_measured_bucket")
     events_table = ddb_resource.Table(SHELF_EVENTS_TABLE)
     hours: set[str] = set()
@@ -1207,7 +1227,7 @@ def _shelf_store_tick(s3_client, ddb_resource, store: dict[str, Any], now_utc: d
     while bucket <= last:
         if by_bucket.get(bucket):
             check = shelf.build_check(bucket, by_bucket[bucket])
-            events, last_measured = _apply_check(check, store, expected, skus_state, last_measured, since)
+            events, last_measured = _apply_check(check, store, expected, skus_state, last_measured, since, arrangements)
             table.put_item(Item=_check_item(store_id, check))
             for event in events:
                 event.update(_event_photos(s3_client, ddb_resource, store_id, event))
@@ -1225,6 +1245,7 @@ def _shelf_store_tick(s3_client, ddb_resource, store: dict[str, Any], now_utc: d
             "last_measured_bucket": last_measured,
             "skus": skus_state,
             "since": since,
+            "arrangements": arrangements,
         }
     )
     try:  # only one run moves a store's state on; an overlapping run stops here
@@ -1308,6 +1329,7 @@ def shelf_recompute(s3_client, ddb_resource, store_id: str, days: int, now_utc: 
         expected = sorted({s for b, c in checks.items() if b >= suggest_from for s in c.get("confident_skus") or []})
 
     skus_state: dict[str, Any] = {}
+    arrangements: dict[str, dict] = {}
     last_measured: str | None = None
     hours: set[str] = set()
     replayed: dict[str, dict[str, Any]] = {}  # the checks as this run writes them, for the event photos
@@ -1319,13 +1341,16 @@ def shelf_recompute(s3_client, ddb_resource, store_id: str, days: int, now_utc: 
         "image_key",
         "source_bucket",
         "frame_boxes",
+        "positions",
+        "confident_by_camera",
+        "captures_zone",
     )
     with table.batch_writer() as writer, events_table.batch_writer() as event_writer:
         for bucket in sorted(checks):
             stored = checks[bucket]
             check = {k: stored[k] for k in ("bucket", "counts", "captures", "cameras", "confident_skus")}
             check.update({k: stored[k] for k in display_fields if k in stored})
-            events, last_measured = _apply_check(check, store, expected, skus_state, last_measured, since)
+            events, last_measured = _apply_check(check, store, expected, skus_state, last_measured, since, arrangements)
             replayed[bucket] = check
             for event in events:
                 event.update(kept_photos.get(event["event_key"], {}))
@@ -1336,7 +1361,7 @@ def shelf_recompute(s3_client, ddb_resource, store_id: str, days: int, now_utc: 
             writer.put_item(Item=_check_item(store_id, check))
             hours.add(bucket[:11])
     state = {"store_id": store_id, "key": "state", "last_bucket": last, "last_measured_bucket": last_measured}
-    table.put_item(Item=to_dynamodb_safe({**state, "skus": skus_state, "since": since}))
+    table.put_item(Item=to_dynamodb_safe({**state, "skus": skus_state, "since": since, "arrangements": arrangements}))
     _write_rollups(ddb_resource, store_id, hours)
     return {"action": "shelf_recompute", "store_id": store_id, "checks": len(checks), "hours": len(hours)}
 
