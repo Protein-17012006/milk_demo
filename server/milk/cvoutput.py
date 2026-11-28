@@ -60,6 +60,7 @@ class Detection:
     confidence: float
     box: tuple[int, int, int, int]  # x, y, width, height in source pixels
     method: str = "Visual"
+    unsure: bool = False  # the gallery could not confirm the name; the detector's name is kept
 
 
 @dataclass(frozen=True)

@@ -17,110 +17,30 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import Counter
-from dataclasses import dataclass
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
-MIN_IMAGES = 20
-K = 10
-MIN_SHARE = 0.6
-MIN_VOTES = 3
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "server"))
+
+from milk.gallery import (  # noqa: E402,F401  the read rule lives in the worker's code; re-exported for the tools
+    MIN_IMAGES,
+    MIN_SHARE,
+    MIN_VOTES,
+    Gallery,
+    GalleryVote,
+    K,
+    _grey_world,
+    colour,
+    crop_of,
+    mean_colour,
+    read,
+)
+
 AUDITS_TABLE = "milk-backend-development-audits"
 REGION_NAME = "ap-southeast-1"
-
-
-def _grey_world(img: np.ndarray) -> np.ndarray:
-    m = img.reshape(-1, 3).mean(axis=0)
-    return np.clip(img * (m.mean() / np.maximum(m, 1)), 0, 255).astype(np.uint8)
-
-
-def colour(crop: np.ndarray) -> np.ndarray:
-    """Unit 144-vector of the crop's middle colours."""
-    import cv2
-
-    h, w = crop.shape[:2]
-    mid = _grey_world(crop[int(h * 0.15) : int(h * 0.85), int(w * 0.2) : int(w * 0.8)])
-    hsv = cv2.cvtColor(mid, cv2.COLOR_BGR2HSV)
-    hist = cv2.calcHist([hsv], [0, 1], None, [18, 8], [0, 180, 0, 256]).ravel()
-    hist = np.sqrt(hist / max(float(hist.sum()), 1.0))
-    return hist / max(float(np.linalg.norm(hist)), 1e-9)
-
-
-def mean_colour(feats: list[np.ndarray]) -> np.ndarray | None:
-    """The colour of a can seen in several crops: their mean, of unit length again; None when there is no crop."""
-    if not feats:
-        return None
-    m = np.mean(np.stack(feats), axis=0)
-    return m / max(float(np.linalg.norm(m)), 1e-9)
-
-
-@dataclass
-class Gallery:
-    features: np.ndarray
-    labels: np.ndarray
-    sources: np.ndarray
-    built_at: str
-    none_threshold: float | None = None
-    objects: np.ndarray | None = None  # the can each crop shows: one truth box cut from many frames is one can
-
-    def save(self, path: Path) -> None:
-        np.savez(
-            path,
-            features=self.features,
-            labels=self.labels.astype(str),
-            sources=self.sources.astype(str),
-            built_at=np.array(self.built_at),
-            none_threshold=np.array(np.nan if self.none_threshold is None else self.none_threshold),
-            objects=(self.objects if self.objects is not None else self.sources).astype(str),
-        )
-
-    @classmethod
-    def load(cls, path: Path) -> Gallery:
-        d = np.load(path, allow_pickle=False)
-        nt = float(d["none_threshold"])
-        objects = d["objects"] if "objects" in d.files else None
-        return cls(d["features"], d["labels"], d["sources"], str(d["built_at"]), None if np.isnan(nt) else nt, objects)
-
-    def counts(self) -> dict[str, int]:
-        """Cans per label (MIN_IMAGES counts cans, not crops); crops when the gallery does not know its cans."""
-        if self.objects is None:
-            return dict(Counter(self.labels.tolist()))
-        return dict(Counter(label for label, _ in set(zip(self.labels.tolist(), self.objects.tolist(), strict=True))))
-
-
-@dataclass(frozen=True)
-class GalleryVote:
-    sku: str | None
-    share: float
-    votes: int
-    none_hit: bool
-
-
-def read(gallery: Gallery, feature: np.ndarray, k: int = K) -> GalleryVote:
-    """The flavour the k nearest crops name, or sku None when they are not sure enough (see the module text)."""
-    if not len(gallery.labels):
-        return GalleryVote(None, 0.0, 0, False)
-    sims = gallery.features @ feature
-    idx = np.argsort(-sims)[:k]
-    weight: Counter = Counter()
-    count: Counter = Counter()
-    for i in idx:
-        weight[gallery.labels[i]] += max(float(sims[i]), 0.0)
-        count[gallery.labels[i]] += 1
-    top, top_weight = weight.most_common(1)[0]
-    share = top_weight / max(sum(weight.values()), 1e-9)
-    counts = gallery.counts()
-    sure = top != "none" and share >= MIN_SHARE and count[top] >= MIN_VOTES and counts.get(top, 0) >= MIN_IMAGES
-    first = idx[0]
-    none_hit = (
-        gallery.none_threshold is not None
-        and gallery.labels[first] == "none"
-        and float(sims[first]) >= gallery.none_threshold
-    )
-    return GalleryVote(top if sure else None, share, count[top], bool(none_hit))
 
 
 def trn_rows(audits: list[dict]) -> list[tuple[str, list[int], str]]:
@@ -142,12 +62,6 @@ def trn_rows(audits: list[dict]) -> list[tuple[str, list[int], str]]:
             if label:
                 out.append((a["capture_id"], [int(x) for x in b["box"]], label))
     return out
-
-
-def crop_of(image: np.ndarray, box) -> np.ndarray | None:
-    x, y, w, h = (int(round(v)) for v in box)
-    crop = image[max(y, 0) : y + h, max(x, 0) : x + w]
-    return crop if crop.size and crop.shape[0] >= 4 and crop.shape[1] >= 4 else None
 
 
 def build(
